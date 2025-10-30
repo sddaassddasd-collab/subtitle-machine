@@ -883,26 +883,18 @@ const ControlPage = () => {
                   }`}
                   contentEditable={editingIndex === index}
                   suppressContentEditableWarning
-                onInput={(event) => {
-                  if (!socketRef.current || !sessionId) return
-                  const rawText = event.currentTarget.textContent ?? ''
-                  socketRef.current.emit('updateLine', {
-                    sessionId,
-                    index,
-                    text: rawText,
-                  })
-                }}
-                onDoubleClick={(event) => {
-                  event.stopPropagation()
-                  handleLineDoubleClick(index)
-                }}
-                onKeyDown={(event) => handleLineKeyDown(event, index)}
-              >
-                {lineText || '（空白）'}
+                  onBlur={(event) => handleLineBlur(event, index)}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation()
+                    handleLineDoubleClick(index)
+                  }}
+                  onKeyDown={(event) => handleLineKeyDown(event, index)}
+                >
+                  {editingIndex === index ? lineText : lineText || '（空白）'}
+                </div>
               </div>
-            </div>
-          )
-        })}
+            )
+          })}
         </div>
       </section>
     </div>
