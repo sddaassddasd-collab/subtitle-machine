@@ -545,7 +545,18 @@ function normalizeScriptLines(entries, options = {}) {
     const expanded = expandStageDirectionSegments(base);
     expanded.forEach((item) => {
       const text = sanitizeLineText(item.text);
-      if (!text) return;
+      if (!text) {
+        if (keepEmpty) {
+          normalized.push({
+            text: '',
+            type:
+              item.type === LINE_TYPES.DIRECTION
+                ? LINE_TYPES.DIRECTION
+                : LINE_TYPES.DIALOGUE,
+          });
+        }
+        return;
+      }
       const cleanedText = text
         .replace(/^[」』》〉\]\)}]+/, '')
         .replace(/[「『《〈\[\(]+$/, '')

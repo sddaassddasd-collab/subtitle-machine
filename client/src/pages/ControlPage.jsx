@@ -299,7 +299,7 @@ const ControlPage = () => {
   const handleLineBlur = (event, index) => {
     if (editingIndex !== index) return
     setEditingIndex(null)
-    const newText = event.currentTarget.textContent?.trim() ?? ''
+    const newText = event.currentTarget.textContent ?? ''
     if (!socketRef.current || !sessionId) return
     const currentLine = lines[index]
     const currentText = typeof currentLine === 'object' ? currentLine?.text ?? '' : ''
