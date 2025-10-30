@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { io } from 'socket.io-client'
 
@@ -15,6 +15,8 @@ const ViewerPage = () => {
   const [line, setLine] = useState(null)
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [error, setError] = useState('')
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const containerRef = useRef(null)
 
   useEffect(() => {
     if (!sessionId) return
@@ -86,6 +88,25 @@ const ViewerPage = () => {
     }
   }, [sessionId])
 
+  useEffect(() => {
+    const handler = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement))
+    }
+
+    document.addEventListener('fullscreenchange', handler)
+    return () => document.removeEventListener('fullscreenchange', handler)
+  }, [])
+
+  const toggleFullscreen = () => {
+    const container = containerRef.current
+    if (!container) return
+
+    if (!document.fullscreenElement) {
+      container.requestFullscreen().catch(() => {})
+    } else {
+      document.exitFullscreen().catch(() => {})
+    }
+  }
   if (error) {
     return (
       <div className="viewer-page">
@@ -109,7 +130,15 @@ const ViewerPage = () => {
     : '字幕暫停中'
 
   return (
-    <div className="viewer-page">
+    <div className="viewer-page" ref={containerRef}>
+      <button
+        type="button"
+        className="fullscreen-button"
+        onClick={toggleFullscreen}
+        aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+      >
+        ⛶
+      </button>
       <div className={textClass}>{displayText}</div>
     </div>
   )

@@ -370,6 +370,7 @@
   justify-content: center;
   padding: 2rem 1.5rem;
   text-align: center;
+  position: relative;
 }
 
 .viewer-text {
@@ -385,6 +386,34 @@
 
 .viewer-muted {
   opacity: 0.35;
+}
+
+.fullscreen-button {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  border: none;
+  background: rgba(148, 163, 184, 0.2);
+  color: #f8fafc;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.fullscreen-button:hover {
+  background: rgba(59, 130, 246, 0.4);
+  transform: scale(1.05);
+}
+
+.fullscreen-button:active {
+  transform: scale(0.98);
 }
 
 .no-session {
