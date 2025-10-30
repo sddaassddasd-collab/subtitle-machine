@@ -1245,44 +1245,23 @@ io.on('connection', (socket) => {
       Number.isInteger(index) &&
       index >= 0 &&
       index < session.lines.length &&
-      (typeof text === 'string' || typeof type === 'string')
+      typeof text === 'string'
     ) {
       const existingRaw = session.lines[index];
-      const sanitized = typeof text === 'string' ? sanitizeLineText(text) : null;
+      const sanitized = sanitizeLineText(text);
       const explicitType = clampLineType(type);
+      const previousType =
+        existingRaw &&
+        typeof existingRaw === 'object' &&
+        typeof existingRaw.type === 'string'
+          ? clampLineType(existingRaw.type)
+          : null;
+      const nextType = explicitType ?? previousType ?? LINE_TYPES.DIALOGUE;
 
-      let nextType = explicitType;
-      if (!nextType) {
-        if (
-          existingRaw &&
-          typeof existingRaw === 'object' &&
-          typeof existingRaw.type === 'string'
-        ) {
-          nextType =
-            existingRaw.type === LINE_TYPES.DIRECTION
-              ? LINE_TYPES.DIRECTION
-              : LINE_TYPES.DIALOGUE;
-        } else if (typeof existingRaw === 'string') {
-          nextType = isLikelyDirection(existingRaw)
-            ? LINE_TYPES.DIRECTION
-            : LINE_TYPES.DIALOGUE;
-        } else if (sanitized && isLikelyDirection(sanitized)) {
-          nextType = LINE_TYPES.DIRECTION;
-        } else {
-          nextType = LINE_TYPES.DIALOGUE;
-        }
-      }
-
-      session.lines[index] = {
-        text:
-          sanitized ??
-          sanitizeLineText(
-            typeof existingRaw === 'string'
-              ? existingRaw
-              : existingRaw?.text ?? '',
-          ),
-        type: nextType,
-      };
+      session.lines[index] =
+        existingRaw && typeof existingRaw === 'object'
+          ? { ...existingRaw, text: sanitized, type: nextType }
+          : { text: sanitized, type: nextType };
 
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);

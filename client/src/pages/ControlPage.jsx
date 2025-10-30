@@ -307,154 +307,26 @@ const ControlPage = () => {
     setEditingIndex(null)
     const newText = event.currentTarget.textContent?.trim() ?? ''
     if (!socketRef.current || !sessionId) return
-    const currentText = lines[index]?.text ?? ''
-    const currentType = lines[index]?.type ?? 'dialogue'
+    const currentLine = lines[index]
+    const currentText = typeof currentLine === 'object' ? currentLine?.text ?? '' : ''
     if (newText === currentText) return
 
     socketRef.current.emit('updateLine', {
       sessionId,
       index,
       text: newText,
-      type: currentType,
     })
     setLines((prev) => {
       const next = [...prev]
-      const previous = next[index] ?? { text: '', type: 'dialogue' }
-      next[index] = { ...previous, text: newText, type: currentType }
+      const previous = next[index]
+      if (typeof previous === 'object' && previous) {
+        next[index] = { ...previous, text: newText }
+      } else {
+        next[index] = { text: newText }
+      }
       return next
     })
     setStatus({ kind: 'success', message: '字幕內容已更新' })
-  }
-
-  const handleLineKeyDown = (event, index) => {
-    if (event.key !== 'Enter') {
-      return
-    }
-
-    if (!socketRef.current || !sessionId) return
-    const node = lineRefs.current[index]
-    if (!node) return
-
-    if (
-      typeof window === 'undefined' ||
-      typeof document === 'undefined' ||
-      !window.getSelection
-    ) {
-      return
-    }
-
-    const selection = window.getSelection()
-    if (!selection || selection.rangeCount === 0) return
-    if (!selection.isCollapsed) return
-
-    const range = selection.getRangeAt(0)
-    if (!node.contains(range.endContainer)) {
-      return
-    }
-
-    const preRange = range.cloneRange()
-    preRange.selectNodeContents(node)
-    preRange.setEnd(range.endContainer, range.endOffset)
-    const caretOffset = preRange.toString().length
-
-    const currentText = node.textContent ?? ''
-    if (caretOffset <= 0 || caretOffset >= currentText.length) {
-      return
-    }
-
-    const beforeText = currentText.slice(0, caretOffset).trim()
-    const afterText = currentText.slice(caretOffset).trim()
-
-    if (!beforeText || !afterText) {
-      return
-    }
-
-    event.preventDefault()
-
-    setLines((prev) => {
-      const next = [...prev]
-      const existing = prev[index] ?? { text: '', type: 'dialogue' }
-      const lineType =
-        existing.type === 'direction' ? 'direction' : 'dialogue'
-      next.splice(
-        index,
-        1,
-        { ...existing, text: beforeText, type: lineType },
-        { text: afterText, type: lineType },
-      )
-      return next
-    })
-
-    setCurrentIndex((prev) => {
-      if (prev > index) {
-        return prev + 1
-      }
-      return prev
-    })
-
-    setEditingIndex(index + 1)
-    setStatus({ kind: 'success', message: '字幕已分割' })
-    setAutoCenterEnabled(true)
-
-    socketRef.current.emit('splitLine', {
-      sessionId,
-      index,
-      beforeText,
-      afterText,
-    })
-  }
-
-  const handleToggleLineType = (event, index) => {
-    event.stopPropagation()
-    if (!socketRef.current || !sessionId) return
-    const currentLine = lines[index]
-    if (!currentLine) return
-
-    const nextType = currentLine.type === 'direction' ? 'dialogue' : 'direction'
-
-    setLines((prev) => {
-      const next = [...prev]
-      const existing = prev[index]
-      if (!existing) return prev
-      next[index] = { ...existing, type: nextType }
-      return next
-    })
-
-    socketRef.current.emit('setLineType', {
-      sessionId,
-      index,
-      type: nextType,
-    })
-
-    setStatus({
-      kind: 'success',
-      message: nextType === 'direction' ? '已標記為舞台指示' : '已標記為台詞',
-    })
-  }
-
-  const handleDeleteLine = (event, index) => {
-    event.stopPropagation()
-    if (!socketRef.current || !sessionId) return
-    if (!lines[index]) return
-
-    const nextLines = lines.filter((_, lineIndex) => lineIndex !== index)
-    setLines(nextLines)
-
-    setCurrentIndex((prev) => {
-      if (nextLines.length === 0) return 0
-      if (prev > index) return Math.max(prev - 1, 0)
-      return Math.min(prev, nextLines.length - 1)
-    })
-
-    setEditingIndex((prev) => {
-      if (prev == null) return prev
-      if (prev === index) return null
-      if (prev > index) return prev - 1
-      return prev
-    })
-
-    socketRef.current.emit('deleteLine', { sessionId, index })
-    setStatus({ kind: 'info', message: '字幕已刪除' })
   }
 
   const handleLineClick = (index) => {
@@ -469,26 +341,6 @@ const ControlPage = () => {
     setEditingIndex(index)
   }
 
-  const normalizeImportedLines = (rawLines) => {
-    if (!Array.isArray(rawLines)) return []
-    return rawLines
-      .map((line) => {
-        if (!line) return null
-        if (typeof line === 'string') {
-          const text = line.trim()
-          if (!text) return null
-          return { text, type: 'dialogue' }
-        }
-        const text =
-          typeof line.text === 'string' ? line.text.trim() : ''
-        if (!text) return null
-        const type =
-          line.type === 'direction' ? 'direction' : 'dialogue'
-        return { text, type }
-      })
-      .filter(Boolean)
-  }
-
   const handleImportJson = async (event) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -496,9 +348,7 @@ const ControlPage = () => {
     try {
       const content = await file.text()
       const parsed = JSON.parse(content)
-      const normalized = normalizeImportedLines(parsed)
-
-      if (!normalized.length) {
+      if (!Array.isArray(parsed) || parsed.length === 0) {
         throw new Error('檔案內容無有效字幕')
       }
 
@@ -507,7 +357,7 @@ const ControlPage = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ lines: normalized }),
+        body: JSON.stringify({ lines: parsed }),
       })
 
       if (!response.ok) {
@@ -822,42 +672,21 @@ const ControlPage = () => {
             </p>
           )}
           {lines.map((line, index) => {
-            const type = line?.type === 'direction' ? 'direction' : 'dialogue'
-            const typeLabel = type === 'direction' ? '舞台指示' : '台詞'
+            const lineText =
+              typeof line === 'string' ? line : line?.text ?? ''
+            const lineType =
+              typeof line === 'object' && line?.type === 'direction'
+                ? 'direction'
+                : ''
 
             return (
               <div
-                key={`${index}-${(line?.text || '').slice(0, 10)}`}
+                key={`${index}-${lineText.slice(0, 10)}`}
                 className={`script-line ${
                   currentIndex === index ? 'active' : ''
-                } ${type === 'direction' ? 'direction' : ''}`}
+                } ${lineType}`}
                 onClick={() => handleLineClick(index)}
               >
-                <div className="script-line-header">
-                  <span
-                    className={`script-line-type ${
-                      type === 'direction' ? 'type-direction' : 'type-dialogue'
-                    }`}
-                  >
-                    {typeLabel}
-                  </span>
-                  <div className="script-line-actions">
-                    <button
-                      type="button"
-                      className="line-action toggle"
-                      onClick={(event) => handleToggleLineType(event, index)}
-                    >
-                      {type === 'direction' ? '設為台詞' : '設為舞台指示'}
-                    </button>
-                    <button
-                      type="button"
-                      className="line-action delete"
-                      onClick={(event) => handleDeleteLine(event, index)}
-                    >
-                      刪除
-                    </button>
-                  </div>
-                </div>
                 <div
                   ref={(node) => {
                     if (node) {
@@ -876,9 +705,8 @@ const ControlPage = () => {
                     event.stopPropagation()
                     handleLineDoubleClick(index)
                   }}
-                  onKeyDown={(event) => handleLineKeyDown(event, index)}
                 >
-                  {line?.text || '（空白）'}
+                  {lineText || '（空白）'}
                 </div>
               </div>
             )
