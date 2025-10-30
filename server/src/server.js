@@ -486,12 +486,20 @@ function isLikelyDirection(text) {
   return false;
 }
 
-function normalizeLineEntry(entry) {
+function normalizeLineEntry(entry, keepEmpty = false) {
   if (entry == null) return null;
 
   if (typeof entry === 'string') {
     const text = sanitizeLineText(entry);
-    if (!text) return null;
+    if (!text) {
+      if (keepEmpty) {
+        return {
+          text: '',
+          type: LINE_TYPES.DIALOGUE,
+        };
+      }
+      return null;
+    }
     return {
       text,
       type: isLikelyDirection(text) ? LINE_TYPES.DIRECTION : LINE_TYPES.DIALOGUE,
@@ -502,7 +510,7 @@ function normalizeLineEntry(entry) {
     const text = sanitizeLineText(
       entry.text ?? entry.line ?? entry.caption ?? '',
     );
-    if (!text) return null;
+    if (!text && !keepEmpty) return null;
     const rawType = clampLineType(
       entry.type ?? entry.kind ?? entry.category ?? '',
     );
@@ -531,7 +539,7 @@ function normalizeScriptLines(entries, options = {}) {
   const normalized = [];
 
   entries.forEach((entry) => {
-    const base = normalizeLineEntry(entry);
+    const base = normalizeLineEntry(entry, keepEmpty);
     if (!base) return;
 
     const expanded = expandStageDirectionSegments(base);
