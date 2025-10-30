@@ -43,6 +43,7 @@ const ControlPage = () => {
   const fileInputRef = useRef(null)
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
+  const skipBlurRef = useRef(new Set())
 
   useEffect(() => {
     if (editingIndex == null) return
@@ -297,6 +298,10 @@ const ControlPage = () => {
   }
 
   const handleLineBlur = (event, index) => {
+    if (skipBlurRef.current.has(index)) {
+      skipBlurRef.current.delete(index)
+      return
+    }
     if (editingIndex !== index) return
     setEditingIndex(null)
     const newText = event.currentTarget.textContent ?? ''
@@ -407,6 +412,8 @@ const ControlPage = () => {
     event.preventDefault()
 
     if (!afterText) {
+      skipBlurRef.current.add(index)
+
       setLines((prev) => {
         const next = [...prev]
         const existing = prev[index]
@@ -432,6 +439,8 @@ const ControlPage = () => {
       setStatus({ kind: 'info', message: '已新增空白字幕' })
       return
     }
+
+    skipBlurRef.current.add(index)
 
     setLines((prev) => {
       const next = [...prev]
