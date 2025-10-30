@@ -375,9 +375,14 @@ function isLikelyDirection(text) {
   if (!trimmed) return false;
 
   const bracketPattern = /^[（(【《〈「『\[{]+.*[）)】》〉」』\]}]+$/;
-  if (bracketPattern.test(trimmed)) {
-    return true;
-  }
+  const isBracketWrapped = bracketPattern.test(trimmed);
+  const innerBracketText = isBracketWrapped
+    ? trimmed
+        .replace(/^[（(【《〈「『\[{]+/, '')
+        .replace(/[）)】》〉」』\]}]+$/, '')
+        .trim()
+    : '';
+  const keywordTarget = innerBracketText || trimmed;
 
   const startsWithKeyword =
     /^(舞台|燈光|音效|鼓聲|掌聲|旁白|全場|幕前|幕後|場景|轉場|黑場|環境音|所有人|眾人|合唱|群眾|燈暗|燈亮|黑燈|大合唱|音樂|序曲|旁白聲)/;
@@ -392,7 +397,7 @@ function isLikelyDirection(text) {
     }
   }
 
-  const normalized = trimmed.replace(/[「」『』“”"'[\]【】（）()]/g, '');
+  const normalized = keywordTarget.replace(/[「」『』“”"'[\]【】（）()]/g, '');
   const directionKeywords = [
     '舞台',
     '燈光',
@@ -429,12 +434,25 @@ function isLikelyDirection(text) {
     '轉向',
     '指向',
     '望向',
+    '停頓',
   ];
 
   const keywordHits = directionKeywords.reduce(
     (count, keyword) => (normalized.includes(keyword) ? count + 1 : count),
     0,
   );
+
+  if (isBracketWrapped) {
+    if (
+      keywordHits >= 1 ||
+      /^(舞台|燈光|音效|鼓聲|掌聲|旁白|全場|眾人|合唱|群眾|黑場|轉場|燈暗|燈亮|黑燈|音樂|序曲|旁白聲|幕前|幕後)$/u.test(
+        keywordTarget,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
 
   if (!/["「」『』“”]/.test(trimmed) && keywordHits >= 2) {
     return true;
@@ -553,33 +571,43 @@ function expandStageDirectionSegments(entry) {
   let lastIndex = 0;
   let match;
 
-  while ((match = pattern.exec(text)) !== null) {
-    const leading = sanitizeLineText(text.slice(lastIndex, match.index));
-    if (leading) {
-      segments.push({
-        text: leading,
-        type: LINE_TYPES.DIALOGUE,
-      });
-    }
+  const pushSegment = (rawText, type) => {
+    const sanitized = sanitizeLineText(rawText);
+    if (!sanitized) return;
 
-    const directive = sanitizeLineText(match[0]);
-    if (directive) {
+    if (
+      type === LINE_TYPES.DIALOGUE &&
+      segments.length > 0 &&
+      segments[segments.length - 1].type === LINE_TYPES.DIALOGUE
+    ) {
+      const previous = segments[segments.length - 1];
+      const needsLeadingSpace =
+        /[\s\u3000，,。．\.、！!？?:：；;（(【「『《〈]$/.test(previous.text) ||
+        /^[\s\u3000，,。．\.、！!？?:：；;）)】」』》〉]/.test(sanitized)
+          ? ''
+          : ' ';
+      previous.text = `${previous.text}${needsLeadingSpace}${sanitized}`.trim();
+    } else {
       segments.push({
-        text: directive,
-        type: LINE_TYPES.DIRECTION,
+        text: sanitized,
+        type,
       });
     }
+  };
+
+  while ((match = pattern.exec(text)) !== null) {
+    pushSegment(text.slice(lastIndex, match.index), LINE_TYPES.DIALOGUE);
+
+    const directiveRaw = match[0];
+    const directiveType = isLikelyDirection(directiveRaw)
+      ? LINE_TYPES.DIRECTION
+      : LINE_TYPES.DIALOGUE;
+    pushSegment(directiveRaw, directiveType);
 
     lastIndex = pattern.lastIndex;
   }
 
-  const trailing = sanitizeLineText(text.slice(lastIndex));
-  if (trailing) {
-    segments.push({
-      text: trailing,
-      type: LINE_TYPES.DIALOGUE,
-    });
-  }
+  pushSegment(text.slice(lastIndex), LINE_TYPES.DIALOGUE);
 
   if (segments.length === 0) {
     return [entry];
