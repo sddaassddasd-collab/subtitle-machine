@@ -371,6 +371,8 @@
   padding: 2rem 1.5rem;
   text-align: center;
   position: relative;
+  width: 100%;
+  min-width: 100vw;
 }
 
 .viewer-text {
@@ -414,6 +416,20 @@
 
 .fullscreen-button:active {
   transform: scale(0.98);
+}
+
+@media (max-width: 600px) {
+  .viewer-page {
+    padding: 1.5rem 1rem;
+  }
+
+  .fullscreen-button {
+    top: 0.75rem;
+    right: 0.75rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    font-size: 1rem;
+  }
 }
 
 .no-session {
