@@ -346,6 +346,11 @@
   word-break: break-all;
 }
 
+.viewer-link span {
+  color: #0f172a;
+  font-weight: 600;
+}
+
 .viewer-link button {
   padding: 0.35rem 0.7rem;
   font-size: 0.8rem;

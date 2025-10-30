@@ -36,10 +36,7 @@ const ControlPage = () => {
   const [selectedFile, setSelectedFile] = useState(null)
   const [editingIndex, setEditingIndex] = useState(null)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
-  const [authenticated, setAuthenticated] = useState(() => {
-    if (typeof window === 'undefined') return false
-    return window.localStorage.getItem('subtitleMachineAccess') === 'true'
-  })
+  const [authenticated, setAuthenticated] = useState(false)
   const [accessInput, setAccessInput] = useState('')
   const [accessError, setAccessError] = useState('')
   const socketRef = useRef(null)
@@ -268,9 +265,6 @@ const ControlPage = () => {
       setAuthenticated(true)
       setAccessError('')
       setAccessInput('')
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem('subtitleMachineAccess', 'true')
-      }
     } else {
       setAccessError('密碼錯誤，請再試一次')
     }
@@ -364,7 +358,7 @@ const ControlPage = () => {
       return
     }
 
-    if (event.shiftKey) {
+    if (event.shiftKey || event.isComposing || event.keyCode === 229) {
       return
     }
 
