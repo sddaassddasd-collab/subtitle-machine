@@ -329,6 +329,166 @@ const ControlPage = () => {
     setStatus({ kind: 'success', message: '字幕內容已更新' })
   }
 
+  const handleToggleLineType = (event, index) => {
+    event.stopPropagation()
+    if (!socketRef.current || !sessionId) return
+    const currentLine = lines[index]
+    if (!currentLine || typeof currentLine !== 'object') return
+
+    const nextType =
+      currentLine.type === 'direction' ? 'dialogue' : 'direction'
+
+    setLines((prev) => {
+      const next = [...prev]
+      const existing = prev[index]
+      if (!existing || typeof existing !== 'object') return prev
+      next[index] = { ...existing, type: nextType }
+      return next
+    })
+
+    socketRef.current.emit('updateLine', {
+      sessionId,
+      index,
+      text: currentLine.text,
+      type: nextType,
+    })
+
+    setStatus({
+      kind: 'success',
+      message: nextType === 'direction' ? '已標記為舞台指示' : '已標記為台詞',
+    })
+  }
+
+  const handleLineKeyDown = (event, index) => {
+    if (event.key !== 'Enter') {
+      return
+    }
+
+    if (event.shiftKey) {
+      return
+    }
+
+    if (!socketRef.current || !sessionId) return
+    const node = lineRefs.current[index]
+    if (!node) return
+
+    if (
+      typeof window === 'undefined' ||
+      typeof document === 'undefined' ||
+      !window.getSelection
+    ) {
+      return
+    }
+
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0) return
+    if (!selection.isCollapsed) return
+
+    const range = selection.getRangeAt(0)
+    if (!node.contains(range.endContainer)) {
+      return
+    }
+
+    const preRange = range.cloneRange()
+    preRange.selectNodeContents(node)
+    preRange.setEnd(range.endContainer, range.endOffset)
+    const caretOffset = preRange.toString().length
+
+    const currentLine = lines[index]
+    const currentType =
+      typeof currentLine === 'object' && currentLine?.type === 'direction'
+        ? 'direction'
+        : 'dialogue'
+
+    const currentTextContent = node.textContent ?? ''
+    const beforeRaw = currentTextContent.slice(0, caretOffset)
+    const afterRaw = currentTextContent.slice(caretOffset)
+    const beforeText = beforeRaw.trim()
+    const afterText = afterRaw.trim()
+
+    if (!beforeText) {
+      return
+    }
+
+    event.preventDefault()
+
+    if (!afterText) {
+      setLines((prev) => {
+        const next = [...prev]
+        const existing = prev[index]
+        if (typeof existing === 'object' && existing) {
+          next[index] = { ...existing, text: beforeText }
+        } else {
+          next[index] = { text: beforeText, type: currentType }
+        }
+        next.splice(index + 1, 0, {
+          text: '',
+          type: currentType,
+        })
+        return next
+      })
+      setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
+      setEditingIndex(index + 1)
+      setAutoCenterEnabled(true)
+      socketRef.current.emit('insertLineAfter', {
+        sessionId,
+        index,
+        type: currentType,
+      })
+      setStatus({ kind: 'info', message: '已新增空白字幕' })
+      return
+    }
+
+    setLines((prev) => {
+      const next = [...prev]
+      const existing = prev[index]
+      if (typeof existing === 'object' && existing) {
+        next[index] = { ...existing, text: beforeText }
+      } else {
+        next[index] = { text: beforeText, type: currentType }
+      }
+      next.splice(index + 1, 0, {
+        text: afterText,
+        type: currentType,
+      })
+      return next
+    })
+
+    setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
+    setEditingIndex(index + 1)
+    setAutoCenterEnabled(true)
+    socketRef.current.emit('splitLine', {
+      sessionId,
+      index,
+      beforeText,
+      afterText,
+    })
+    setStatus({ kind: 'success', message: '字幕已分割' })
+  }
+
+  const handleDeleteLine = (event, index) => {
+    event.stopPropagation()
+    if (!socketRef.current || !sessionId) return
+    if (!lines[index]) return
+
+    setLines((prev) => prev.filter((_, lineIndex) => lineIndex !== index))
+    setCurrentIndex((prev) => {
+      if (prev > index) return Math.max(prev - 1, 0)
+      if (prev === index) {
+        return Math.max(index - 1, 0)
+      }
+      return prev
+    })
+    setEditingIndex((prev) => {
+      if (prev == null) return prev
+      if (prev === index) return null
+      if (prev > index) return prev - 1
+      return prev
+    })
+    socketRef.current.emit('deleteLine', { sessionId, index })
+    setStatus({ kind: 'info', message: '字幕已刪除' })
+  }
+
   const handleLineClick = (index) => {
     if (editingIndex === index) return
     if (index > 0) {
@@ -547,7 +707,7 @@ const ControlPage = () => {
             <label htmlFor="openai-key">OpenAI API Key</label>
             <input
               id="openai-key"
-              type="text"
+              type="password"
               placeholder="sk-..."
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value.trim())}
@@ -677,16 +837,45 @@ const ControlPage = () => {
             const lineType =
               typeof line === 'object' && line?.type === 'direction'
                 ? 'direction'
-                : ''
+                : 'dialogue'
 
             return (
               <div
                 key={`${index}-${lineText.slice(0, 10)}`}
                 className={`script-line ${
                   currentIndex === index ? 'active' : ''
-                } ${lineType}`}
+                } ${lineType === 'direction' ? 'direction' : ''}`}
                 onClick={() => handleLineClick(index)}
               >
+                {typeof line === 'object' && (
+                  <div className="script-line-header">
+                    <span
+                      className={`script-line-type ${
+                        lineType === 'direction'
+                          ? 'type-direction'
+                          : 'type-dialogue'
+                      }`}
+                    >
+                      {lineType === 'direction' ? '舞台指示' : '台詞'}
+                    </span>
+                    <div className="script-line-actions">
+                      <button
+                        type="button"
+                        className="line-action toggle"
+                        onClick={(event) => handleToggleLineType(event, index)}
+                      >
+                        {lineType === 'direction' ? '設為台詞' : '設為舞台指示'}
+                      </button>
+                      <button
+                        type="button"
+                        className="line-action delete"
+                        onClick={(event) => handleDeleteLine(event, index)}
+                      >
+                        刪除
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div
                   ref={(node) => {
                     if (node) {
@@ -700,17 +889,18 @@ const ControlPage = () => {
                   }`}
                   contentEditable={editingIndex === index}
                   suppressContentEditableWarning
-                  onBlur={(event) => handleLineBlur(event, index)}
-                  onDoubleClick={(event) => {
-                    event.stopPropagation()
-                    handleLineDoubleClick(index)
-                  }}
-                >
-                  {lineText || '（空白）'}
-                </div>
+                onBlur={(event) => handleLineBlur(event, index)}
+                onDoubleClick={(event) => {
+                  event.stopPropagation()
+                  handleLineDoubleClick(index)
+                }}
+                onKeyDown={(event) => handleLineKeyDown(event, index)}
+              >
+                {lineText || '（空白）'}
               </div>
-            )
-          })}
+            </div>
+          )
+        })}
         </div>
       </section>
     </div>

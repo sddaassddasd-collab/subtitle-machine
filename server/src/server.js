@@ -522,7 +522,8 @@ function normalizeLineEntry(entry) {
   return null;
 }
 
-function normalizeScriptLines(entries) {
+function normalizeScriptLines(entries, options = {}) {
+  const keepEmpty = Boolean(options.keepEmpty);
   if (!Array.isArray(entries)) {
     return [];
   }
@@ -541,9 +542,11 @@ function normalizeScriptLines(entries) {
         .replace(/^[」』》〉\]\)}]+/, '')
         .replace(/[「『《〈\[\(]+$/, '')
         .trim();
-      if (!cleanedText) return;
+      if (!cleanedText && !keepEmpty) return;
       if (!cleanedText.replace(/[\p{P}\p{S}]/gu, '').trim()) {
-        return;
+        if (!keepEmpty) {
+          return;
+        }
       }
       normalized.push({
         text: cleanedText,
@@ -555,7 +558,11 @@ function normalizeScriptLines(entries) {
     });
   });
 
-  return normalized;
+  if (keepEmpty) {
+    return normalized;
+  }
+
+  return normalized.filter((entry) => entry.text.length > 0);
 }
 
 function expandStageDirectionSegments(entry) {
@@ -696,7 +703,9 @@ function findBreakPosition(text, limit) {
 
 function ensureSessionLines(session) {
   if (!session) return [];
-  const normalized = normalizeScriptLines(session.lines || []);
+  const normalized = normalizeScriptLines(session.lines || [], {
+    keepEmpty: true,
+  });
   session.lines = normalized;
   return session.lines;
 }
@@ -1119,7 +1128,7 @@ app.put('/api/session/:sessionId/lines', (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  session.lines = normalizeScriptLines(lines);
+  session.lines = normalizeScriptLines(lines, { keepEmpty: true });
 
   if (session.currentIndex >= session.lines.length) {
     session.currentIndex = Math.max(session.lines.length - 1, 0);
@@ -1332,6 +1341,35 @@ io.on('connection', (socket) => {
     };
 
     session.lines.splice(index, 1, firstLine, secondLine);
+
+    if (session.currentIndex > index) {
+      session.currentIndex += 1;
+    }
+
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('insertLineAfter', ({ sessionId, index, type }) => {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
+      return;
+    }
+
+    const existing = session.lines[index];
+    const baseType =
+      clampLineType(type) ||
+      (existing && typeof existing === 'object'
+        ? clampLineType(existing.type)
+        : null) ||
+      LINE_TYPES.DIALOGUE;
+
+    session.lines.splice(index + 1, 0, {
+      text: '',
+      type: baseType,
+    });
 
     if (session.currentIndex > index) {
       session.currentIndex += 1;
