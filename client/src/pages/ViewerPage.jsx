@@ -90,21 +90,73 @@ const ViewerPage = () => {
 
   useEffect(() => {
     const handler = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement))
+      const active =
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      setIsFullscreen(Boolean(active))
     }
 
     document.addEventListener('fullscreenchange', handler)
-    return () => document.removeEventListener('fullscreenchange', handler)
+    document.addEventListener('webkitfullscreenchange', handler)
+    document.addEventListener('mozfullscreenchange', handler)
+    document.addEventListener('MSFullscreenChange', handler)
+    return () => {
+      document.removeEventListener('fullscreenchange', handler)
+      document.removeEventListener('webkitfullscreenchange', handler)
+      document.removeEventListener('mozfullscreenchange', handler)
+      document.removeEventListener('MSFullscreenChange', handler)
+    }
   }, [])
+
+  const requestFullscreen = (element) => {
+    if (!element) return Promise.reject(new Error('No element'))
+    const method =
+      element.requestFullscreen ||
+      element.webkitRequestFullscreen ||
+      element.mozRequestFullScreen ||
+      element.msRequestFullscreen
+    if (method) {
+      const result = method.call(element)
+      if (result && result.catch) {
+        result.catch(() => {})
+      }
+      return result || Promise.resolve()
+    }
+    return Promise.reject(new Error('Fullscreen not supported'))
+  }
+
+  const exitFullscreen = () => {
+    const exitMethod =
+      document.exitFullscreen ||
+      document.webkitExitFullscreen ||
+      document.mozCancelFullScreen ||
+      document.msExitFullscreen
+    if (exitMethod) {
+      const result = exitMethod.call(document)
+      if (result && result.catch) {
+        result.catch(() => {})
+      }
+      return result || Promise.resolve()
+    }
+    return Promise.reject(new Error('Exit fullscreen not supported'))
+  }
 
   const toggleFullscreen = () => {
     const container = containerRef.current
     if (!container) return
 
-    if (!document.fullscreenElement) {
-      container.requestFullscreen().catch(() => {})
+    const active =
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement
+
+    if (!active) {
+      requestFullscreen(container)
     } else {
-      document.exitFullscreen().catch(() => {})
+      exitFullscreen().catch(() => {})
     }
   }
   if (error) {
