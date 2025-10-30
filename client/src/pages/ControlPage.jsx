@@ -883,7 +883,15 @@ const ControlPage = () => {
                   }`}
                   contentEditable={editingIndex === index}
                   suppressContentEditableWarning
-                onBlur={(event) => handleLineBlur(event, index)}
+                onInput={(event) => {
+                  if (!socketRef.current || !sessionId) return
+                  const rawText = event.currentTarget.textContent ?? ''
+                  socketRef.current.emit('updateLine', {
+                    sessionId,
+                    index,
+                    text: rawText,
+                  })
+                }}
                 onDoubleClick={(event) => {
                   event.stopPropagation()
                   handleLineDoubleClick(index)
