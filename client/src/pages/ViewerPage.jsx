@@ -89,6 +89,25 @@ const ViewerPage = () => {
   }, [sessionId])
 
   useEffect(() => {
+    if (typeof document === 'undefined') {
+      return
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        window.location.reload()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () =>
+      document.removeEventListener(
+        'visibilitychange',
+        handleVisibilityChange,
+      )
+  }, [])
+
+  useEffect(() => {
     const handler = () => {
       const active =
         document.fullscreenElement ||
