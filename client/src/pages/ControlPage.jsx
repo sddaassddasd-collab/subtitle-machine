@@ -156,47 +156,11 @@ const ControlPage = () => {
     if (!authenticated || !sessionId) return
 
     let disposed = false
-    const fetchSession = async () => {
-      try {
-        const response = await fetch(`/api/session/${sessionId}`)
-        if (!response.ok) {
-          throw new Error()
-        }
-
-        const data = await response.json()
-        if (!disposed) {
-          setLines(Array.isArray(data.lines) ? data.lines : [])
-          setCurrentIndex(
-            Number.isInteger(data.currentIndex) ? data.currentIndex : 0,
-          )
-          setDisplayEnabled(
-            typeof data.displayEnabled === 'boolean'
-              ? data.displayEnabled
-              : true,
-          )
-        }
-      } catch {
-        setStatus({
-          kind: 'error',
-          message: '找不到場次或無法載入資料',
-        })
-      }
-    }
-
-    fetchSession()
-    return () => {
-      disposed = true
-    }
-  }, [sessionId, authenticated])
-
-  useEffect(() => {
-    if (!authenticated || !sessionId) return
-
     const socket = io()
     socketRef.current = socket
-    socket.emit('join', { sessionId, role: 'control' })
 
-    socket.on('control:update', (payload) => {
+    const applySessionPayload = (payload) => {
+      if (disposed) return
       setLines(Array.isArray(payload.lines) ? payload.lines : [])
       setCurrentIndex(
         Number.isInteger(payload.currentIndex) ? payload.currentIndex : 0,
@@ -206,9 +170,81 @@ const ControlPage = () => {
           ? payload.displayEnabled
           : true,
       )
-    })
+    }
+
+    const joinSession = () => {
+      if (disposed || !sessionId) return
+      socket.emit('join', { sessionId, role: 'control' })
+    }
+
+    const refreshSession = async () => {
+      try {
+        const response = await fetch(`/api/session/${sessionId}`)
+        if (!response.ok) {
+          throw new Error('找不到場次或無法載入資料')
+        }
+        const data = await response.json()
+        applySessionPayload(data)
+        if (!disposed) {
+          setStatus((prev) =>
+            prev.kind === 'error' ? { kind: 'info', message: '' } : prev,
+          )
+        }
+      } catch (error) {
+        if (disposed) return
+        setStatus({
+          kind: 'error',
+          message:
+            error?.message || '找不到場次或無法載入資料',
+        })
+      }
+    }
+
+    const rejoinAndRefresh = () => {
+      joinSession()
+      refreshSession()
+    }
+
+    const handleControlUpdate = (payload) => {
+      applySessionPayload(payload)
+    }
+
+    socket.on('connect', rejoinAndRefresh)
+    socket.on('reconnect', rejoinAndRefresh)
+    socket.on('control:update', handleControlUpdate)
+
+    if (socket.connected) {
+      rejoinAndRefresh()
+    } else {
+      refreshSession()
+    }
+
+    const handleVisibilityChange = () => {
+      if (typeof document === 'undefined') {
+        return
+      }
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+      if (!socket.connected) {
+        socket.connect()
+      } else {
+        rejoinAndRefresh()
+      }
+    }
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
 
     return () => {
+      disposed = true
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
+      socket.off('connect', rejoinAndRefresh)
+      socket.off('reconnect', rejoinAndRefresh)
+      socket.off('control:update', handleControlUpdate)
       socket.disconnect()
       socketRef.current = null
     }

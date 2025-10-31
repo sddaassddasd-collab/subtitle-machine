@@ -23,6 +23,10 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
+app.get('/healthz', (_req, res) => {
+  res.status(200).send('ok');
+});
+
 const upload = multer({
   limits: {
     fileSize: MAX_SCRIPT_SIZE,
