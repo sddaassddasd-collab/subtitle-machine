@@ -368,7 +368,7 @@ const ControlPage = () => {
     }
 
     if (!socketRef.current || !sessionId) return
-    const node = lineRefs.current[index]
+    const node = lineRefs.current[index] ?? event.currentTarget
     if (!node) return
 
     if (
@@ -388,22 +388,29 @@ const ControlPage = () => {
       return
     }
 
-    const preRange = range.cloneRange()
-    preRange.selectNodeContents(node)
-    preRange.setEnd(range.endContainer, range.endOffset)
-    const caretOffset = preRange.toString().length
+    const beforeRange = range.cloneRange()
+    beforeRange.selectNodeContents(node)
+    beforeRange.setEnd(range.endContainer, range.endOffset)
+
+    const afterRange = range.cloneRange()
+    afterRange.selectNodeContents(node)
+    afterRange.setStart(range.endContainer, range.endOffset)
+
+    const normalizeSegment = (text) =>
+      (text ?? '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/\u200b/g, '')
+        .replace(/\r?\n/g, ' ')
+        .trim()
+
+    const beforeText = normalizeSegment(beforeRange.toString())
+    const afterText = normalizeSegment(afterRange.toString())
 
     const currentLine = lines[index]
     const currentType =
       typeof currentLine === 'object' && currentLine?.type === 'direction'
         ? 'direction'
         : 'dialogue'
-
-    const currentTextContent = node.textContent ?? ''
-    const beforeRaw = currentTextContent.slice(0, caretOffset)
-    const afterRaw = currentTextContent.slice(caretOffset)
-    const beforeText = beforeRaw.trim()
-    const afterText = afterRaw.trim()
 
     if (!beforeText) {
       return
