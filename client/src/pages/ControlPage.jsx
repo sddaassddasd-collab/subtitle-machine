@@ -388,10 +388,6 @@ const ControlPage = () => {
       return
     }
 
-    const beforeRange = range.cloneRange()
-    beforeRange.selectNodeContents(node)
-    beforeRange.setEnd(range.endContainer, range.endOffset)
-
     const afterRange = range.cloneRange()
     afterRange.selectNodeContents(node)
     afterRange.setStart(range.endContainer, range.endOffset)
@@ -403,8 +399,17 @@ const ControlPage = () => {
         .replace(/\r?\n/g, ' ')
         .trim()
 
-    const beforeText = normalizeSegment(beforeRange.toString())
-    const afterText = normalizeSegment(afterRange.toString())
+    const rawAfter = afterRange.toString()
+    const afterText = normalizeSegment(rawAfter)
+    const normalizedFull = normalizeSegment(node.textContent ?? '')
+    const beforeText = afterText
+      ? normalizeSegment(
+          normalizedFull.slice(
+            0,
+            Math.max(normalizedFull.length - afterText.length, 0),
+          ),
+        )
+      : normalizedFull
 
     const currentLine = lines[index]
     const currentType =
