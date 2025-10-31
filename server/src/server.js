@@ -542,6 +542,19 @@ function normalizeScriptLines(entries, options = {}) {
     const base = normalizeLineEntry(entry, keepEmpty);
     if (!base) return;
 
+    if (!base.text) {
+      if (keepEmpty) {
+        normalized.push({
+          text: '',
+          type:
+            base.type === LINE_TYPES.DIRECTION
+              ? LINE_TYPES.DIRECTION
+              : LINE_TYPES.DIALOGUE,
+        });
+      }
+      return;
+    }
+
     const expanded = expandStageDirectionSegments(base);
     expanded.forEach((item) => {
       const text = sanitizeLineText(item.text);
