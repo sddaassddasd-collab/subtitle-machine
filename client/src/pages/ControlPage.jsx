@@ -388,34 +388,80 @@ const ControlPage = () => {
       return
     }
 
+    const beforeRange = range.cloneRange()
+    beforeRange.selectNodeContents(node)
+    beforeRange.setEnd(range.endContainer, range.endOffset)
+
     const afterRange = range.cloneRange()
     afterRange.selectNodeContents(node)
     afterRange.setStart(range.endContainer, range.endOffset)
 
-    const normalizeSegment = (text) =>
-      (text ?? '')
+    const normalizeSegment = (text, { trim = true } = {}) => {
+      const cleaned = (text ?? '')
         .replace(/\u00a0/g, ' ')
         .replace(/\u200b/g, '')
         .replace(/\r?\n/g, ' ')
-        .trim()
+      return trim ? cleaned.trim() : cleaned
+    }
 
-    const rawAfter = afterRange.toString()
-    const afterText = normalizeSegment(rawAfter)
-    const normalizedFull = normalizeSegment(node.textContent ?? '')
-    const beforeText = afterText
-      ? normalizeSegment(
-          normalizedFull.slice(
-            0,
-            Math.max(normalizedFull.length - afterText.length, 0),
-          ),
+    const fullTextRaw = normalizeSegment(node.textContent ?? '', {
+      trim: false,
+    })
+    const normalizedFull = normalizeSegment(fullTextRaw)
+
+    const caretTextRaw = normalizeSegment(beforeRange.toString(), {
+      trim: false,
+    })
+    let caretOffset = caretTextRaw.length
+    if (caretOffset > fullTextRaw.length) {
+      caretOffset = fullTextRaw.length
+    }
+
+    let beforeText = normalizeSegment(fullTextRaw.slice(0, caretOffset))
+    let afterText = normalizeSegment(fullTextRaw.slice(caretOffset))
+
+    const combinedText = normalizeSegment(`${beforeText}${afterText}`)
+    if (normalizedFull && combinedText !== normalizedFull) {
+      if (afterText) {
+        const fallbackLength = Math.max(
+          normalizedFull.length - afterText.length,
+          0,
         )
-      : normalizedFull
+        beforeText = normalizeSegment(normalizedFull.slice(0, fallbackLength))
+      } else {
+        beforeText = normalizedFull
+      }
+    }
 
     const currentLine = lines[index]
     const currentType =
       typeof currentLine === 'object' && currentLine?.type === 'direction'
         ? 'direction'
         : 'dialogue'
+
+    if (normalizedFull) {
+      setLines((prev) => {
+        const existing = prev[index]
+        const existingText =
+          typeof existing === 'object' && existing
+            ? existing.text ?? ''
+            : typeof existing === 'string'
+              ? existing
+              : ''
+
+        if (existingText === normalizedFull) {
+          return prev
+        }
+
+        const next = [...prev]
+        if (typeof existing === 'object' && existing) {
+          next[index] = { ...existing, text: normalizedFull }
+        } else {
+          next[index] = { text: normalizedFull, type: currentType }
+        }
+        return next
+      })
+    }
 
     if (!beforeText) {
       return
@@ -425,6 +471,10 @@ const ControlPage = () => {
 
     if (!afterText) {
       skipBlurRef.current.add(index)
+
+      if (node.textContent !== beforeText) {
+        node.textContent = beforeText
+      }
 
       setLines((prev) => {
         const next = [...prev]
@@ -453,6 +503,10 @@ const ControlPage = () => {
     }
 
     skipBlurRef.current.add(index)
+
+    if (node.textContent !== beforeText) {
+      node.textContent = beforeText
+    }
 
     setLines((prev) => {
       const next = [...prev]
