@@ -10,6 +10,115 @@ const storageKeys = {
   rememberKey: 'subtitleMachineRememberKey',
 }
 
+const DEFAULT_TRANSCRIPTION_STATE = {
+  active: false,
+  status: 'idle',
+  text: '',
+  isFinal: true,
+  language: null,
+  model: 'gpt-4o-mini-transcribe',
+  error: '',
+  updatedAt: null,
+}
+
+const TARGET_SAMPLE_RATE = 24000
+
+const normalizeTranscriptionState = (raw) => {
+  if (!raw || typeof raw !== 'object') {
+    return DEFAULT_TRANSCRIPTION_STATE
+  }
+
+  return {
+    ...DEFAULT_TRANSCRIPTION_STATE,
+    ...raw,
+    active: Boolean(raw.active),
+    text: typeof raw.text === 'string' ? raw.text : '',
+    isFinal: raw.isFinal !== false,
+    error: typeof raw.error === 'string' ? raw.error : '',
+    status:
+      typeof raw.status === 'string' && raw.status.trim().length > 0
+        ? raw.status
+        : 'idle',
+    model:
+      typeof raw.model === 'string' && raw.model.trim().length > 0
+        ? raw.model
+        : 'gpt-4o-mini-transcribe',
+    language:
+      typeof raw.language === 'string' && raw.language.trim().length > 0
+        ? raw.language
+        : null,
+    updatedAt:
+      typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
+        ? raw.updatedAt
+        : null,
+  }
+}
+
+const downsampleFloat32 = (input, inputSampleRate, outputSampleRate) => {
+  if (!input?.length) {
+    return new Float32Array(0)
+  }
+
+  if (
+    !Number.isFinite(inputSampleRate) ||
+    inputSampleRate <= 0 ||
+    inputSampleRate === outputSampleRate
+  ) {
+    return input
+  }
+
+  const sampleRateRatio = inputSampleRate / outputSampleRate
+  const outputLength = Math.max(Math.floor(input.length / sampleRateRatio), 0)
+  const output = new Float32Array(outputLength)
+
+  let outputIndex = 0
+  let inputIndex = 0
+
+  while (outputIndex < output.length) {
+    const nextInputIndex = Math.min(
+      Math.round((outputIndex + 1) * sampleRateRatio),
+      input.length,
+    )
+
+    let sum = 0
+    let count = 0
+    for (let index = inputIndex; index < nextInputIndex; index += 1) {
+      sum += input[index]
+      count += 1
+    }
+
+    output[outputIndex] = count > 0 ? sum / count : 0
+    outputIndex += 1
+    inputIndex = nextInputIndex
+  }
+
+  return output
+}
+
+const float32ToInt16 = (input) => {
+  const output = new Int16Array(input.length)
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[index]))
+    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
+  }
+  return output
+}
+
+const int16ToBase64 = (samples) => {
+  if (!samples || samples.length === 0) return ''
+
+  const bytes = new Uint8Array(samples.buffer)
+  const chunkSize = 0x8000
+  let binary = ''
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize)
+    binary += String.fromCharCode(...chunk)
+  }
+
+  return btoa(binary)
+}
+
 const ControlPage = () => {
   const location = useLocation()
   const navigate = useNavigate()
@@ -23,6 +132,9 @@ const ControlPage = () => {
   const [lines, setLines] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [transcription, setTranscription] = useState(
+    DEFAULT_TRANSCRIPTION_STATE,
+  )
   const [status, setStatus] = useState({ kind: 'info', message: '' })
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return ''
@@ -44,6 +156,70 @@ const ControlPage = () => {
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
   const skipBlurRef = useRef(new Set())
+  const lastTranscriptionErrorRef = useRef('')
+  const captureStateRef = useRef({
+    mediaStream: null,
+    audioContext: null,
+    sourceNode: null,
+    processorNode: null,
+    silenceNode: null,
+  })
+
+  const releaseMicrophoneCapture = () => {
+    const state = captureStateRef.current
+    if (!state) return
+
+    const {
+      processorNode,
+      sourceNode,
+      silenceNode,
+      audioContext,
+      mediaStream,
+    } = state
+
+    if (processorNode) {
+      try {
+        processorNode.onaudioprocess = null
+        processorNode.disconnect()
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+    if (sourceNode) {
+      try {
+        sourceNode.disconnect()
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+    if (silenceNode) {
+      try {
+        silenceNode.disconnect()
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+    if (audioContext) {
+      audioContext.close().catch(() => {})
+    }
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((track) => {
+        try {
+          track.stop()
+        } catch {
+          // Ignore cleanup errors.
+        }
+      })
+    }
+
+    captureStateRef.current = {
+      mediaStream: null,
+      audioContext: null,
+      sourceNode: null,
+      processorNode: null,
+      silenceNode: null,
+    }
+  }
 
   useEffect(() => {
     if (editingIndex == null) return
@@ -170,6 +346,7 @@ const ControlPage = () => {
           ? payload.displayEnabled
           : true,
       )
+      setTranscription(normalizeTranscriptionState(payload.transcription))
     }
 
     const joinSession = () => {
@@ -209,9 +386,28 @@ const ControlPage = () => {
       applySessionPayload(payload)
     }
 
+    const handleTranscriptionUpdate = (payload) => {
+      setTranscription(
+        normalizeTranscriptionState(payload?.transcription),
+      )
+    }
+
+    const handleTranscriptionError = (payload) => {
+      const message =
+        payload && typeof payload.message === 'string'
+          ? payload.message
+          : '即時語音辨識發生錯誤'
+      setStatus({
+        kind: 'error',
+        message,
+      })
+    }
+
     socket.on('connect', rejoinAndRefresh)
     socket.on('reconnect', rejoinAndRefresh)
     socket.on('control:update', handleControlUpdate)
+    socket.on('control:transcription', handleTranscriptionUpdate)
+    socket.on('transcription:error', handleTranscriptionError)
 
     if (socket.connected) {
       rejoinAndRefresh()
@@ -239,12 +435,18 @@ const ControlPage = () => {
 
     return () => {
       disposed = true
+      releaseMicrophoneCapture()
+      if (sessionId) {
+        socket.emit('transcription:stop', { sessionId })
+      }
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange)
       }
       socket.off('connect', rejoinAndRefresh)
       socket.off('reconnect', rejoinAndRefresh)
       socket.off('control:update', handleControlUpdate)
+      socket.off('control:transcription', handleTranscriptionUpdate)
+      socket.off('transcription:error', handleTranscriptionError)
       socket.disconnect()
       socketRef.current = null
     }
@@ -296,6 +498,40 @@ const ControlPage = () => {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [sessionId, displayEnabled, authenticated])
 
+  useEffect(() => {
+    return () => {
+      releaseMicrophoneCapture()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (transcription.active || transcription.status === 'connecting') {
+      return
+    }
+
+    const state = captureStateRef.current
+    if (state?.mediaStream || state?.audioContext || state?.processorNode) {
+      releaseMicrophoneCapture()
+    }
+  }, [transcription.active, transcription.status])
+
+  useEffect(() => {
+    if (!transcription.error) {
+      lastTranscriptionErrorRef.current = ''
+      return
+    }
+
+    if (lastTranscriptionErrorRef.current === transcription.error) {
+      return
+    }
+
+    lastTranscriptionErrorRef.current = transcription.error
+    setStatus({
+      kind: 'error',
+      message: `即時語音辨識：${transcription.error}`,
+    })
+  }, [transcription.error])
+
   const handleAccessSubmit = (event) => {
     event.preventDefault()
     if (accessInput.trim() === ACCESS_CODE) {
@@ -324,6 +560,132 @@ const ControlPage = () => {
       kind: 'info',
       message: nextState ? '檢視端已重新顯示' : '檢視端已遮蔽字幕',
     })
+  }
+
+  const handleStartLiveTranscription = async () => {
+    if (!socketRef.current || !sessionId) {
+      setStatus({ kind: 'error', message: '尚未連上場次，無法啟動語音辨識' })
+      return
+    }
+
+    if (!apiKey) {
+      setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
+      return
+    }
+
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      setStatus({
+        kind: 'error',
+        message: '目前瀏覽器不支援麥克風錄音功能',
+      })
+      return
+    }
+
+    if (transcription.active || transcription.status === 'connecting') {
+      setStatus({ kind: 'info', message: '語音辨識已啟動' })
+      return
+    }
+
+    try {
+      releaseMicrophoneCapture()
+      setStatus({ kind: 'info', message: '正在啟動即時語音辨識…' })
+      setTranscription((prev) => ({
+        ...prev,
+        status: 'connecting',
+        active: false,
+        text: '',
+        isFinal: true,
+        error: '',
+      }))
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      })
+
+      const AudioContextClass =
+        window.AudioContext || window.webkitAudioContext
+      if (!AudioContextClass) {
+        throw new Error('瀏覽器不支援 AudioContext')
+      }
+
+      const audioContext = new AudioContextClass()
+      await audioContext.resume()
+
+      const sourceNode = audioContext.createMediaStreamSource(stream)
+      const processorNode = audioContext.createScriptProcessor(4096, 1, 1)
+      const silenceNode = audioContext.createGain()
+      silenceNode.gain.value = 0
+
+      sourceNode.connect(processorNode)
+      processorNode.connect(silenceNode)
+      silenceNode.connect(audioContext.destination)
+
+      captureStateRef.current = {
+        mediaStream: stream,
+        audioContext,
+        sourceNode,
+        processorNode,
+        silenceNode,
+      }
+
+      processorNode.onaudioprocess = (event) => {
+        const socket = socketRef.current
+        if (!socket || !sessionId) return
+
+        const sourceSamples = event.inputBuffer.getChannelData(0)
+        const downsampled = downsampleFloat32(
+          sourceSamples,
+          audioContext.sampleRate,
+          TARGET_SAMPLE_RATE,
+        )
+        if (!downsampled.length) return
+
+        const pcm16 = float32ToInt16(downsampled)
+        const audio = int16ToBase64(pcm16)
+        if (!audio) return
+
+        socket.emit('transcription:audio', {
+          sessionId,
+          audio,
+        })
+      }
+
+      socketRef.current.emit('transcription:start', {
+        sessionId,
+        apiKey,
+        model: transcription.model || 'gpt-4o-mini-transcribe',
+        language: transcription.language || 'zh',
+      })
+    } catch (error) {
+      releaseMicrophoneCapture()
+      socketRef.current?.emit('transcription:stop', { sessionId })
+      setTranscription((prev) => ({
+        ...prev,
+        active: false,
+        status: 'error',
+        error: error?.message || '無法啟動語音辨識',
+      }))
+      setStatus({
+        kind: 'error',
+        message: error?.message || '無法啟動語音辨識',
+      })
+    }
+  }
+
+  const handleStopLiveTranscription = () => {
+    if (!sessionId) return
+    releaseMicrophoneCapture()
+    socketRef.current?.emit('transcription:stop', { sessionId })
+    setStatus({ kind: 'info', message: '已停止即時語音辨識' })
   }
 
   const handleJumpToLine = (index) => {
@@ -640,6 +1002,7 @@ const ControlPage = () => {
           ? data.displayEnabled
           : true,
       )
+      setTranscription(normalizeTranscriptionState(data.transcription))
       setStatus({ kind: 'success', message: '字幕 JSON 已載入' })
       setAutoCenterEnabled(false)
     } catch (error) {
@@ -744,6 +1107,7 @@ const ControlPage = () => {
           ? data.displayEnabled
           : true,
       )
+      setTranscription(normalizeTranscriptionState(data.transcription))
       const nextStatus =
         data.warning && data.warning.length > 0
           ? { kind: 'info', message: data.warning }
@@ -802,6 +1166,22 @@ const ControlPage = () => {
   }
 
   lineRefs.current = []
+  const transcriptionStatusLabelMap = {
+    idle: '待命',
+    connecting: '連線中',
+    running: '辨識中',
+    error: '錯誤',
+  }
+  const transcriptionStatusLabel =
+    transcriptionStatusLabelMap[transcription.status] || transcription.status
+  const transcriptionBusy =
+    transcription.active || transcription.status === 'connecting'
+  const transcriptionPreview =
+    transcription.text && transcription.text.trim().length > 0
+      ? transcription.text
+      : transcriptionBusy
+        ? '請開始說話…'
+        : '尚未啟動即時語音辨識'
 
   return (
     <div className="control-page">
@@ -884,6 +1264,44 @@ const ControlPage = () => {
               ? `目前進度：${currentIndex + 1} / ${lines.length}`
               : '尚未載入字幕'}
           </span>
+        </div>
+
+        <div className="input-group transcription-panel">
+          <label>即時語音辨識（雲端）</label>
+          <div className="transcription-actions">
+            <button
+              type="button"
+              onClick={handleStartLiveTranscription}
+              disabled={transcriptionBusy}
+            >
+              {transcription.status === 'connecting'
+                ? '連線中…'
+                : transcription.active
+                  ? '辨識中'
+                  : '開始收音'}
+            </button>
+            <button
+              type="button"
+              className="subtle-button"
+              onClick={handleStopLiveTranscription}
+              disabled={!transcriptionBusy}
+            >
+              停止收音
+            </button>
+          </div>
+          <div className="transcription-meta">
+            <span>狀態：{transcriptionStatusLabel}</span>
+            <span>
+              輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}
+            </span>
+          </div>
+          <div
+            className={`transcription-preview ${
+              transcription.isFinal ? 'final' : 'partial'
+            }`}
+          >
+            {transcriptionPreview}
+          </div>
         </div>
 
         <div className="viewer-preview">

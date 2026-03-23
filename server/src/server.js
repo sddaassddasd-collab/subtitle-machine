@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { Server } = require('socket.io');
 const { OpenAI } = require('openai');
+const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const iconv = require('iconv-lite');
 
 const PORT = process.env.PORT || 3000;
@@ -35,6 +36,18 @@ const upload = multer({
 });
 
 const sessions = new Map();
+const transcriptionStreams = new Map();
+
+const defaultTranscriptionState = () => ({
+  active: false,
+  status: 'idle',
+  text: '',
+  isFinal: true,
+  language: null,
+  model: DEFAULT_TRANSCRIPTION_MODEL,
+  error: '',
+  updatedAt: null,
+});
 
 const placeholderRegex = /^[第]?[零〇一二三四五六七八九十百千\d]+[句行條話]$/i;
 
@@ -47,6 +60,13 @@ const MAX_LINE_LENGTH = 20;
 const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
+const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+const VALID_TRANSCRIPTION_MODELS = new Set([
+  'gpt-4o-mini-transcribe',
+  'gpt-4o-transcribe',
+  'gpt-4o-transcribe-diarize',
+  'whisper-1',
+]);
 
 const fallbackCodes = new Set([
   'INVALID_LLM_OUTPUT',
@@ -910,6 +930,193 @@ ${chunkText}
   return sanitizeModelLines(parsed, chunkText);
 }
 
+function sanitizeTranscriptionText(text) {
+  return sanitizeLineText(text).replace(/\s+/g, ' ').trim();
+}
+
+function normalizeLanguageCode(rawLanguage) {
+  if (typeof rawLanguage !== 'string') return null;
+  const trimmed = rawLanguage.trim();
+  if (!trimmed) return null;
+  if (!/^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$/u.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+function normalizeTranscriptionModel(rawModel) {
+  if (typeof rawModel !== 'string') {
+    return DEFAULT_TRANSCRIPTION_MODEL;
+  }
+  const trimmed = rawModel.trim();
+  if (!VALID_TRANSCRIPTION_MODELS.has(trimmed)) {
+    return DEFAULT_TRANSCRIPTION_MODEL;
+  }
+  return trimmed;
+}
+
+function ensureTranscriptionState(session) {
+  if (!session.transcription || typeof session.transcription !== 'object') {
+    session.transcription = defaultTranscriptionState();
+    return session.transcription;
+  }
+
+  const normalized = {
+    ...defaultTranscriptionState(),
+    ...session.transcription,
+  };
+  if (
+    typeof normalized.model !== 'string' ||
+    !VALID_TRANSCRIPTION_MODELS.has(normalized.model)
+  ) {
+    normalized.model = DEFAULT_TRANSCRIPTION_MODEL;
+  }
+  session.transcription = normalized;
+  return session.transcription;
+}
+
+function getPublicTranscriptionState(session) {
+  const state = ensureTranscriptionState(session);
+  return {
+    active: Boolean(state.active),
+    status: state.status || 'idle',
+    text: typeof state.text === 'string' ? state.text : '',
+    isFinal: state.isFinal !== false,
+    language:
+      typeof state.language === 'string' && state.language.trim().length > 0
+        ? state.language
+        : null,
+    model:
+      typeof state.model === 'string' && state.model.trim().length > 0
+        ? state.model
+        : DEFAULT_TRANSCRIPTION_MODEL,
+    error:
+      typeof state.error === 'string' && state.error.trim().length > 0
+        ? state.error
+        : '',
+    updatedAt:
+      typeof state.updatedAt === 'number' && Number.isFinite(state.updatedAt)
+        ? state.updatedAt
+        : null,
+  };
+}
+
+function updateTranscriptionState(sessionId, patch = {}) {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  const state = ensureTranscriptionState(session);
+  Object.assign(state, patch);
+  state.updatedAt = Date.now();
+}
+
+function applyTranscriptionError(sessionId, message) {
+  updateTranscriptionState(sessionId, {
+    active: false,
+    status: 'error',
+    isFinal: true,
+    error: message || '語音辨識發生錯誤',
+  });
+  broadcastTranscriptionState(sessionId);
+  broadcastViewerState(sessionId);
+}
+
+function stopTranscriptionStream(sessionId, options = {}) {
+  const stream = transcriptionStreams.get(sessionId);
+  if (!stream) {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    const state = ensureTranscriptionState(session);
+    const shouldKeepText = options.keepText === true;
+    state.active = false;
+    state.status = options.errorMessage ? 'error' : 'idle';
+    state.error = options.errorMessage || '';
+    if (!shouldKeepText) {
+      state.text = '';
+      state.isFinal = true;
+    }
+    state.updatedAt = Date.now();
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+    return;
+  }
+
+  transcriptionStreams.delete(sessionId);
+  stream.closing = true;
+  try {
+    stream.rt.close({
+      code: 1000,
+      reason: options.reason || 'transcription stopped',
+    });
+  } catch (error) {
+    console.warn('Failed to close realtime transcription socket:', error);
+  }
+
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  const state = ensureTranscriptionState(session);
+  const shouldKeepText = options.keepText === true;
+  state.active = false;
+  state.status = options.errorMessage ? 'error' : 'idle';
+  state.error = options.errorMessage || '';
+  if (!shouldKeepText) {
+    state.text = '';
+    state.isFinal = true;
+  }
+  state.updatedAt = Date.now();
+
+  broadcastTranscriptionState(sessionId);
+  broadcastViewerState(sessionId);
+}
+
+function getViewerPayload(session) {
+  const lines = ensureSessionLines(session);
+  if (session.currentIndex >= lines.length) {
+    session.currentIndex = Math.max(lines.length - 1, 0);
+  }
+
+  const transcription = ensureTranscriptionState(session);
+  const liveText = sanitizeTranscriptionText(transcription.text);
+  const hasLiveText = transcription.active && liveText.length > 0;
+
+  if (!session.displayEnabled) {
+    return {
+      line: null,
+      text: '',
+      displayEnabled: false,
+      source: 'hidden',
+      transcription: getPublicTranscriptionState(session),
+    };
+  }
+
+  if (hasLiveText) {
+    return {
+      line: {
+        text: liveText,
+        type: LINE_TYPES.DIALOGUE,
+      },
+      text: liveText,
+      displayEnabled: true,
+      source: 'transcription',
+      transcription: getPublicTranscriptionState(session),
+    };
+  }
+
+  const activeLine = lines.length > 0 ? lines[session.currentIndex] || null : null;
+  return {
+    line: activeLine,
+    text:
+      activeLine && activeLine.type === LINE_TYPES.DIRECTION
+        ? ''
+        : activeLine?.text || '',
+    displayEnabled: true,
+    source: 'script',
+    transcription: getPublicTranscriptionState(session),
+  };
+}
+
 /**
  * Returns or creates a session state bucket.
  */
@@ -920,11 +1127,14 @@ function ensureSession(sessionId) {
       lines: [],
       currentIndex: 0,
       displayEnabled: true,
+      transcription: defaultTranscriptionState(),
       createdAt: Date.now(),
     });
   }
 
-  return sessions.get(sessionId);
+  const session = sessions.get(sessionId);
+  ensureTranscriptionState(session);
+  return session;
 }
 
 function getSession(sessionId) {
@@ -936,6 +1146,7 @@ function broadcastControlState(sessionId) {
   if (!session) return;
 
   const lines = ensureSessionLines(session);
+  const transcription = getPublicTranscriptionState(session);
   if (session.currentIndex >= lines.length) {
     session.currentIndex = Math.max(lines.length - 1, 0);
   }
@@ -944,6 +1155,16 @@ function broadcastControlState(sessionId) {
     lines,
     currentIndex: session.currentIndex,
     displayEnabled: session.displayEnabled,
+    transcription,
+  });
+}
+
+function broadcastTranscriptionState(sessionId) {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  io.to(`control:${sessionId}`).emit('control:transcription', {
+    transcription: getPublicTranscriptionState(session),
   });
 }
 
@@ -951,26 +1172,8 @@ function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
 
-  const lines = ensureSessionLines(session);
-  if (session.currentIndex >= lines.length) {
-    session.currentIndex = Math.max(lines.length - 1, 0);
-  }
-
-  const activeLine =
-    session.displayEnabled && lines.length > 0
-      ? lines[session.currentIndex] || null
-      : null;
-
-  io.to(`viewer:${sessionId}`).emit('viewer:update', {
-    line: session.displayEnabled ? activeLine : null,
-    text:
-      session.displayEnabled && activeLine
-        ? activeLine.type === LINE_TYPES.DIRECTION
-          ? ''
-          : activeLine.text
-        : '',
-    displayEnabled: session.displayEnabled,
-  });
+  const payload = getViewerPayload(session);
+  io.to(`viewer:${sessionId}`).emit('viewer:update', payload);
 }
 
 async function parseScriptWithOpenAI(rawText, apiKey) {
@@ -1039,6 +1242,7 @@ app.get('/api/session/:sessionId', (req, res) => {
     lines,
     currentIndex: session.currentIndex,
     displayEnabled: session.displayEnabled,
+    transcription: getPublicTranscriptionState(session),
   });
 });
 
@@ -1050,26 +1254,8 @@ app.get('/api/session/:sessionId/viewer', (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  const lines = ensureSessionLines(session);
-  if (session.currentIndex >= lines.length) {
-    session.currentIndex = Math.max(lines.length - 1, 0);
-  }
-
-  const activeLine =
-    session.displayEnabled && lines.length > 0
-      ? lines[session.currentIndex] || null
-      : null;
-
-  res.json({
-    line: session.displayEnabled ? activeLine : null,
-    text:
-      session.displayEnabled && activeLine
-        ? activeLine.type === LINE_TYPES.DIRECTION
-          ? ''
-          : activeLine.text
-        : '',
-    displayEnabled: session.displayEnabled,
-  });
+  const payload = getViewerPayload(session);
+  res.json(payload);
 });
 
 app.post(
@@ -1106,6 +1292,7 @@ app.post(
         lines: normalizedLines,
         currentIndex: session.currentIndex,
         displayEnabled: session.displayEnabled,
+        transcription: getPublicTranscriptionState(session),
       });
     } catch (error) {
       console.error('Failed to parse script:', error);
@@ -1137,6 +1324,7 @@ app.post(
             lines: normalizedLines,
             currentIndex: session.currentIndex,
             displayEnabled: session.displayEnabled,
+            transcription: getPublicTranscriptionState(session),
             warning: warningMessage,
           });
         }
@@ -1177,6 +1365,7 @@ app.put('/api/session/:sessionId/lines', (req, res) => {
     lines: session.lines,
     currentIndex: session.currentIndex,
     displayEnabled: session.displayEnabled,
+    transcription: getPublicTranscriptionState(session),
   });
 });
 
@@ -1204,6 +1393,7 @@ app.post('/api/session/:sessionId/current', (req, res) => {
 
   res.json({
     currentIndex: session.currentIndex,
+    transcription: getPublicTranscriptionState(session),
   });
 });
 
@@ -1223,8 +1413,149 @@ app.post('/api/session/:sessionId/display', (req, res) => {
 
   res.json({
     displayEnabled: session.displayEnabled,
+    transcription: getPublicTranscriptionState(session),
   });
 });
+
+function startRealtimeTranscription({
+  sessionId,
+  socketId,
+  apiKey,
+  model,
+  language,
+}) {
+  const selectedModel = normalizeTranscriptionModel(model);
+  const selectedLanguage = normalizeLanguageCode(language);
+  const client = new OpenAI({ apiKey });
+  const rt = new OpenAIRealtimeWS({ model: selectedModel }, client);
+
+  const stream = {
+    sessionId,
+    socketId,
+    rt,
+    model: selectedModel,
+    language: selectedLanguage,
+    partialByItemId: new Map(),
+    closing: false,
+  };
+  transcriptionStreams.set(sessionId, stream);
+
+  const isCurrent = () => transcriptionStreams.get(sessionId) === stream;
+
+  rt.socket.on('open', () => {
+    if (!isCurrent()) return;
+
+    updateTranscriptionState(sessionId, {
+      active: true,
+      status: 'running',
+      text: '',
+      isFinal: true,
+      language: selectedLanguage,
+      model: selectedModel,
+      error: '',
+    });
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+
+    rt.send({
+      type: 'transcription_session.update',
+      session: {
+        input_audio_format: 'pcm16',
+        input_audio_transcription: {
+          model: selectedModel,
+          ...(selectedLanguage ? { language: selectedLanguage } : {}),
+        },
+        turn_detection: {
+          type: 'server_vad',
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 450,
+        },
+      },
+    });
+  });
+
+  rt.on('conversation.item.input_audio_transcription.delta', (event) => {
+    if (!isCurrent()) return;
+    if (!event.item_id || typeof event.delta !== 'string') return;
+
+    const previous = stream.partialByItemId.get(event.item_id) || '';
+    const merged = sanitizeTranscriptionText(`${previous}${event.delta}`);
+    stream.partialByItemId.set(event.item_id, merged);
+
+    if (!merged) return;
+
+    updateTranscriptionState(sessionId, {
+      active: true,
+      status: 'running',
+      text: merged,
+      isFinal: false,
+      error: '',
+    });
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  rt.on('conversation.item.input_audio_transcription.completed', (event) => {
+    if (!isCurrent()) return;
+    if (!event.item_id) return;
+
+    const fallback = stream.partialByItemId.get(event.item_id) || '';
+    stream.partialByItemId.delete(event.item_id);
+
+    const transcript = sanitizeTranscriptionText(event.transcript || fallback);
+    if (!transcript) return;
+
+    updateTranscriptionState(sessionId, {
+      active: true,
+      status: 'running',
+      text: transcript,
+      isFinal: true,
+      error: '',
+    });
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  rt.on('conversation.item.input_audio_transcription.failed', (event) => {
+    if (!isCurrent()) return;
+
+    const message =
+      sanitizeLineText(event?.error?.message || '') || '語音片段辨識失敗';
+    updateTranscriptionState(sessionId, {
+      active: true,
+      status: 'running',
+      error: message,
+    });
+    broadcastTranscriptionState(sessionId);
+  });
+
+  rt.on('error', (error) => {
+    if (!isCurrent()) return;
+
+    const message =
+      sanitizeLineText(error?.error?.message || error?.message || '') ||
+      '語音辨識連線發生錯誤';
+    stopTranscriptionStream(sessionId, {
+      keepText: true,
+      reason: 'transcription error',
+      errorMessage: message,
+    });
+  });
+
+  rt.socket.on('close', () => {
+    if (!isCurrent()) return;
+
+    transcriptionStreams.delete(sessionId);
+    if (stream.closing) {
+      return;
+    }
+
+    applyTranscriptionError(sessionId, '語音辨識連線已中斷');
+  });
+
+  return stream;
+}
 
 io.on('connection', (socket) => {
   socket.on('join', ({ sessionId, role }) => {
@@ -1240,6 +1571,100 @@ io.on('connection', (socket) => {
       socket.join(`control:${sessionId}`);
       broadcastControlState(sessionId);
     }
+  });
+
+  socket.on('transcription:start', ({ sessionId, apiKey, language, model }) => {
+    if (!sessionId) return;
+
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    const trimmedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+    if (!trimmedApiKey) {
+      applyTranscriptionError(sessionId, '缺少 OpenAI API Key，無法啟動語音辨識');
+      return;
+    }
+
+    const active = transcriptionStreams.get(sessionId);
+    if (active && active.socketId !== socket.id) {
+      socket.emit('transcription:error', {
+        message: '此場次已有其他控制端在進行語音辨識',
+      });
+      return;
+    }
+
+    if (active && active.socketId === socket.id) {
+      stopTranscriptionStream(sessionId, {
+        keepText: false,
+        reason: 'restart transcription',
+      });
+    }
+
+    updateTranscriptionState(sessionId, {
+      active: false,
+      status: 'connecting',
+      text: '',
+      isFinal: true,
+      language: normalizeLanguageCode(language),
+      model: normalizeTranscriptionModel(model),
+      error: '',
+    });
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+
+    try {
+      startRealtimeTranscription({
+        sessionId,
+        socketId: socket.id,
+        apiKey: trimmedApiKey,
+        language,
+        model,
+      });
+    } catch (error) {
+      const message =
+        sanitizeLineText(error?.message || '') || '啟動語音辨識失敗';
+      applyTranscriptionError(sessionId, message);
+    }
+  });
+
+  socket.on('transcription:audio', ({ sessionId, audio }) => {
+    if (!sessionId) return;
+    if (typeof audio !== 'string' || !audio) return;
+
+    const stream = transcriptionStreams.get(sessionId);
+    if (!stream || stream.socketId !== socket.id || stream.closing) {
+      return;
+    }
+
+    try {
+      stream.rt.send({
+        type: 'input_audio_buffer.append',
+        audio,
+      });
+    } catch (error) {
+      const message =
+        sanitizeLineText(error?.message || '') ||
+        '傳送語音資料到辨識服務失敗';
+      stopTranscriptionStream(sessionId, {
+        keepText: true,
+        reason: 'send audio failed',
+        errorMessage: message,
+      });
+    }
+  });
+
+  socket.on('transcription:stop', ({ sessionId }) => {
+    if (!sessionId) return;
+
+    const stream = transcriptionStreams.get(sessionId);
+    if (!stream || stream.socketId !== socket.id) {
+      return;
+    }
+
+    stopTranscriptionStream(sessionId, {
+      keepText: false,
+      reason: 'client requested stop',
+    });
   });
 
   socket.on('setCurrentIndex', ({ sessionId, index }) => {
@@ -1437,6 +1862,22 @@ io.on('connection', (socket) => {
 
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
+  });
+
+  socket.on('disconnect', () => {
+    const ownedSessions = [];
+    transcriptionStreams.forEach((stream, sessionId) => {
+      if (stream.socketId === socket.id) {
+        ownedSessions.push(sessionId);
+      }
+    });
+
+    ownedSessions.forEach((sessionId) => {
+      stopTranscriptionStream(sessionId, {
+        keepText: false,
+        reason: 'control socket disconnected',
+      });
+    });
   });
 });
 

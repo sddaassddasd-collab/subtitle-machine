@@ -4,6 +4,37 @@ import { io } from 'socket.io-client'
 
 const DEFAULT_SESSION_ID = 'default'
 
+const normalizeViewerPayload = (payload) => {
+  const enabled =
+    typeof payload?.displayEnabled === 'boolean'
+      ? payload.displayEnabled
+      : true
+
+  const lineCandidate = payload?.line
+  const nextLine =
+    lineCandidate && typeof lineCandidate === 'object'
+      ? {
+          text: lineCandidate.text || '',
+          type:
+            lineCandidate.type === 'direction' ? 'direction' : 'dialogue',
+        }
+      : typeof payload?.text === 'string'
+        ? { text: payload.text, type: 'dialogue' }
+        : null
+
+  const transcription = payload?.transcription || {}
+  const transcriptionIsFinal = transcription.isFinal !== false
+  const source =
+    typeof payload?.source === 'string' ? payload.source : 'script'
+
+  return {
+    enabled,
+    line: nextLine,
+    source,
+    transcriptionIsFinal,
+  }
+}
+
 const ViewerPage = () => {
   const location = useLocation()
   const query = useMemo(
@@ -14,6 +45,8 @@ const ViewerPage = () => {
 
   const [line, setLine] = useState(null)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [lineSource, setLineSource] = useState('script')
+  const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
@@ -30,22 +63,11 @@ const ViewerPage = () => {
         }
         const data = await response.json()
         if (!cancelled) {
-          const enabled =
-            typeof data.displayEnabled === 'boolean'
-              ? data.displayEnabled
-              : true
-          setDisplayEnabled(enabled)
-          if (data.line) {
-            setLine({
-              text: data.line.text || '',
-              type:
-                data.line.type === 'direction' ? 'direction' : 'dialogue',
-            })
-          } else if (typeof data.text === 'string') {
-            setLine({ text: data.text, type: 'dialogue' })
-          } else {
-            setLine(null)
-          }
+          const next = normalizeViewerPayload(data)
+          setDisplayEnabled(next.enabled)
+          setLine(next.line)
+          setLineSource(next.source)
+          setTranscriptionIsFinal(next.transcriptionIsFinal)
         }
       } catch (err) {
         if (!cancelled) {
@@ -67,20 +89,11 @@ const ViewerPage = () => {
 
     socket.emit('join', { sessionId, role: 'viewer' })
     socket.on('viewer:update', (payload) => {
-      const enabled =
-        typeof payload.displayEnabled === 'boolean'
-          ? payload.displayEnabled
-          : true
-      setDisplayEnabled(enabled)
-      if (payload.line) {
-        setLine({
-          text: payload.line.text || '',
-          type:
-            payload.line.type === 'direction' ? 'direction' : 'dialogue',
-        })
-      } else {
-        setLine(null)
-      }
+      const next = normalizeViewerPayload(payload)
+      setDisplayEnabled(next.enabled)
+      setLine(next.line)
+      setLineSource(next.source)
+      setTranscriptionIsFinal(next.transcriptionIsFinal)
     })
 
     return () => {
@@ -193,7 +206,9 @@ const ViewerPage = () => {
     displayEnabled && line && line.type === 'direction'
   const textClass = `viewer-text${
     displayEnabled ? '' : ' viewer-muted'
-  }${isStageDirection ? ' viewer-direction' : ''}`
+  }${isStageDirection ? ' viewer-direction' : ''}${
+    lineSource === 'transcription' ? ' viewer-live' : ''
+  }`
   const displayText = displayEnabled
     ? isStageDirection
       ? '\u00a0'
@@ -210,6 +225,11 @@ const ViewerPage = () => {
       >
         ⛶
       </button>
+      {lineSource === 'transcription' && displayEnabled && (
+        <div className="viewer-live-badge">
+          {transcriptionIsFinal ? '即時語音 最終稿' : '即時語音 草稿'}
+        </div>
+      )}
       <div className={textClass}>{displayText}</div>
     </div>
   )
