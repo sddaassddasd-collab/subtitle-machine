@@ -66,13 +66,19 @@ const parsedForceCommitIntervalMs = Number(
 );
 const FORCE_COMMIT_INTERVAL_MS = Number.isFinite(parsedForceCommitIntervalMs)
   ? Math.max(0, parsedForceCommitIntervalMs)
-  : 3500;
+  : 450;
 const parsedCommitCooldownMs = Number(
   process.env.TRANSCRIPTION_COMMIT_COOLDOWN_MS,
 );
 const COMMIT_COOLDOWN_MS = Number.isFinite(parsedCommitCooldownMs)
   ? Math.max(0, parsedCommitCooldownMs)
-  : 400;
+  : 250;
+const parsedMinCommitAudioMs = Number(
+  process.env.TRANSCRIPTION_MIN_COMMIT_AUDIO_MS,
+);
+const MIN_COMMIT_AUDIO_MS = Number.isFinite(parsedMinCommitAudioMs)
+  ? Math.max(0, parsedMinCommitAudioMs)
+  : 180;
 const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const TRANSCRIPTION_CORRECTION_ENABLED =
@@ -1323,6 +1329,12 @@ function normalizeCloseReason(reason) {
   return '';
 }
 
+function normalizeChunkDurationMs(rawDurationMs) {
+  const numeric = Number(rawDurationMs);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return Math.min(numeric, 2000);
+}
+
 function isIgnorableRealtimeCommitError(message) {
   if (!message || typeof message !== 'string') return false;
   return (
@@ -1343,6 +1355,7 @@ function resetRealtimePendingAudio(stream) {
   if (!stream) return;
   stream.pendingAppendCount = 0;
   stream.firstPendingAudioAt = null;
+  stream.pendingAudioMs = 0;
 }
 
 function resetRealtimeCommitState(stream) {
@@ -1351,12 +1364,20 @@ function resetRealtimeCommitState(stream) {
   stream.lastCommitAt = 0;
 }
 
-function markRealtimePendingAudio(stream) {
+function markRealtimePendingAudio(stream, durationMs = 0) {
   if (!stream) return;
   if (stream.pendingAppendCount === 0) {
     stream.firstPendingAudioAt = Date.now();
   }
   stream.pendingAppendCount += 1;
+  stream.pendingAudioMs += normalizeChunkDurationMs(durationMs);
+}
+
+function getRealtimePendingAudioMs(stream, now = Date.now()) {
+  if (!stream?.pendingAppendCount) return 0;
+  if (stream.pendingAudioMs > 0) return stream.pendingAudioMs;
+  if (!stream.firstPendingAudioAt) return 0;
+  return Math.max(0, now - stream.firstPendingAudioAt);
 }
 
 function commitRealtimeAudioBuffer(stream) {
@@ -1364,6 +1385,8 @@ function commitRealtimeAudioBuffer(stream) {
   if (!stream.pendingAppendCount) return false;
   if (stream.commitInFlight) return false;
   const now = Date.now();
+  const pendingAudioMs = getRealtimePendingAudioMs(stream, now);
+  if (pendingAudioMs < MIN_COMMIT_AUDIO_MS) return false;
   if (now - stream.lastCommitAt < COMMIT_COOLDOWN_MS) {
     return false;
   }
@@ -1394,15 +1417,15 @@ function ensureRealtimeForceCommitTimer(stream) {
       stream.lastTransportError =
         sanitizeLineText(error?.message || '') || stream.lastTransportError;
     }
-  }, 250);
+  }, 100);
 }
 
-function sendRealtimeAudioChunk(stream, audio) {
+function sendRealtimeAudioChunk(stream, audio, durationMs = 0) {
   stream.rt.send({
     type: 'input_audio_buffer.append',
     audio,
   });
-  markRealtimePendingAudio(stream);
+  markRealtimePendingAudio(stream, durationMs);
 }
 
 function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
@@ -1439,9 +1462,15 @@ function flushQueuedRealtimeAudio(stream) {
   if (stream.pendingAudioChunks.length === 0) return;
 
   const queued = stream.pendingAudioChunks.splice(0);
-  queued.forEach((audio) => {
-    if (typeof audio !== 'string' || !audio) return;
-    sendRealtimeAudioChunk(stream, audio);
+  queued.forEach((chunk) => {
+    if (typeof chunk === 'string') {
+      if (!chunk) return;
+      sendRealtimeAudioChunk(stream, chunk);
+      return;
+    }
+
+    if (!chunk || typeof chunk.audio !== 'string' || !chunk.audio) return;
+    sendRealtimeAudioChunk(stream, chunk.audio, chunk.durationMs);
   });
 }
 
@@ -1823,6 +1852,7 @@ function startRealtimeTranscription({
     forceCommitTimer: null,
     pendingAppendCount: 0,
     firstPendingAudioAt: null,
+    pendingAudioMs: 0,
     commitInFlight: false,
     lastCommitAt: 0,
     closing: false,
@@ -2076,9 +2106,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('transcription:audio', ({ sessionId, audio }) => {
+  socket.on('transcription:audio', ({ sessionId, audio, durationMs }) => {
     if (!sessionId) return;
     if (typeof audio !== 'string' || !audio) return;
+    const normalizedDurationMs = normalizeChunkDurationMs(durationMs);
 
     const stream = transcriptionStreams.get(sessionId);
     if (!stream || stream.socketId !== socket.id || stream.closing) {
@@ -2086,7 +2117,10 @@ io.on('connection', (socket) => {
     }
 
     if (!stream.ready) {
-      stream.pendingAudioChunks.push(audio);
+      stream.pendingAudioChunks.push({
+        audio,
+        durationMs: normalizedDurationMs,
+      });
       if (stream.pendingAudioChunks.length > MAX_PENDING_AUDIO_CHUNKS) {
         stream.pendingAudioChunks.splice(
           0,
@@ -2097,7 +2131,7 @@ io.on('connection', (socket) => {
     }
 
     try {
-      sendRealtimeAudioChunk(stream, audio);
+      sendRealtimeAudioChunk(stream, audio, normalizedDurationMs);
     } catch (error) {
       const message =
         sanitizeLineText(error?.message || '') ||

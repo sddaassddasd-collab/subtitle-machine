@@ -691,9 +691,9 @@ const ControlPage = () => {
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
           channelCount: 1,
         },
       })
@@ -731,10 +731,12 @@ const ControlPage = () => {
         const pcm16 = float32ToInt16(downsampled)
         const audio = int16ToBase64(pcm16)
         if (!audio) return
+        const durationMs = (pcm16.length / TARGET_SAMPLE_RATE) * 1000
 
         socket.emit('transcription:audio', {
           sessionId,
           audio,
+          durationMs,
         })
       }
 
