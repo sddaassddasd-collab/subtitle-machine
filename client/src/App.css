@@ -477,6 +477,30 @@
   color: #d1fae5;
 }
 
+.viewer-live-line.viewer-speaker-1 {
+  color: #fde68a;
+}
+
+.viewer-live-line.viewer-speaker-2 {
+  color: #bfdbfe;
+}
+
+.viewer-live-line.viewer-speaker-3 {
+  color: #fbcfe8;
+}
+
+.viewer-live-line.viewer-speaker-4 {
+  color: #bbf7d0;
+}
+
+.viewer-live-line.viewer-speaker-5 {
+  color: #fecaca;
+}
+
+.viewer-live-line.viewer-speaker-6 {
+  color: #ddd6fe;
+}
+
 .viewer-text.viewer-direction {
   color: #000;
 }

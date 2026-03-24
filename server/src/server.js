@@ -50,6 +50,8 @@ const defaultTranscriptionState = () => ({
   semanticSegmentationEnabled:
     DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED,
   dualChannelEnabled: DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED,
+  speakerRecognitionEnabled:
+    DEFAULT_TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED,
   error: '',
   updatedAt: null,
 });
@@ -92,6 +94,8 @@ const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
 const DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED =
   process.env.TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED !== 'false';
+const DEFAULT_TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED =
+  process.env.TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED === 'true';
 const VALID_SEMANTIC_VAD_EAGERNESS = new Set([
   'low',
   'medium',
@@ -164,7 +168,23 @@ const TRANSCRIPTION_BOUNDARY_STRONG_PAUSE_MS = Number.isFinite(
     )
   : 320;
 const DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
-  process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED === 'true';
+  process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED !== 'false';
+const parsedSpeakerWindowMaxLines = Number(
+  process.env.TRANSCRIPTION_SPEAKER_WINDOW_MAX_LINES,
+);
+const TRANSCRIPTION_SPEAKER_WINDOW_MAX_LINES = Number.isFinite(
+  parsedSpeakerWindowMaxLines,
+)
+  ? Math.max(2, Math.floor(parsedSpeakerWindowMaxLines))
+  : 4;
+const parsedSpeakerWindowMaxMs = Number(
+  process.env.TRANSCRIPTION_SPEAKER_WINDOW_MAX_MS,
+);
+const TRANSCRIPTION_SPEAKER_WINDOW_MAX_MS = Number.isFinite(
+  parsedSpeakerWindowMaxMs,
+)
+  ? Math.max(1000, parsedSpeakerWindowMaxMs)
+  : 16000;
 const TRANSCRIPTION_ACCURATE_MODEL =
   process.env.TRANSCRIPTION_ACCURATE_MODEL || 'gpt-4o-transcribe-latest';
 const TRANSCRIPTION_ACCURATE_PROMPT =
@@ -1289,6 +1309,9 @@ function upsertCompletedFragment(
     existing.accurateSegment =
       accurateSegment || existing.accurateSegment || null;
     existing.boundaryMeta = boundaryMeta || existing.boundaryMeta || null;
+    if (!Number.isInteger(existing.speakerId)) {
+      existing.speakerId = null;
+    }
     clearMergedLineOverridesForItem(stream, itemId);
     return existing;
   }
@@ -1299,6 +1322,7 @@ function upsertCompletedFragment(
     corrected: false,
     accurateSegment: accurateSegment || null,
     boundaryMeta: boundaryMeta || null,
+    speakerId: null,
     completedAt: Date.now(),
   };
   stream.completedFragments.push(fragment);
@@ -1377,6 +1401,7 @@ function buildDisplayLineFromFragments(stream, fragments) {
     itemIds,
     itemId: itemIds[0] || null,
     text,
+    speakerId: getLineSpeakerId({ fragments }),
     corrected:
       fragments.some((fragment) => fragment.corrected === true) ||
       Boolean(overrideText),
@@ -1452,14 +1477,18 @@ function refreshGroupedTranscriptionLines(stream) {
   return keptLines;
 }
 
-function getTranscriptionDisplayParts(stream) {
+function buildTranscriptionDisplayEntries(stream) {
   if (!stream) {
-    return { historyLines: [], draftText: '' };
+    return [];
   }
 
-  const historyLines = refreshGroupedTranscriptionLines(stream)
-    .map((line) => sanitizeTranscriptionText(line?.text || ''))
-    .filter(Boolean);
+  const historyEntries = refreshGroupedTranscriptionLines(stream)
+    .map((line) => ({
+      text: sanitizeTranscriptionText(line?.text || ''),
+      speakerId: Number.isInteger(line?.speakerId) ? line.speakerId : null,
+      isFinal: true,
+    }))
+    .filter((entry) => entry.text);
 
   const draftItemId = stream.activeDraftItemId;
   const fallbackDraftId = getLastDraftItemId(stream);
@@ -1468,28 +1497,72 @@ function getTranscriptionDisplayParts(stream) {
     ? sanitizeTranscriptionText(stream.draftByItemId.get(selectedDraftId) || '')
     : '';
 
-  if (!draftText || historyLines.length === 0) {
-    return { historyLines, draftText };
+  if (!draftText) {
+    return historyEntries;
+  }
+
+  if (historyEntries.length === 0) {
+    return [
+      {
+        text: draftText,
+        speakerId: null,
+        isFinal: false,
+      },
+    ];
   }
 
   const lastFragment =
     Array.isArray(stream.completedFragments) && stream.completedFragments.length > 0
       ? stream.completedFragments[stream.completedFragments.length - 1]
       : null;
-  const currentLineText = historyLines[historyLines.length - 1] || '';
+  const currentLine = historyEntries[historyEntries.length - 1];
   const shouldStartNewLine = shouldBreakBetweenFragments({
-    currentText: currentLineText,
+    currentText: currentLine.text,
     previousFragment: lastFragment,
     nextFragment: { text: draftText },
   });
 
   if (shouldStartNewLine) {
-    return { historyLines, draftText };
+    return [
+      ...historyEntries,
+      {
+        text: draftText,
+        speakerId: null,
+        isFinal: false,
+      },
+    ];
   }
 
-  const mergedHistory = historyLines.slice(0, -1);
-  mergedHistory.push(joinTranscriptionTexts(currentLineText, draftText));
-  return { historyLines: mergedHistory, draftText: '' };
+  const mergedEntries = historyEntries.slice(0, -1);
+  mergedEntries.push({
+    text: joinTranscriptionTexts(currentLine.text, draftText),
+    speakerId: currentLine.speakerId,
+    isFinal: false,
+  });
+  return mergedEntries;
+}
+
+function getTranscriptionDisplayParts(stream) {
+  const entries = buildTranscriptionDisplayEntries(stream);
+  if (entries.length === 0) {
+    return { historyLines: [], draftText: '' };
+  }
+
+  const lastEntry = entries[entries.length - 1];
+  if (lastEntry?.isFinal === false) {
+    return {
+      historyLines: entries
+        .slice(0, -1)
+        .map((entry) => entry.text)
+        .filter(Boolean),
+      draftText: lastEntry.text,
+    };
+  }
+
+  return {
+    historyLines: entries.map((entry) => entry.text).filter(Boolean),
+    draftText: '',
+  };
 }
 
 function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
@@ -1798,6 +1871,263 @@ function queueMergedLineCorrection({
     });
 }
 
+async function transcribeSpeakerWindow({
+  client,
+  segment,
+  language,
+}) {
+  if (!isAccurateSegmentEligible(segment)) return null;
+
+  const wavBuffer = createWavFromPcm16Mono(segment.pcm);
+  if (!wavBuffer.length) return null;
+
+  const audioFile = await toFile(
+    wavBuffer,
+    `speaker-window-${segment.id || Date.now()}.wav`,
+    { type: 'audio/wav' },
+  );
+
+  const response = await client.audio.transcriptions.create({
+    file: audioFile,
+    model: 'gpt-4o-transcribe-diarize',
+    response_format: 'diarized_json',
+    chunking_strategy: 'auto',
+    ...(language ? { language } : {}),
+  });
+
+  if (!response || !Array.isArray(response.segments)) {
+    return null;
+  }
+
+  return response;
+}
+
+function getLineDurationMs(line) {
+  if (!line?.accurateSegment) return 0;
+  if (
+    Number.isFinite(line.accurateSegment.durationMs) &&
+    line.accurateSegment.durationMs > 0
+  ) {
+    return line.accurateSegment.durationMs;
+  }
+  return getPcmDurationMs(line.accurateSegment.pcm?.length || 0);
+}
+
+function getLineSpeakerId(line) {
+  if (!line?.fragments?.length) return null;
+  const counts = new Map();
+  line.fragments.forEach((fragment) => {
+    if (!Number.isInteger(fragment?.speakerId)) return;
+    counts.set(fragment.speakerId, (counts.get(fragment.speakerId) || 0) + 1);
+  });
+
+  let selectedId = null;
+  let selectedCount = 0;
+  counts.forEach((count, speakerId) => {
+    if (count <= selectedCount) return;
+    selectedId = speakerId;
+    selectedCount = count;
+  });
+  return selectedId;
+}
+
+function buildSpeakerRecognitionWindow(stream) {
+  if (!stream?.speakerRecognitionEnabled) return null;
+
+  const diarizableLines = refreshGroupedTranscriptionLines(stream).filter(
+    (line) => isAccurateSegmentEligible(line?.accurateSegment),
+  );
+  if (diarizableLines.length < 2) return null;
+
+  const selectedLines = [];
+  let totalDurationMs = 0;
+  for (
+    let index = diarizableLines.length - 1;
+    index >= 0 && selectedLines.length < TRANSCRIPTION_SPEAKER_WINDOW_MAX_LINES;
+    index -= 1
+  ) {
+    const candidate = diarizableLines[index];
+    const durationMs = getLineDurationMs(candidate);
+    if (durationMs <= 0) continue;
+    if (
+      selectedLines.length >= 2 &&
+      totalDurationMs + durationMs > TRANSCRIPTION_SPEAKER_WINDOW_MAX_MS
+    ) {
+      break;
+    }
+
+    selectedLines.unshift(candidate);
+    totalDurationMs += durationMs;
+  }
+
+  if (selectedLines.length < 2) return null;
+
+  return {
+    key: selectedLines.map((line) => line.key).join('||'),
+    lines: selectedLines,
+    segment: mergeAccurateSegments(
+      selectedLines.map((line) => line.accurateSegment),
+    ),
+  };
+}
+
+function assignSpeakerIdToLine(stream, line, speakerId) {
+  if (!stream || !line || !Number.isInteger(speakerId)) return false;
+  let changed = false;
+  line.itemIds.forEach((itemId) => {
+    const fragment = stream.fragmentByItemId.get(itemId);
+    if (!fragment || fragment.speakerId === speakerId) return;
+    fragment.speakerId = speakerId;
+    changed = true;
+  });
+  return changed;
+}
+
+function mapDiarizedSpeakersToLines(window, diarizedSegments = []) {
+  if (!window?.lines?.length || !Array.isArray(diarizedSegments)) {
+    return [];
+  }
+
+  const lineRanges = [];
+  let cursorSeconds = 0;
+  window.lines.forEach((line) => {
+    const durationSeconds = getLineDurationMs(line) / 1000;
+    const range = {
+      line,
+      start: cursorSeconds,
+      end: cursorSeconds + durationSeconds,
+      votes: new Map(),
+    };
+    cursorSeconds = range.end;
+    lineRanges.push(range);
+  });
+
+  diarizedSegments.forEach((segment) => {
+    const speaker = typeof segment?.speaker === 'string' ? segment.speaker : '';
+    const start = Number(segment?.start);
+    const end = Number(segment?.end);
+    if (!speaker || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return;
+    }
+
+    lineRanges.forEach((range) => {
+      const overlapSeconds =
+        Math.min(end, range.end) - Math.max(start, range.start);
+      if (overlapSeconds <= 0) return;
+      range.votes.set(
+        speaker,
+        (range.votes.get(speaker) || 0) + overlapSeconds,
+      );
+    });
+  });
+
+  return lineRanges
+    .map((range) => {
+      let localSpeaker = '';
+      let maxOverlap = 0;
+      range.votes.forEach((overlap, speaker) => {
+        if (overlap <= maxOverlap) return;
+        localSpeaker = speaker;
+        maxOverlap = overlap;
+      });
+      if (!localSpeaker) return null;
+      return {
+        line: range.line,
+        localSpeaker,
+      };
+    })
+    .filter(Boolean);
+}
+
+function resolveGlobalSpeakerMappings(stream, assignments) {
+  const votesByLocalSpeaker = new Map();
+  assignments.forEach(({ line, localSpeaker }) => {
+    const existingSpeakerId = getLineSpeakerId(line);
+    if (!Number.isInteger(existingSpeakerId)) return;
+
+    if (!votesByLocalSpeaker.has(localSpeaker)) {
+      votesByLocalSpeaker.set(localSpeaker, new Map());
+    }
+    const votes = votesByLocalSpeaker.get(localSpeaker);
+    votes.set(existingSpeakerId, (votes.get(existingSpeakerId) || 0) + 1);
+  });
+
+  const usedGlobalIds = new Set();
+  const localToGlobal = new Map();
+  votesByLocalSpeaker.forEach((votes, localSpeaker) => {
+    let selectedGlobalId = null;
+    let selectedCount = 0;
+    votes.forEach((count, globalId) => {
+      if (usedGlobalIds.has(globalId) || count <= selectedCount) return;
+      selectedGlobalId = globalId;
+      selectedCount = count;
+    });
+    if (!Number.isInteger(selectedGlobalId)) return;
+    localToGlobal.set(localSpeaker, selectedGlobalId);
+    usedGlobalIds.add(selectedGlobalId);
+  });
+
+  assignments.forEach(({ localSpeaker }) => {
+    if (localToGlobal.has(localSpeaker)) return;
+    localToGlobal.set(localSpeaker, stream.nextSpeakerId);
+    usedGlobalIds.add(stream.nextSpeakerId);
+    stream.nextSpeakerId += 1;
+  });
+
+  return localToGlobal;
+}
+
+function queueSpeakerRecognition({
+  stream,
+  isCurrent,
+  client,
+  sessionId,
+  language,
+}) {
+  if (!stream?.speakerRecognitionEnabled) return;
+
+  const window = buildSpeakerRecognitionWindow(stream);
+  if (!window?.segment || !window.key) return;
+  if (stream.pendingSpeakerWindowKeys.has(window.key)) return;
+
+  stream.pendingSpeakerWindowKeys.add(window.key);
+  stream.speakerRecognitionChain = stream.speakerRecognitionChain
+    .then(async () => {
+      if (!isCurrent() || stream.closing) return;
+
+      const response = await transcribeSpeakerWindow({
+        client,
+        segment: window.segment,
+        language,
+      });
+      if (!isCurrent() || stream.closing || !response?.segments?.length) return;
+
+      const assignments = mapDiarizedSpeakersToLines(window, response.segments);
+      if (assignments.length === 0) return;
+
+      const localToGlobal = resolveGlobalSpeakerMappings(stream, assignments);
+      let changed = false;
+      assignments.forEach(({ line, localSpeaker }) => {
+        const globalSpeakerId = localToGlobal.get(localSpeaker);
+        if (!Number.isInteger(globalSpeakerId)) return;
+        if (assignSpeakerIdToLine(stream, line, globalSpeakerId)) {
+          changed = true;
+        }
+      });
+
+      if (changed) {
+        syncTranscriptionStateFromStream(sessionId, stream);
+      }
+    })
+    .catch((error) => {
+      stream.lastTransportError =
+        sanitizeLineText(error?.message || '') || stream.lastTransportError;
+    })
+    .finally(() => {
+      stream.pendingSpeakerWindowKeys.delete(window.key);
+    });
+}
+
 function normalizeLanguageCode(rawLanguage) {
   if (typeof rawLanguage !== 'string') return null;
   const trimmed = rawLanguage.trim();
@@ -1811,6 +2141,11 @@ function normalizeLanguageCode(rawLanguage) {
 function normalizeDualChannelEnabled(rawEnabled) {
   if (typeof rawEnabled === 'boolean') return rawEnabled;
   return DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED;
+}
+
+function normalizeSpeakerRecognitionEnabled(rawEnabled) {
+  if (typeof rawEnabled === 'boolean') return rawEnabled;
+  return DEFAULT_TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED;
 }
 
 function normalizeSemanticSegmentationEnabled(rawEnabled) {
@@ -1851,6 +2186,9 @@ function ensureTranscriptionState(session) {
   normalized.dualChannelEnabled = normalizeDualChannelEnabled(
     normalized.dualChannelEnabled,
   );
+  normalized.speakerRecognitionEnabled = normalizeSpeakerRecognitionEnabled(
+    normalized.speakerRecognitionEnabled,
+  );
   session.transcription = normalized;
   return session.transcription;
 }
@@ -1872,6 +2210,7 @@ function getPublicTranscriptionState(session) {
         : DEFAULT_TRANSCRIPTION_MODEL,
     semanticSegmentationEnabled: state.semanticSegmentationEnabled !== false,
     dualChannelEnabled: state.dualChannelEnabled === true,
+    speakerRecognitionEnabled: state.speakerRecognitionEnabled === true,
     error:
       typeof state.error === 'string' && state.error.trim().length > 0
         ? state.error
@@ -2385,17 +2724,30 @@ function getViewerPayload(session) {
   const transcription = ensureTranscriptionState(session);
   const liveText = sanitizeTranscriptionMultilineText(transcription.text);
   const hasLiveText = transcription.active && liveText.length > 0;
+  const activeStream = transcriptionStreams.get(session.id);
+  const liveEntries = hasLiveText
+    ? buildTranscriptionDisplayEntries(activeStream)
+        .map((entry) => ({
+          text: sanitizeTranscriptionText(entry?.text || ''),
+          speakerId: Number.isInteger(entry?.speakerId) ? entry.speakerId : null,
+          isFinal: entry?.isFinal !== false,
+        }))
+        .filter((entry) => entry.text)
+    : [];
   const liveLines = hasLiveText
-    ? liveText
-        .split('\n')
-        .map((line) => sanitizeTranscriptionText(line))
-        .filter(Boolean)
+    ? (liveEntries.length > 0
+        ? liveEntries.map((entry) => entry.text)
+        : liveText
+            .split('\n')
+            .map((line) => sanitizeTranscriptionText(line))
+            .filter(Boolean))
     : [];
 
   if (!session.displayEnabled) {
     return {
       line: null,
       text: '',
+      liveEntries: [],
       liveLines: [],
       displayEnabled: false,
       source: 'hidden',
@@ -2410,6 +2762,7 @@ function getViewerPayload(session) {
         type: LINE_TYPES.DIALOGUE,
       },
       text: liveText,
+      liveEntries,
       liveLines,
       displayEnabled: true,
       source: 'transcription',
@@ -2424,6 +2777,7 @@ function getViewerPayload(session) {
       activeLine && activeLine.type === LINE_TYPES.DIRECTION
         ? ''
         : activeLine?.text || '',
+    liveEntries: [],
     liveLines: [],
     displayEnabled: true,
     source: 'script',
@@ -2739,6 +3093,7 @@ function startRealtimeTranscription({
   language,
   semanticSegmentationEnabled,
   dualChannelEnabled,
+  speakerRecognitionEnabled,
 }) {
   const selectedModel = normalizeTranscriptionModel(model);
   const selectedLanguage = normalizeLanguageCode(language);
@@ -2746,6 +3101,8 @@ function startRealtimeTranscription({
     normalizeSemanticSegmentationEnabled(semanticSegmentationEnabled);
   const selectedDualChannelEnabled =
     normalizeDualChannelEnabled(dualChannelEnabled);
+  const selectedSpeakerRecognitionEnabled =
+    normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled);
   const client = new OpenAI({ apiKey });
   const rt = new OpenAIRealtimeWS({ model: DEFAULT_REALTIME_WS_MODEL }, client);
 
@@ -2759,6 +3116,7 @@ function startRealtimeTranscription({
     language: selectedLanguage,
     semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
     dualChannelEnabled: selectedDualChannelEnabled,
+    speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
     draftByItemId: new Map(),
     activeDraftItemId: null,
     completedFragments: [],
@@ -2768,6 +3126,8 @@ function startRealtimeTranscription({
     mergedLineOverrides: new Map(),
     mergedLineCorrectionKeys: new Set(),
     correctionChain: Promise.resolve(),
+    speakerRecognitionChain: Promise.resolve(),
+    pendingSpeakerWindowKeys: new Set(),
     pendingAudioChunks: [],
     unboundCommittedSegments: [],
     segmentByItemId: new Map(),
@@ -2778,6 +3138,7 @@ function startRealtimeTranscription({
     currentSegmentBytes: 0,
     currentSegmentMs: 0,
     nextSegmentId: 1,
+    nextSpeakerId: 1,
     lastTransportError: '',
     lastInputLevel: 0,
     trailingSilenceMs: 0,
@@ -2807,6 +3168,7 @@ function startRealtimeTranscription({
       model: selectedModel,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
+      speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
       error: '',
     });
     broadcastTranscriptionState(sessionId);
@@ -2865,6 +3227,7 @@ function startRealtimeTranscription({
       model: selectedModel,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
+      speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
       error: '',
     });
     broadcastTranscriptionState(sessionId);
@@ -2969,6 +3332,14 @@ function startRealtimeTranscription({
         language: selectedLanguage,
       });
     }
+
+    queueSpeakerRecognition({
+      stream,
+      isCurrent,
+      client,
+      sessionId,
+      language: selectedLanguage,
+    });
   });
 
   rt.on('conversation.item.input_audio_transcription.failed', (event) => {
@@ -3064,6 +3435,7 @@ io.on('connection', (socket) => {
       model,
       semanticSegmentationEnabled,
       dualChannelEnabled,
+      speakerRecognitionEnabled,
     }) => {
       if (!sessionId) return;
 
@@ -3102,6 +3474,9 @@ io.on('connection', (socket) => {
           semanticSegmentationEnabled,
         ),
         dualChannelEnabled: normalizeDualChannelEnabled(dualChannelEnabled),
+        speakerRecognitionEnabled: normalizeSpeakerRecognitionEnabled(
+          speakerRecognitionEnabled,
+        ),
         error: '',
       });
       broadcastTranscriptionState(sessionId);
@@ -3116,6 +3491,7 @@ io.on('connection', (socket) => {
           model,
           semanticSegmentationEnabled,
           dualChannelEnabled,
+          speakerRecognitionEnabled,
         });
       } catch (error) {
         const message =

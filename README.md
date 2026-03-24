@@ -60,14 +60,15 @@ client/  Vite + React 控制端/檢視端前端
    - `whisper-1`
 4. 音訊事件使用 `input_audio_buffer.append` 持續送 PCM16(24kHz, mono)。
 5. 以前端 `conversation.item.input_audio_transcription.delta/completed` 顯示逐字稿。
-6. 後端預設改用 `semantic_vad` 做語意切段，讓 Realtime API 依句意決定何時結束片段；控制端可取消勾選「開啟語意切段」改回手動 commit。
+6. 後端預設改用 `semantic_vad` 做語意切段，讓 Realtime API 依句意決定何時結束片段；控制端不再提供此選項，預設固定開啟。
 7. 語意切段模式下仍保留超時保底 `commit`，若約 2.2 秒都未切出新片段，後端會手動補一次 `commit`，避免長時間完全沒有字幕輸出。
 8. 顯示層不再把每個 OpenAI item 硬當成一行；後端會把 completed fragments 重新分組，切段時同時參考 `semantic_vad`、最近靜音長度、標點傾向、最短/最長字數，以及中文不適合切開的位置。
 9. 若偵測到弱邊界（例如 fallback commit 切得太早），後端會把相鄰片段合併後再做一次較高精度的重轉錄/後修正，再回填到同一行。
 10. 手動 commit 單一路徑仍可在關閉語意切段時使用（預設約 900ms 一段，且每段至少 400ms 音訊）。
-11. 雙通道精修預設關閉，可由控制端勾選開啟；開啟後會在快通道完成後，以同段原始音訊做一次 `audio.transcriptions.create` 回填精修。
-12. 控制端收音會保留雙聲道輸入並混成 mono，避免 `BlackHole 2ch` 或其他立體聲來源只吃到單邊聲道。
-13. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
+11. 雙通道精修預設固定開啟；快通道完成後，後端會以同段原始音訊做一次 `audio.transcriptions.create` 回填精修。
+12. 控制端可額外勾選「辨認講者」；開啟後，後端會把最近幾行音訊視窗送到 `gpt-4o-transcribe-diarize` 做說話人分離，並在檢視端以不同顏色標示不同講者。
+13. 控制端收音會保留雙聲道輸入並混成 mono，避免 `BlackHole 2ch` 或其他立體聲來源只吃到單邊聲道。
+14. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
 
 可用環境變數微調即時性與穩定性（後端）：
 
@@ -83,7 +84,10 @@ client/  Vite + React 控制端/檢視端前端
 - `TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS`：commit 週期（預設 `900`）。
 - `TRANSCRIPTION_MIN_COMMIT_AUDIO_MS`：最小音訊長度才 commit（預設 `400`）。
 - `TRANSCRIPTION_COMMIT_COOLDOWN_MS`：兩次 commit 的最小間隔（預設 `500`）。
-- `TRANSCRIPTION_DUAL_CHANNEL_ENABLED`：控制端未指定時的雙通道精修預設值（預設 `false`）。
+- `TRANSCRIPTION_DUAL_CHANNEL_ENABLED`：控制端未指定時的雙通道精修預設值（預設 `true`）。
+- `TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED`：控制端未指定時，是否預設開啟講者辨認（預設 `false`）。
+- `TRANSCRIPTION_SPEAKER_WINDOW_MAX_LINES`：每次講者辨認時最多合併幾行近期字幕（預設 `4`）。
+- `TRANSCRIPTION_SPEAKER_WINDOW_MAX_MS`：每次講者辨認視窗的最大音訊長度（預設 `16000`）。
 - `TRANSCRIPTION_ACCURATE_MODEL`：二次音訊精修模型（預設 `gpt-4o-transcribe-latest`）。
 - `TRANSCRIPTION_ACCURATE_PROMPT`：二次音訊精修用提示詞（選填）。
 - `TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS`：二次精修最短片段長度（預設 `400`）。

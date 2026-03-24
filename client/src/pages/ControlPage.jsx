@@ -27,7 +27,8 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
   semanticSegmentationEnabled: true,
-  dualChannelEnabled: false,
+  dualChannelEnabled: true,
+  speakerRecognitionEnabled: false,
   error: '',
   updatedAt: null,
 }
@@ -64,7 +65,8 @@ const normalizeTranscriptionState = (raw) => {
         ? raw.language
         : null,
     semanticSegmentationEnabled: raw.semanticSegmentationEnabled !== false,
-    dualChannelEnabled: raw.dualChannelEnabled === true,
+    dualChannelEnabled: raw.dualChannelEnabled !== false,
+    speakerRecognitionEnabled: raw.speakerRecognitionEnabled === true,
     updatedAt:
       typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
         ? raw.updatedAt
@@ -730,9 +732,10 @@ const ControlPage = () => {
         sessionId,
         hasApiKey: Boolean(apiKey),
         targetSampleRate: TARGET_SAMPLE_RATE,
-        semanticSegmentationEnabled:
-          transcription.semanticSegmentationEnabled !== false,
-        dualChannelEnabled: transcription.dualChannelEnabled === true,
+        semanticSegmentationEnabled: true,
+        dualChannelEnabled: true,
+        speakerRecognitionEnabled:
+          transcription.speakerRecognitionEnabled === true,
       })
       releaseMicrophoneCapture()
       setStatus({ kind: 'info', message: '正在啟動即時語音辨識…' })
@@ -892,17 +895,19 @@ const ControlPage = () => {
         apiKey,
         model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
-        semanticSegmentationEnabled:
-          transcription.semanticSegmentationEnabled !== false,
-        dualChannelEnabled: transcription.dualChannelEnabled === true,
+        semanticSegmentationEnabled: true,
+        dualChannelEnabled: true,
+        speakerRecognitionEnabled:
+          transcription.speakerRecognitionEnabled === true,
       })
       logTranscriptionDebug('socket-start-emitted', {
         sessionId,
         model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
-        semanticSegmentationEnabled:
-          transcription.semanticSegmentationEnabled !== false,
-        dualChannelEnabled: transcription.dualChannelEnabled === true,
+        semanticSegmentationEnabled: true,
+        dualChannelEnabled: true,
+        speakerRecognitionEnabled:
+          transcription.speakerRecognitionEnabled === true,
       })
     } catch (error) {
       logTranscriptionDebug(
@@ -1426,9 +1431,8 @@ const ControlPage = () => {
     transcriptionStatusLabelMap[transcription.status] || transcription.status
   const transcriptionBusy =
     transcription.active || transcription.status === 'connecting'
-  const semanticSegmentationEnabled =
-    transcription.semanticSegmentationEnabled !== false
-  const dualChannelEnabled = transcription.dualChannelEnabled === true
+  const speakerRecognitionEnabled =
+    transcription.speakerRecognitionEnabled === true
   const transcriptionPreview =
     transcription.text && transcription.text.trim().length > 0
       ? transcription.text
@@ -1524,32 +1528,17 @@ const ControlPage = () => {
           <label className="checkbox-row">
             <input
               type="checkbox"
-              checked={semanticSegmentationEnabled}
+              checked={speakerRecognitionEnabled}
               disabled={transcriptionBusy}
               onChange={(event) => {
                 const nextChecked = event.target.checked
                 setTranscription((prev) => ({
                   ...prev,
-                  semanticSegmentationEnabled: nextChecked,
+                  speakerRecognitionEnabled: nextChecked,
                 }))
               }}
             />
-            開啟語意切段
-          </label>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={dualChannelEnabled}
-              disabled={transcriptionBusy}
-              onChange={(event) => {
-                const nextChecked = event.target.checked
-                setTranscription((prev) => ({
-                  ...prev,
-                  dualChannelEnabled: nextChecked,
-                }))
-              }}
-            />
-            開啟雙通道精修
+            辨認講者
           </label>
           <div className="transcription-actions">
             <button
@@ -1577,10 +1566,9 @@ const ControlPage = () => {
             <span>
               輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}
             </span>
-            <span>
-              切段：{semanticSegmentationEnabled ? '語意 + 保底' : '手動'}
-            </span>
-            <span>雙通道：{dualChannelEnabled ? '開啟' : '關閉'}</span>
+            <span>切段：語意 + 保底</span>
+            <span>雙通道：開啟</span>
+            <span>講者：{speakerRecognitionEnabled ? '辨認中' : '關閉'}</span>
           </div>
           <div
             className={`transcription-preview ${

@@ -26,6 +26,18 @@ const normalizeViewerPayload = (payload) => {
   const transcriptionIsFinal = transcription.isFinal !== false
   const source =
     typeof payload?.source === 'string' ? payload.source : 'script'
+  const liveEntries = Array.isArray(payload?.liveEntries)
+    ? payload.liveEntries
+        .map((entry) => ({
+          text: typeof entry?.text === 'string' ? entry.text.trim() : '',
+          speakerId:
+            Number.isInteger(entry?.speakerId) && entry.speakerId > 0
+              ? entry.speakerId
+              : null,
+          isFinal: entry?.isFinal !== false,
+        }))
+        .filter((entry) => entry.text)
+    : []
   const liveLines = Array.isArray(payload?.liveLines)
     ? payload.liveLines
         .filter((line) => typeof line === 'string')
@@ -36,6 +48,7 @@ const normalizeViewerPayload = (payload) => {
   return {
     enabled,
     line: nextLine,
+    liveEntries,
     liveLines,
     source,
     transcriptionIsFinal,
@@ -51,6 +64,7 @@ const ViewerPage = () => {
   const sessionId = query.get('session') || DEFAULT_SESSION_ID
 
   const [line, setLine] = useState(null)
+  const [liveEntries, setLiveEntries] = useState([])
   const [liveLines, setLiveLines] = useState([])
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
@@ -75,6 +89,7 @@ const ViewerPage = () => {
           const next = normalizeViewerPayload(data)
           setDisplayEnabled(next.enabled)
           setLine(next.line)
+          setLiveEntries(next.liveEntries)
           setLiveLines(next.liveLines)
           setLineSource(next.source)
           setTranscriptionIsFinal(next.transcriptionIsFinal)
@@ -102,6 +117,7 @@ const ViewerPage = () => {
       const next = normalizeViewerPayload(payload)
       setDisplayEnabled(next.enabled)
       setLine(next.line)
+      setLiveEntries(next.liveEntries)
       setLiveLines(next.liveLines)
       setLineSource(next.source)
       setTranscriptionIsFinal(next.transcriptionIsFinal)
@@ -144,7 +160,7 @@ const ViewerPage = () => {
     })
 
     return () => window.cancelAnimationFrame(frameId)
-  }, [lineSource, liveLines])
+  }, [lineSource, liveEntries, liveLines])
 
   useEffect(() => {
     const handler = () => {
@@ -260,18 +276,28 @@ const ViewerPage = () => {
       )}
       {lineSource === 'transcription' && displayEnabled ? (
         <div className="viewer-live-feed" ref={liveFeedRef}>
-          {liveLines.map((liveLine, index) => {
-            const isLatest = index === liveLines.length - 1
+          {(liveEntries.length > 0 ? liveEntries : liveLines.map((text) => ({
+            text,
+            speakerId: null,
+            isFinal: transcriptionIsFinal,
+          }))).map((liveEntry, index, entries) => {
+            const isLatest = index === entries.length - 1
+            const speakerClass =
+              Number.isInteger(liveEntry.speakerId) && liveEntry.speakerId > 0
+                ? ` viewer-speaker-${((liveEntry.speakerId - 1) % 6) + 1}`
+                : ''
             return (
               <div
-                key={`${index}-${liveLine}`}
-                className={`viewer-live-line${isLatest ? ' viewer-live-line-active' : ''}${
-                  transcriptionIsFinal && isLatest
+                key={`${index}-${liveEntry.text}`}
+                className={`viewer-live-line${speakerClass}${
+                  isLatest ? ' viewer-live-line-active' : ''
+                }${
+                  liveEntry.isFinal && isLatest
                     ? ' viewer-live-line-final'
                     : ''
                 }`}
               >
-                {liveLine}
+                {liveEntry.text}
               </div>
             )
           })}
