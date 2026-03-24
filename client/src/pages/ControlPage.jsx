@@ -1561,7 +1561,9 @@ const ControlPage = () => {
             <span>
               輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}
             </span>
-            <span>切段：{semanticSegmentationEnabled ? '語意' : '手動'}</span>
+            <span>
+              切段：{semanticSegmentationEnabled ? '語意 + 保底' : '手動'}
+            </span>
             <span>雙通道：{dualChannelEnabled ? '開啟' : '關閉'}</span>
           </div>
           <div

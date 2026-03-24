@@ -102,7 +102,15 @@ const TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS = VALID_SEMANTIC_VAD_EAGERNESS.has(
   process.env.TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS,
 )
   ? process.env.TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS
-  : 'medium';
+  : 'high';
+const parsedSemanticFallbackCommitMs = Number(
+  process.env.TRANSCRIPTION_SEMANTIC_FALLBACK_COMMIT_MS,
+);
+const TRANSCRIPTION_SEMANTIC_FALLBACK_COMMIT_MS = Number.isFinite(
+  parsedSemanticFallbackCommitMs,
+)
+  ? Math.max(0, parsedSemanticFallbackCommitMs)
+  : 2200;
 const DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
   process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED === 'true';
 const TRANSCRIPTION_ACCURATE_MODEL =
@@ -1813,9 +1821,12 @@ function getRealtimePendingAudioMs(stream, now = Date.now()) {
   return Math.max(0, now - stream.firstPendingAudioAt);
 }
 
-function commitRealtimeAudioBuffer(stream) {
+function commitRealtimeAudioBuffer(
+  stream,
+  { allowSemanticFallback = false } = {},
+) {
   if (!stream || !stream.ready || stream.closing) return false;
-  if (stream.semanticSegmentationEnabled) return false;
+  if (stream.semanticSegmentationEnabled && !allowSemanticFallback) return false;
   if (!stream.pendingAppendCount) return false;
   if (stream.commitInFlight) return false;
   const now = Date.now();
@@ -1836,16 +1847,22 @@ function commitRealtimeAudioBuffer(stream) {
 
 function ensureRealtimeForceCommitTimer(stream) {
   if (!stream || stream.forceCommitTimer) return;
-  if (stream.semanticSegmentationEnabled) return;
-  if (FORCE_COMMIT_INTERVAL_MS <= 0) return;
+  const commitThresholdMs = stream.semanticSegmentationEnabled
+    ? TRANSCRIPTION_SEMANTIC_FALLBACK_COMMIT_MS
+    : FORCE_COMMIT_INTERVAL_MS;
+  if (commitThresholdMs <= 0) return;
   stream.forceCommitTimer = setInterval(() => {
     if (!stream.ready || stream.closing) return;
     if (!stream.pendingAppendCount || !stream.firstPendingAudioAt) return;
-    if (Date.now() - stream.firstPendingAudioAt < FORCE_COMMIT_INTERVAL_MS) {
+    if (Date.now() - stream.firstPendingAudioAt < commitThresholdMs) {
       return;
     }
     try {
-      const committed = commitRealtimeAudioBuffer(stream);
+      // Semantic VAD remains the primary segmentation strategy; this timer only
+      // forces a commit when the stream has stayed open too long without a cut.
+      const committed = commitRealtimeAudioBuffer(stream, {
+        allowSemanticFallback: stream.semanticSegmentationEnabled === true,
+      });
       if (committed) {
         resetRealtimePendingAudio(stream);
       }

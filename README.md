@@ -61,15 +61,17 @@ client/  Vite + React 控制端/檢視端前端
 4. 音訊事件使用 `input_audio_buffer.append` 持續送 PCM16(24kHz, mono)。
 5. 以前端 `conversation.item.input_audio_transcription.delta/completed` 顯示逐字稿。
 6. 後端預設改用 `semantic_vad` 做語意切段，讓 Realtime API 依句意決定何時結束片段；控制端可取消勾選「開啟語意切段」改回手動 commit。
-7. 手動 commit 仍保留為 fallback 路徑，僅在關閉語意切段時啟用（預設約 900ms 一段，且每段至少 400ms 音訊）。
-8. 雙通道精修預設關閉，可由控制端勾選開啟；開啟後會在快通道完成後，以同段原始音訊做一次 `audio.transcriptions.create` 回填精修。
-9. 控制端收音會保留雙聲道輸入並混成 mono，避免 `BlackHole 2ch` 或其他立體聲來源只吃到單邊聲道。
-10. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
+7. 語意切段模式下仍保留超時保底 `commit`，若約 2.2 秒都未切出新片段，後端會手動補一次 `commit`，避免長時間完全沒有字幕輸出。
+8. 手動 commit 單一路徑仍可在關閉語意切段時使用（預設約 900ms 一段，且每段至少 400ms 音訊）。
+9. 雙通道精修預設關閉，可由控制端勾選開啟；開啟後會在快通道完成後，以同段原始音訊做一次 `audio.transcriptions.create` 回填精修。
+10. 控制端收音會保留雙聲道輸入並混成 mono，避免 `BlackHole 2ch` 或其他立體聲來源只吃到單邊聲道。
+11. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
 
 可用環境變數微調即時性與穩定性（後端）：
 
 - `TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED`：控制端未指定時，是否預設開啟語意切段（預設 `true`）。
-- `TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS`：語意切段速度，可選 `low` / `medium` / `high` / `auto`（預設 `medium`）。
+- `TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS`：語意切段速度，可選 `low` / `medium` / `high` / `auto`（預設 `high`）。
+- `TRANSCRIPTION_SEMANTIC_FALLBACK_COMMIT_MS`：語意切段模式下，最長等待多久仍沒切段就強制補一次 `commit`（預設 `2200`）。
 - `TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS`：commit 週期（預設 `900`）。
 - `TRANSCRIPTION_MIN_COMMIT_AUDIO_MS`：最小音訊長度才 commit（預設 `400`）。
 - `TRANSCRIPTION_COMMIT_COOLDOWN_MS`：兩次 commit 的最小間隔（預設 `500`）。
