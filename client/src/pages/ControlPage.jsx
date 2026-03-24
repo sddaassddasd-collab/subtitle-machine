@@ -123,6 +123,17 @@ const int16ToBase64 = (samples) => {
   return btoa(binary)
 }
 
+const logTranscriptionDebug = (stage, payload = {}, level = 'info') => {
+  const timestamp = new Date().toISOString()
+  const logger =
+    level === 'error'
+      ? console.error
+      : level === 'warn'
+        ? console.warn
+        : console.info
+  logger(`[transcription][${timestamp}] ${stage}`, payload)
+}
+
 const ControlPage = () => {
   const location = useLocation()
   const navigate = useNavigate()
@@ -396,9 +407,23 @@ const ControlPage = () => {
     }
 
     const handleTranscriptionUpdate = (payload) => {
-      setTranscription(
-        normalizeTranscriptionState(payload?.transcription),
-      )
+      const nextState = normalizeTranscriptionState(payload?.transcription)
+      if (
+        nextState.status === 'error' ||
+        (typeof nextState.error === 'string' && nextState.error.trim())
+      ) {
+        logTranscriptionDebug(
+          'server-state-error',
+          {
+            sessionId,
+            status: nextState.status,
+            error: nextState.error || '',
+            updatedAt: nextState.updatedAt,
+          },
+          'error',
+        )
+      }
+      setTranscription(nextState)
     }
 
     const handleTranscriptionError = (payload) => {
@@ -406,6 +431,15 @@ const ControlPage = () => {
         payload && typeof payload.message === 'string'
           ? payload.message
           : '即時語音辨識發生錯誤'
+      logTranscriptionDebug(
+        'socket-event-error',
+        {
+          sessionId,
+          message,
+          rawPayload: payload,
+        },
+        'error',
+      )
       setStatus({
         kind: 'error',
         message,
@@ -535,11 +569,20 @@ const ControlPage = () => {
     }
 
     lastTranscriptionErrorRef.current = transcription.error
+    logTranscriptionDebug(
+      'client-state-error',
+      {
+        error: transcription.error,
+        status: transcription.status,
+        sessionId,
+      },
+      'error',
+    )
     setStatus({
       kind: 'error',
       message: `即時語音辨識：${transcription.error}`,
     })
-  }, [transcription.error])
+  }, [transcription.error, transcription.status, sessionId])
 
   const handleAccessSubmit = (event) => {
     event.preventDefault()
@@ -573,11 +616,21 @@ const ControlPage = () => {
 
   const handleStartLiveTranscription = async () => {
     if (!socketRef.current || !sessionId) {
+      logTranscriptionDebug(
+        'start-blocked',
+        { reason: 'socket-not-ready', sessionId },
+        'error',
+      )
       setStatus({ kind: 'error', message: '尚未連上場次，無法啟動語音辨識' })
       return
     }
 
     if (!apiKey) {
+      logTranscriptionDebug(
+        'start-blocked',
+        { reason: 'missing-api-key', sessionId },
+        'error',
+      )
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
       return
     }
@@ -587,6 +640,11 @@ const ControlPage = () => {
       !navigator.mediaDevices ||
       !navigator.mediaDevices.getUserMedia
     ) {
+      logTranscriptionDebug(
+        'start-blocked',
+        { reason: 'browser-not-supported', sessionId },
+        'error',
+      )
       setStatus({
         kind: 'error',
         message: '目前瀏覽器不支援麥克風錄音功能',
@@ -595,11 +653,21 @@ const ControlPage = () => {
     }
 
     if (transcription.active || transcription.status === 'connecting') {
+      logTranscriptionDebug('start-skipped', {
+        reason: 'already-active',
+        sessionId,
+        status: transcription.status,
+      })
       setStatus({ kind: 'info', message: '語音辨識已啟動' })
       return
     }
 
     try {
+      logTranscriptionDebug('start-requested', {
+        sessionId,
+        hasApiKey: Boolean(apiKey),
+        targetSampleRate: TARGET_SAMPLE_RATE,
+      })
       releaseMicrophoneCapture()
       setStatus({ kind: 'info', message: '正在啟動即時語音辨識…' })
       setTranscription((prev) => ({
@@ -628,6 +696,11 @@ const ControlPage = () => {
 
       const audioContext = new AudioContextClass()
       await audioContext.resume()
+      logTranscriptionDebug('audio-context-ready', {
+        sessionId,
+        sampleRate: audioContext.sampleRate,
+        hasAudioWorklet: Boolean(audioContext.audioWorklet),
+      })
 
       const sourceNode = audioContext.createMediaStreamSource(stream)
       const silenceNode = audioContext.createGain()
@@ -668,6 +741,10 @@ const ControlPage = () => {
         typeof AudioWorkletNodeClass === 'function'
       ) {
         await audioContext.audioWorklet.addModule(MIC_CAPTURE_WORKLET_URL.href)
+        logTranscriptionDebug('audio-worklet-enabled', {
+          sessionId,
+          worklet: MIC_CAPTURE_WORKLET_URL.href,
+        })
         const workletNode = new AudioWorkletNodeClass(
           audioContext,
           'mic-capture-processor',
@@ -696,6 +773,14 @@ const ControlPage = () => {
         captureNode = workletNode
       } else {
         usingScriptProcessorFallback = true
+        logTranscriptionDebug(
+          'audio-worklet-fallback',
+          {
+            sessionId,
+            reason: 'AudioWorklet unavailable, using ScriptProcessor fallback',
+          },
+          'warn',
+        )
         const processorNode = audioContext.createScriptProcessor(4096, 1, 1)
         processorNode.onaudioprocess = (event) => {
           emitSamples(event.inputBuffer.getChannelData(0))
@@ -728,7 +813,22 @@ const ControlPage = () => {
         model: transcription.model || 'gpt-4o-mini-transcribe',
         language: transcription.language || 'zh',
       })
+      logTranscriptionDebug('socket-start-emitted', {
+        sessionId,
+        model: transcription.model || 'gpt-4o-mini-transcribe',
+        language: transcription.language || 'zh',
+      })
     } catch (error) {
+      logTranscriptionDebug(
+        'start-failed',
+        {
+          sessionId,
+          name: error?.name,
+          message: error?.message,
+          stack: error?.stack,
+        },
+        'error',
+      )
       releaseMicrophoneCapture()
       socketRef.current?.emit('transcription:stop', { sessionId })
       setTranscription((prev) => ({
@@ -746,6 +846,7 @@ const ControlPage = () => {
 
   const handleStopLiveTranscription = () => {
     if (!sessionId) return
+    logTranscriptionDebug('stop-requested', { sessionId })
     releaseMicrophoneCapture()
     socketRef.current?.emit('transcription:stop', { sessionId })
     setStatus({ kind: 'info', message: '已停止即時語音辨識' })
