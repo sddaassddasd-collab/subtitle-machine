@@ -26,6 +26,7 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  transcriptionContext: '',
   semanticSegmentationEnabled: true,
   dualChannelEnabled: true,
   speakerRecognitionEnabled: false,
@@ -64,6 +65,10 @@ const normalizeTranscriptionState = (raw) => {
       typeof raw.language === 'string' && raw.language.trim().length > 0
         ? raw.language
         : null,
+    transcriptionContext:
+      typeof raw.transcriptionContext === 'string'
+        ? raw.transcriptionContext
+        : '',
     semanticSegmentationEnabled: raw.semanticSegmentationEnabled !== false,
     dualChannelEnabled: raw.dualChannelEnabled !== false,
     speakerRecognitionEnabled: raw.speakerRecognitionEnabled === true,
@@ -734,6 +739,8 @@ const ControlPage = () => {
         targetSampleRate: TARGET_SAMPLE_RATE,
         semanticSegmentationEnabled: true,
         dualChannelEnabled: true,
+        hasTranscriptionContext:
+          Boolean(transcription.transcriptionContext?.trim()),
         speakerRecognitionEnabled:
           transcription.speakerRecognitionEnabled === true,
       })
@@ -897,6 +904,7 @@ const ControlPage = () => {
         language: transcription.language || 'zh',
         semanticSegmentationEnabled: true,
         dualChannelEnabled: true,
+        transcriptionContext: transcription.transcriptionContext || '',
         speakerRecognitionEnabled:
           transcription.speakerRecognitionEnabled === true,
       })
@@ -906,6 +914,8 @@ const ControlPage = () => {
         language: transcription.language || 'zh',
         semanticSegmentationEnabled: true,
         dualChannelEnabled: true,
+        hasTranscriptionContext:
+          Boolean(transcription.transcriptionContext?.trim()),
         speakerRecognitionEnabled:
           transcription.speakerRecognitionEnabled === true,
       })
@@ -1525,6 +1535,26 @@ const ControlPage = () => {
 
         <div className="input-group transcription-panel">
           <label>即時語音辨識（雲端）</label>
+          <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
+          <textarea
+            id="transcription-context"
+            rows={4}
+            maxLength={600}
+            placeholder={`例如：主題：半導體法說會
+關鍵詞：CoWoS、HBM、N3E、毛利率
+專有名詞：OpenAI、BlackHole、Realtime API`}
+            value={transcription.transcriptionContext}
+            disabled={transcriptionBusy}
+            onChange={(event) => {
+              setTranscription((prev) => ({
+                ...prev,
+                transcriptionContext: event.target.value,
+              }))
+            }}
+          />
+          <span className="input-note">
+            空白表示不提供額外主題提示，辨識流程會維持目前預設模式。
+          </span>
           <label className="checkbox-row">
             <input
               type="checkbox"

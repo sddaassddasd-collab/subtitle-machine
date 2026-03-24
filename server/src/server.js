@@ -47,6 +47,7 @@ const defaultTranscriptionState = () => ({
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  transcriptionContext: '',
   semanticSegmentationEnabled:
     DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED,
   dualChannelEnabled: DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED,
@@ -68,6 +69,7 @@ const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
 const MAX_TRANSCRIPTION_DISPLAY_LINES = 8;
+const MAX_TRANSCRIPTION_CONTEXT_CHARS = 600;
 const AUDIO_PCM_SAMPLE_RATE = 24000;
 const AUDIO_PCM_BYTES_PER_SAMPLE = 2;
 const parsedForceCommitIntervalMs = Number(
@@ -1136,32 +1138,37 @@ function traditionalizeChineseText(text) {
   }
 }
 
-function stripTranscriptionPromptLeak(text) {
+function stripTranscriptionPromptLeak(text, promptText = '') {
   const sanitized = sanitizeTranscriptionText(text);
   if (!sanitized) return '';
-  if (!TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT) return sanitized;
 
-  const promptText = sanitizeTranscriptionText(
+  const promptCandidates = [
+    promptText,
     TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT,
-  );
-  if (!promptText) return sanitized;
+  ]
+    .map((candidate) => sanitizeTranscriptionText(candidate || ''))
+    .filter(Boolean);
 
-  if (sanitized === promptText) {
-    return '';
+  for (const normalizedPromptText of promptCandidates) {
+    if (sanitized === normalizedPromptText) {
+      return '';
+    }
+
+    if (!sanitized.startsWith(normalizedPromptText)) {
+      continue;
+    }
+
+    return sanitized
+      .slice(normalizedPromptText.length)
+      .replace(/^[，,。.!?！？；;：:\-\s]+/u, '')
+      .trim();
   }
 
-  if (!sanitized.startsWith(promptText)) {
-    return sanitized;
-  }
-
-  return sanitized
-    .slice(promptText.length)
-    .replace(/^[，,。.!?！？；;：:\-\s]+/u, '')
-    .trim();
+  return sanitized;
 }
 
-function normalizeTranscriptionOutputText(text, language) {
-  const sanitized = stripTranscriptionPromptLeak(text);
+function normalizeTranscriptionOutputText(text, language, promptText = '') {
+  const sanitized = stripTranscriptionPromptLeak(text, promptText);
   if (!sanitized) return '';
   if (!shouldPreferTraditionalChinese(language)) {
     return sanitized;
@@ -1180,6 +1187,72 @@ function sanitizeTranscriptionMultilineText(text) {
     .map((line) => sanitizeTranscriptionText(line))
     .filter(Boolean);
   return lines.join('\n').trim();
+}
+
+function normalizeTranscriptionContext(rawContext) {
+  if (typeof rawContext !== 'string') return '';
+
+  const normalized = stripBom(rawContext)
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => sanitizeLineText(line))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+
+  if (!normalized) return '';
+  return normalized.slice(0, MAX_TRANSCRIPTION_CONTEXT_CHARS).trim();
+}
+
+function buildTranscriptionContextPrompt(transcriptionContext) {
+  const normalizedContext = normalizeTranscriptionContext(transcriptionContext);
+  if (!normalizedContext) return '';
+
+  return [
+    '以下是這段語音的主題、關鍵詞與專有名詞參考。',
+    '僅在音訊內容或上下文明確支持時優先採用，不要為了符合提示而捏造不存在的內容。',
+    normalizedContext,
+  ].join('\n');
+}
+
+function buildRealtimeTranscriptionPrompt({ language, transcriptionContext }) {
+  const promptParts = [];
+
+  if (
+    shouldPreferTraditionalChinese(language) &&
+    TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT
+  ) {
+    promptParts.push(TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT);
+  }
+
+  const contextPrompt = buildTranscriptionContextPrompt(transcriptionContext);
+  if (contextPrompt) {
+    promptParts.push(contextPrompt);
+  }
+
+  return promptParts.join('\n\n').trim();
+}
+
+function buildAccurateTranscriptionPrompt({ language, transcriptionContext }) {
+  const promptParts = [];
+
+  if (TRANSCRIPTION_ACCURATE_PROMPT) {
+    promptParts.push(TRANSCRIPTION_ACCURATE_PROMPT);
+  }
+
+  const contextPrompt = buildTranscriptionContextPrompt(transcriptionContext);
+  if (contextPrompt) {
+    promptParts.push(contextPrompt);
+  }
+
+  if (
+    shouldPreferTraditionalChinese(language) &&
+    TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT
+  ) {
+    promptParts.push(TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT);
+  }
+
+  return promptParts.join('\n\n').trim();
 }
 
 function getTranscriptionTextLength(text) {
@@ -1583,9 +1656,15 @@ function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
   broadcastViewerState(sessionId);
 }
 
-async function correctTranscriptionLine({ client, text, language }) {
+async function correctTranscriptionLine({
+  client,
+  text,
+  language,
+  transcriptionContext,
+}) {
   const original = normalizeTranscriptionOutputText(text, language);
   if (!original) return '';
+  const normalizedContext = normalizeTranscriptionContext(transcriptionContext);
 
   const prompt = [
     {
@@ -1604,6 +1683,7 @@ async function correctTranscriptionLine({ client, text, language }) {
 4. 若原句已正確，原樣輸出。
 ${language ? `5. 目標語言代碼：${language}` : ''}
 ${shouldPreferTraditionalChinese(language) ? '6. 若輸出為中文，請一律使用繁體中文（台灣用字）。' : ''}
+${normalizedContext ? `7. 以下是本段內容的主題、關鍵詞與專有名詞參考；僅在能幫助修正明顯辨識錯誤時採用，不要硬套：\n${normalizedContext}` : ''}
 
 原句：
 ${original}
@@ -1634,6 +1714,7 @@ async function transcribeAccurateSegmentLine({
   segment,
   language,
   dualChannelEnabled,
+  transcriptionContext,
 }) {
   if (!dualChannelEnabled) return '';
   if (!isAccurateSegmentEligible(segment)) return '';
@@ -1647,18 +1728,20 @@ async function transcribeAccurateSegmentLine({
     { type: 'audio/wav' },
   );
 
+  const promptText = buildAccurateTranscriptionPrompt({
+    language,
+    transcriptionContext,
+  });
   const response = await client.audio.transcriptions.create({
     file: audioFile,
     model: TRANSCRIPTION_ACCURATE_MODEL,
     ...(language ? { language } : {}),
-    ...(TRANSCRIPTION_ACCURATE_PROMPT
-      ? { prompt: TRANSCRIPTION_ACCURATE_PROMPT }
-      : {}),
+    ...(promptText ? { prompt: promptText } : {}),
   });
 
   const rawText =
     typeof response === 'string' ? response : response?.text || '';
-  return normalizeTranscriptionOutputText(rawText, language);
+  return normalizeTranscriptionOutputText(rawText, language, promptText);
 }
 
 function shouldApplyAccurateReplacement(currentText, candidateText) {
@@ -1735,6 +1818,7 @@ function queueTranscriptionCorrection({
             segment: accurateSegment,
             language,
             dualChannelEnabled,
+            transcriptionContext: stream.transcriptionContext,
           });
           if (!isCurrent() || stream.closing) return;
           if (shouldApplyAccurateReplacement(nextText, refined)) {
@@ -1753,6 +1837,7 @@ function queueTranscriptionCorrection({
             client,
             text: nextText,
             language,
+            transcriptionContext: stream.transcriptionContext,
           });
           if (!isCurrent() || stream.closing) return;
           if (corrected && corrected !== nextText) {
@@ -1828,6 +1913,7 @@ function queueMergedLineCorrection({
             segment: mergedSegment,
             language,
             dualChannelEnabled,
+            transcriptionContext: stream.transcriptionContext,
           });
           if (!isCurrent() || stream.closing) return;
           if (shouldApplyAccurateReplacement(nextText, refined)) {
@@ -1846,6 +1932,7 @@ function queueMergedLineCorrection({
             client,
             text: nextText,
             language,
+            transcriptionContext: stream.transcriptionContext,
           });
           if (!isCurrent() || stream.closing) return;
           if (corrected && corrected !== nextText) {
@@ -2148,6 +2235,10 @@ function normalizeSpeakerRecognitionEnabled(rawEnabled) {
   return DEFAULT_TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED;
 }
 
+function normalizeTranscriptionContextValue(rawContext) {
+  return normalizeTranscriptionContext(rawContext);
+}
+
 function normalizeSemanticSegmentationEnabled(rawEnabled) {
   if (typeof rawEnabled === 'boolean') return rawEnabled;
   return DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED;
@@ -2186,6 +2277,9 @@ function ensureTranscriptionState(session) {
   normalized.dualChannelEnabled = normalizeDualChannelEnabled(
     normalized.dualChannelEnabled,
   );
+  normalized.transcriptionContext = normalizeTranscriptionContextValue(
+    normalized.transcriptionContext,
+  );
   normalized.speakerRecognitionEnabled = normalizeSpeakerRecognitionEnabled(
     normalized.speakerRecognitionEnabled,
   );
@@ -2208,6 +2302,9 @@ function getPublicTranscriptionState(session) {
       typeof state.model === 'string' && state.model.trim().length > 0
         ? state.model
         : DEFAULT_TRANSCRIPTION_MODEL,
+    transcriptionContext: normalizeTranscriptionContextValue(
+      state.transcriptionContext,
+    ),
     semanticSegmentationEnabled: state.semanticSegmentationEnabled !== false,
     dualChannelEnabled: state.dualChannelEnabled === true,
     speakerRecognitionEnabled: state.speakerRecognitionEnabled === true,
@@ -2660,16 +2757,18 @@ function buildRealtimeTranscriptionSessionUpdate({
   model,
   language,
   semanticSegmentationEnabled,
+  transcriptionContext,
 }) {
   const transcription = {
     model,
     ...(language ? { language } : {}),
   };
-  if (
-    shouldPreferTraditionalChinese(language) &&
-    TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT
-  ) {
-    transcription.prompt = TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT;
+  const promptText = buildRealtimeTranscriptionPrompt({
+    language,
+    transcriptionContext,
+  });
+  if (promptText) {
+    transcription.prompt = promptText;
   }
 
   const turnDetection =
@@ -3094,6 +3193,7 @@ function startRealtimeTranscription({
   semanticSegmentationEnabled,
   dualChannelEnabled,
   speakerRecognitionEnabled,
+  transcriptionContext,
 }) {
   const selectedModel = normalizeTranscriptionModel(model);
   const selectedLanguage = normalizeLanguageCode(language);
@@ -3103,6 +3203,13 @@ function startRealtimeTranscription({
     normalizeDualChannelEnabled(dualChannelEnabled);
   const selectedSpeakerRecognitionEnabled =
     normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled);
+  const selectedTranscriptionContext = normalizeTranscriptionContextValue(
+    transcriptionContext,
+  );
+  const realtimePromptText = buildRealtimeTranscriptionPrompt({
+    language: selectedLanguage,
+    transcriptionContext: selectedTranscriptionContext,
+  });
   const client = new OpenAI({ apiKey });
   const rt = new OpenAIRealtimeWS({ model: DEFAULT_REALTIME_WS_MODEL }, client);
 
@@ -3114,6 +3221,8 @@ function startRealtimeTranscription({
     sessionType: DEFAULT_REALTIME_SESSION_TYPE,
     model: selectedModel,
     language: selectedLanguage,
+    transcriptionContext: selectedTranscriptionContext,
+    realtimePromptText,
     semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
     dualChannelEnabled: selectedDualChannelEnabled,
     speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -3166,6 +3275,7 @@ function startRealtimeTranscription({
       isFinal: true,
       language: selectedLanguage,
       model: selectedModel,
+      transcriptionContext: selectedTranscriptionContext,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
       speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -3180,6 +3290,7 @@ function startRealtimeTranscription({
           model: selectedModel,
           language: selectedLanguage,
           semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
+          transcriptionContext: selectedTranscriptionContext,
         }),
       );
       if (stream.initTimeout) {
@@ -3225,6 +3336,7 @@ function startRealtimeTranscription({
       isFinal: true,
       language: selectedLanguage,
       model: selectedModel,
+      transcriptionContext: selectedTranscriptionContext,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
       speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -3287,6 +3399,7 @@ function startRealtimeTranscription({
     const merged = normalizeTranscriptionOutputText(
       `${previous}${event.delta}`,
       selectedLanguage,
+      stream.realtimePromptText,
     );
     setDraftLine(stream, event.item_id, merged);
     syncTranscriptionStateFromStream(sessionId, stream);
@@ -3300,6 +3413,7 @@ function startRealtimeTranscription({
     const transcript = normalizeTranscriptionOutputText(
       event.transcript || fallback,
       selectedLanguage,
+      stream.realtimePromptText,
     );
     const accurateSegment = takeAccurateSegmentForItem(stream, event.item_id);
     const boundaryMeta = stream.boundaryMetaByItemId.get(event.item_id) || null;
@@ -3436,6 +3550,7 @@ io.on('connection', (socket) => {
       semanticSegmentationEnabled,
       dualChannelEnabled,
       speakerRecognitionEnabled,
+      transcriptionContext,
     }) => {
       if (!sessionId) return;
 
@@ -3470,6 +3585,9 @@ io.on('connection', (socket) => {
         isFinal: true,
         language: normalizeLanguageCode(language),
         model: normalizeTranscriptionModel(model),
+        transcriptionContext: normalizeTranscriptionContextValue(
+          transcriptionContext,
+        ),
         semanticSegmentationEnabled: normalizeSemanticSegmentationEnabled(
           semanticSegmentationEnabled,
         ),
@@ -3492,6 +3610,7 @@ io.on('connection', (socket) => {
           semanticSegmentationEnabled,
           dualChannelEnabled,
           speakerRecognitionEnabled,
+          transcriptionContext,
         });
       } catch (error) {
         const message =

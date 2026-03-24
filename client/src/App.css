@@ -119,7 +119,8 @@
 
 .input-group input[type='text'],
 .input-group input[type='password'],
-.input-group input[type='file'] {
+.input-group input[type='file'],
+.input-group textarea {
   padding: 0.55rem 0.7rem;
   border-radius: 8px;
   border: 1px solid rgba(148, 163, 184, 0.25);
@@ -127,9 +128,20 @@
   color: #e2e8f0;
 }
 
+.input-group textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+  font: inherit;
+}
+
 .input-group input[type='file'] {
   padding: 0.4rem 0.65rem;
   cursor: pointer;
+}
+
+.input-note {
+  font-size: 0.8rem;
+  color: #94a3b8;
 }
 
 .viewer-preview {
