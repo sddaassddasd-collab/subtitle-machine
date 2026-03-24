@@ -271,6 +271,9 @@ const ViewerPage = () => {
     : '字幕暫停中'
   const latestLiveLine =
     liveLines.length > 0 ? liveLines[liveLines.length - 1] : ''
+  const liveFeedClassName = `viewer-live-feed${
+    musicActive ? ' with-music-banner' : ''
+  }`
 
   return (
     <div className="viewer-page" ref={containerRef}>
@@ -283,12 +286,11 @@ const ViewerPage = () => {
         ⛶
       </button>
       {displayEnabled && musicActive && (
-        <div
-          className={`viewer-music-badge${
-            lineSource === 'transcription' ? ' with-live-badge' : ''
-          }`}
-        >
-          {musicText}
+        <div className="viewer-music-banner" role="status" aria-live="polite">
+          <div className="viewer-music-banner-inner">
+            <span className="viewer-music-label">音樂提示</span>
+            <span className="viewer-music-text">{musicText}</span>
+          </div>
         </div>
       )}
       {lineSource === 'transcription' && displayEnabled && (
@@ -297,7 +299,7 @@ const ViewerPage = () => {
         </div>
       )}
       {lineSource === 'transcription' && displayEnabled ? (
-        <div className="viewer-live-feed" ref={liveFeedRef}>
+        <div className={liveFeedClassName} ref={liveFeedRef}>
           {(liveEntries.length > 0 ? liveEntries : liveLines.map((text) => ({
             text,
             speakerId: null,
