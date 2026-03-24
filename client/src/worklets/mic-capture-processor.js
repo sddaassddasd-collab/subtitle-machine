@@ -1,8 +1,27 @@
 class MicCaptureProcessor extends AudioWorkletProcessor {
   process(inputs) {
-    const input = inputs?.[0]?.[0];
-    if (input && input.length > 0) {
-      this.port.postMessage(new Float32Array(input));
+    const inputChannels = inputs?.[0];
+    const frameCount = inputChannels?.[0]?.length || 0;
+
+    if (frameCount > 0) {
+      const output = new Float32Array(frameCount);
+      let activeChannels = 0;
+
+      inputChannels.forEach((channel) => {
+        if (!channel || channel.length !== frameCount) return;
+        activeChannels += 1;
+        for (let index = 0; index < frameCount; index += 1) {
+          output[index] += channel[index];
+        }
+      });
+
+      if (activeChannels > 1) {
+        for (let index = 0; index < frameCount; index += 1) {
+          output[index] /= activeChannels;
+        }
+      }
+
+      this.port.postMessage(output);
     }
     return true;
   }

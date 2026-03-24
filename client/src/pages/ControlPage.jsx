@@ -26,6 +26,7 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  dualChannelEnabled: false,
   error: '',
   updatedAt: null,
 }
@@ -61,11 +62,47 @@ const normalizeTranscriptionState = (raw) => {
       typeof raw.language === 'string' && raw.language.trim().length > 0
         ? raw.language
         : null,
+    dualChannelEnabled: raw.dualChannelEnabled === true,
     updatedAt:
       typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
         ? raw.updatedAt
         : null,
   }
+}
+
+const mixChannelsToMono = (channels) => {
+  if (!Array.isArray(channels) || channels.length === 0) {
+    return new Float32Array(0)
+  }
+
+  const firstChannel = channels.find(
+    (channel) => channel && typeof channel.length === 'number' && channel.length > 0,
+  )
+  if (!firstChannel) {
+    return new Float32Array(0)
+  }
+
+  const frameCount = firstChannel.length
+  const output = new Float32Array(frameCount)
+  let activeChannels = 0
+
+  channels.forEach((channel) => {
+    if (!channel || channel.length !== frameCount) return
+    activeChannels += 1
+    for (let index = 0; index < frameCount; index += 1) {
+      output[index] += channel[index]
+    }
+  })
+
+  if (activeChannels <= 1) {
+    return activeChannels === 1 ? output : new Float32Array(0)
+  }
+
+  for (let index = 0; index < frameCount; index += 1) {
+    output[index] /= activeChannels
+  }
+
+  return output
 }
 
 const downsampleFloat32 = (input, inputSampleRate, outputSampleRate) => {
@@ -677,6 +714,7 @@ const ControlPage = () => {
         sessionId,
         hasApiKey: Boolean(apiKey),
         targetSampleRate: TARGET_SAMPLE_RATE,
+        dualChannelEnabled: transcription.dualChannelEnabled === true,
       })
       releaseMicrophoneCapture()
       setStatus({ kind: 'info', message: '正在啟動即時語音辨識…' })
@@ -694,7 +732,9 @@ const ControlPage = () => {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
-          channelCount: 1,
+          channelCount: {
+            ideal: 2,
+          },
         },
       })
 
@@ -793,9 +833,17 @@ const ControlPage = () => {
           },
           'warn',
         )
-        const processorNode = audioContext.createScriptProcessor(4096, 1, 1)
+        const processorNode = audioContext.createScriptProcessor(4096, 2, 1)
         processorNode.onaudioprocess = (event) => {
-          emitSamples(event.inputBuffer.getChannelData(0))
+          const channels = []
+          for (
+            let channelIndex = 0;
+            channelIndex < event.inputBuffer.numberOfChannels;
+            channelIndex += 1
+          ) {
+            channels.push(event.inputBuffer.getChannelData(channelIndex))
+          }
+          emitSamples(mixChannelsToMono(channels))
         }
         sourceNode.connect(processorNode)
         processorNode.connect(silenceNode)
@@ -824,11 +872,13 @@ const ControlPage = () => {
         apiKey,
         model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
+        dualChannelEnabled: transcription.dualChannelEnabled === true,
       })
       logTranscriptionDebug('socket-start-emitted', {
         sessionId,
         model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
+        dualChannelEnabled: transcription.dualChannelEnabled === true,
       })
     } catch (error) {
       logTranscriptionDebug(
@@ -1352,6 +1402,7 @@ const ControlPage = () => {
     transcriptionStatusLabelMap[transcription.status] || transcription.status
   const transcriptionBusy =
     transcription.active || transcription.status === 'connecting'
+  const dualChannelEnabled = transcription.dualChannelEnabled === true
   const transcriptionPreview =
     transcription.text && transcription.text.trim().length > 0
       ? transcription.text
@@ -1444,6 +1495,21 @@ const ControlPage = () => {
 
         <div className="input-group transcription-panel">
           <label>即時語音辨識（雲端）</label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={dualChannelEnabled}
+              disabled={transcriptionBusy}
+              onChange={(event) => {
+                const nextChecked = event.target.checked
+                setTranscription((prev) => ({
+                  ...prev,
+                  dualChannelEnabled: nextChecked,
+                }))
+              }}
+            />
+            開啟雙通道精修
+          </label>
           <div className="transcription-actions">
             <button
               type="button"
@@ -1470,6 +1536,7 @@ const ControlPage = () => {
             <span>
               輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}
             </span>
+            <span>雙通道：{dualChannelEnabled ? '開啟' : '關閉'}</span>
           </div>
           <div
             className={`transcription-preview ${

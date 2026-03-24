@@ -47,6 +47,7 @@ const defaultTranscriptionState = () => ({
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  dualChannelEnabled: DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED,
   error: '',
   updatedAt: null,
 });
@@ -70,25 +71,25 @@ const parsedForceCommitIntervalMs = Number(
 );
 const FORCE_COMMIT_INTERVAL_MS = Number.isFinite(parsedForceCommitIntervalMs)
   ? Math.max(0, parsedForceCommitIntervalMs)
-  : 450;
+  : 900;
 const parsedCommitCooldownMs = Number(
   process.env.TRANSCRIPTION_COMMIT_COOLDOWN_MS,
 );
 const COMMIT_COOLDOWN_MS = Number.isFinite(parsedCommitCooldownMs)
   ? Math.max(0, parsedCommitCooldownMs)
-  : 250;
+  : 500;
 const parsedMinCommitAudioMs = Number(
   process.env.TRANSCRIPTION_MIN_COMMIT_AUDIO_MS,
 );
 const MIN_COMMIT_AUDIO_MS = Number.isFinite(parsedMinCommitAudioMs)
   ? Math.max(0, parsedMinCommitAudioMs)
-  : 180;
+  : 400;
 const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
-const TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
-  process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED !== 'false';
+const DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
+  process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED === 'true';
 const TRANSCRIPTION_ACCURATE_MODEL =
   process.env.TRANSCRIPTION_ACCURATE_MODEL || 'gpt-4o-transcribe-latest';
 const TRANSCRIPTION_ACCURATE_PROMPT =
@@ -102,7 +103,7 @@ const TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS = Number.isFinite(
   parsedAccurateMinSegmentMs,
 )
   ? Math.max(0, parsedAccurateMinSegmentMs)
-  : 180;
+  : 400;
 const parsedAccurateMaxSegmentMs = Number(
   process.env.TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS,
 );
@@ -1238,8 +1239,9 @@ async function transcribeAccurateSegmentLine({
   client,
   segment,
   language,
+  dualChannelEnabled,
 }) {
-  if (!TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return '';
+  if (!dualChannelEnabled) return '';
   if (!isAccurateSegmentEligible(segment)) return '';
 
   const wavBuffer = createWavFromPcm16Mono(segment.pcm);
@@ -1281,6 +1283,30 @@ function shouldApplyAccurateReplacement(currentText, candidateText) {
     return false;
   }
 
+  const toComparableChars = (text) =>
+    Array.from(text).filter((char) => /[\p{L}\p{N}]/u.test(char));
+  const currentChars = new Set(toComparableChars(current));
+  const candidateChars = new Set(toComparableChars(candidate));
+
+  if (currentChars.size >= 4 && candidateChars.size >= 4) {
+    let overlapCount = 0;
+    currentChars.forEach((char) => {
+      if (candidateChars.has(char)) {
+        overlapCount += 1;
+      }
+    });
+    const overlapRatio =
+      overlapCount / Math.max(Math.min(currentChars.size, candidateChars.size), 1);
+
+    if (
+      overlapRatio < 0.25 &&
+      !candidate.includes(current) &&
+      !current.includes(candidate)
+    ) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -1294,7 +1320,8 @@ function queueTranscriptionCorrection({
   accurateSegment,
 }) {
   if (!stream || !itemId) return;
-  if (!TRANSCRIPTION_CORRECTION_ENABLED && !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) {
+  const dualChannelEnabled = stream.dualChannelEnabled === true;
+  if (!TRANSCRIPTION_CORRECTION_ENABLED && !dualChannelEnabled) {
     return;
   }
 
@@ -1307,12 +1334,13 @@ function queueTranscriptionCorrection({
       let nextText = line.text;
       let changed = false;
 
-      if (TRANSCRIPTION_DUAL_CHANNEL_ENABLED) {
+      if (dualChannelEnabled) {
         try {
           const refined = await transcribeAccurateSegmentLine({
             client,
             segment: accurateSegment,
             language,
+            dualChannelEnabled,
           });
           if (!isCurrent() || stream.closing) return;
           if (shouldApplyAccurateReplacement(nextText, refined)) {
@@ -1364,6 +1392,11 @@ function normalizeLanguageCode(rawLanguage) {
   return trimmed;
 }
 
+function normalizeDualChannelEnabled(rawEnabled) {
+  if (typeof rawEnabled === 'boolean') return rawEnabled;
+  return DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED;
+}
+
 function normalizeTranscriptionModel(rawModel) {
   if (typeof rawModel !== 'string') {
     return DEFAULT_TRANSCRIPTION_MODEL;
@@ -1391,6 +1424,9 @@ function ensureTranscriptionState(session) {
   ) {
     normalized.model = DEFAULT_TRANSCRIPTION_MODEL;
   }
+  normalized.dualChannelEnabled = normalizeDualChannelEnabled(
+    normalized.dualChannelEnabled,
+  );
   session.transcription = normalized;
   return session.transcription;
 }
@@ -1410,6 +1446,7 @@ function getPublicTranscriptionState(session) {
       typeof state.model === 'string' && state.model.trim().length > 0
         ? state.model
         : DEFAULT_TRANSCRIPTION_MODEL,
+    dualChannelEnabled: state.dualChannelEnabled === true,
     error:
       typeof state.error === 'string' && state.error.trim().length > 0
         ? state.error
@@ -1607,7 +1644,7 @@ function resetAccurateTranscriptionState(stream) {
 }
 
 function captureAccurateSegmentChunk(stream, audio, durationMs = 0) {
-  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return;
+  if (!stream || stream.dualChannelEnabled !== true) return;
   if (typeof audio !== 'string' || !audio) return;
 
   let pcmChunk = null;
@@ -1684,7 +1721,7 @@ function pushUnboundCommittedSegment(stream, segment) {
 }
 
 function prepareAccurateSegmentForCommit(stream) {
-  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return;
+  if (!stream || stream.dualChannelEnabled !== true) return;
   const segment = takeCapturedAccurateSegment(stream);
   if (!segment) return;
 
@@ -1695,7 +1732,7 @@ function prepareAccurateSegmentForCommit(stream) {
 }
 
 function settleCommittedAccurateSegment(stream, itemId) {
-  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return;
+  if (!stream || stream.dualChannelEnabled !== true) return;
   const segment = stream.commitSegmentInFlight;
   stream.commitSegmentInFlight = null;
   if (!segment) return;
@@ -1718,7 +1755,7 @@ function settleCommittedAccurateSegment(stream, itemId) {
 }
 
 function takeAccurateSegmentForItem(stream, itemId) {
-  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return null;
+  if (!stream || stream.dualChannelEnabled !== true) return null;
 
   if (typeof itemId === 'string' && itemId) {
     const bound = stream.segmentByItemId.get(itemId) || null;
@@ -1728,10 +1765,7 @@ function takeAccurateSegmentForItem(stream, itemId) {
     }
   }
 
-  if (!Array.isArray(stream.unboundCommittedSegments)) {
-    return null;
-  }
-  return stream.unboundCommittedSegments.shift() || null;
+  return null;
 }
 
 function dropAccurateSegmentForItem(stream, itemId) {
@@ -1828,14 +1862,6 @@ function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
             rate: AUDIO_PCM_SAMPLE_RATE,
           },
           transcription,
-          turn_detection: {
-            type: 'server_vad',
-            create_response: false,
-            interrupt_response: false,
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 450,
-          },
         },
       },
     },
@@ -2211,9 +2237,12 @@ function startRealtimeTranscription({
   apiKey,
   model,
   language,
+  dualChannelEnabled,
 }) {
   const selectedModel = normalizeTranscriptionModel(model);
   const selectedLanguage = normalizeLanguageCode(language);
+  const selectedDualChannelEnabled =
+    normalizeDualChannelEnabled(dualChannelEnabled);
   const client = new OpenAI({ apiKey });
   const rt = new OpenAIRealtimeWS({ model: DEFAULT_REALTIME_WS_MODEL }, client);
 
@@ -2225,6 +2254,7 @@ function startRealtimeTranscription({
     sessionType: DEFAULT_REALTIME_SESSION_TYPE,
     model: selectedModel,
     language: selectedLanguage,
+    dualChannelEnabled: selectedDualChannelEnabled,
     draftByItemId: new Map(),
     activeDraftItemId: null,
     finalizedLines: [],
@@ -2263,6 +2293,7 @@ function startRealtimeTranscription({
       isFinal: true,
       language: selectedLanguage,
       model: selectedModel,
+      dualChannelEnabled: selectedDualChannelEnabled,
       error: '',
     });
     broadcastTranscriptionState(sessionId);
@@ -2318,6 +2349,7 @@ function startRealtimeTranscription({
       isFinal: true,
       language: selectedLanguage,
       model: selectedModel,
+      dualChannelEnabled: selectedDualChannelEnabled,
       error: '',
     });
     broadcastTranscriptionState(sessionId);
@@ -2479,59 +2511,64 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('transcription:start', ({ sessionId, apiKey, language, model }) => {
-    if (!sessionId) return;
+  socket.on(
+    'transcription:start',
+    ({ sessionId, apiKey, language, model, dualChannelEnabled }) => {
+      if (!sessionId) return;
 
-    const session = getSession(sessionId);
-    if (!session) return;
+      const session = getSession(sessionId);
+      if (!session) return;
 
-    const trimmedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
-    if (!trimmedApiKey) {
-      applyTranscriptionError(sessionId, '缺少 OpenAI API Key，無法啟動語音辨識');
-      return;
-    }
+      const trimmedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+      if (!trimmedApiKey) {
+        applyTranscriptionError(sessionId, '缺少 OpenAI API Key，無法啟動語音辨識');
+        return;
+      }
 
-    const active = transcriptionStreams.get(sessionId);
-    if (active && active.socketId !== socket.id) {
-      socket.emit('transcription:error', {
-        message: '此場次已有其他控制端在進行語音辨識',
+      const active = transcriptionStreams.get(sessionId);
+      if (active && active.socketId !== socket.id) {
+        socket.emit('transcription:error', {
+          message: '此場次已有其他控制端在進行語音辨識',
+        });
+        return;
+      }
+
+      if (active && active.socketId === socket.id) {
+        stopTranscriptionStream(sessionId, {
+          keepText: false,
+          reason: 'restart transcription',
+        });
+      }
+
+      updateTranscriptionState(sessionId, {
+        active: false,
+        status: 'connecting',
+        text: '',
+        isFinal: true,
+        language: normalizeLanguageCode(language),
+        model: normalizeTranscriptionModel(model),
+        dualChannelEnabled: normalizeDualChannelEnabled(dualChannelEnabled),
+        error: '',
       });
-      return;
-    }
+      broadcastTranscriptionState(sessionId);
+      broadcastViewerState(sessionId);
 
-    if (active && active.socketId === socket.id) {
-      stopTranscriptionStream(sessionId, {
-        keepText: false,
-        reason: 'restart transcription',
-      });
-    }
-
-    updateTranscriptionState(sessionId, {
-      active: false,
-      status: 'connecting',
-      text: '',
-      isFinal: true,
-      language: normalizeLanguageCode(language),
-      model: normalizeTranscriptionModel(model),
-      error: '',
-    });
-    broadcastTranscriptionState(sessionId);
-    broadcastViewerState(sessionId);
-
-    try {
-      startRealtimeTranscription({
-        sessionId,
-        socketId: socket.id,
-        apiKey: trimmedApiKey,
-        language,
-        model,
-      });
-    } catch (error) {
-      const message =
-        sanitizeLineText(error?.message || '') || '啟動語音辨識失敗';
-      applyTranscriptionError(sessionId, message);
-    }
-  });
+      try {
+        startRealtimeTranscription({
+          sessionId,
+          socketId: socket.id,
+          apiKey: trimmedApiKey,
+          language,
+          model,
+          dualChannelEnabled,
+        });
+      } catch (error) {
+        const message =
+          sanitizeLineText(error?.message || '') || '啟動語音辨識失敗';
+        applyTranscriptionError(sessionId, message);
+      }
+    },
+  );
 
   socket.on('transcription:audio', ({ sessionId, audio, durationMs }) => {
     if (!sessionId) return;
