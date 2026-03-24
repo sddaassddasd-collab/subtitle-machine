@@ -60,6 +60,13 @@ const MAX_LINE_LENGTH = 20;
 const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
+const MAX_TRANSCRIPTION_DISPLAY_LINES = 8;
+const FORCE_COMMIT_INTERVAL_MS =
+  Number(process.env.TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS) || 2000;
+const TRANSCRIPTION_CORRECTION_MODEL =
+  process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
+const TRANSCRIPTION_CORRECTION_ENABLED =
+  process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
@@ -939,6 +946,207 @@ function sanitizeTranscriptionText(text) {
   return sanitizeLineText(text).replace(/\s+/g, ' ').trim();
 }
 
+function sanitizeTranscriptionMultilineText(text) {
+  if (typeof text !== 'string') {
+    text = text == null ? '' : String(text);
+  }
+
+  const normalized = stripBom(text).replace(/\r\n?/g, '\n');
+  const lines = normalized
+    .split('\n')
+    .map((line) => sanitizeTranscriptionText(line))
+    .filter(Boolean);
+  return lines.join('\n').trim();
+}
+
+function trimTranscriptionHistory(stream) {
+  if (!stream || !Array.isArray(stream.finalizedLines)) return;
+  if (stream.finalizedLines.length <= MAX_TRANSCRIPTION_DISPLAY_LINES) return;
+
+  const removeCount =
+    stream.finalizedLines.length - MAX_TRANSCRIPTION_DISPLAY_LINES;
+  const removed = stream.finalizedLines.splice(0, removeCount);
+  removed.forEach((line) => {
+    if (!line?.itemId) return;
+    stream.finalizedLineByItemId.delete(line.itemId);
+  });
+}
+
+function getLastDraftItemId(stream) {
+  if (!stream?.draftByItemId || stream.draftByItemId.size === 0) return null;
+  let lastKey = null;
+  stream.draftByItemId.forEach((_value, key) => {
+    lastKey = key;
+  });
+  return lastKey;
+}
+
+function setDraftLine(stream, itemId, text) {
+  if (!stream || !itemId) return;
+
+  const sanitized = sanitizeTranscriptionText(text);
+  if (!sanitized) {
+    stream.draftByItemId.delete(itemId);
+    if (stream.activeDraftItemId === itemId) {
+      stream.activeDraftItemId = getLastDraftItemId(stream);
+    }
+    return;
+  }
+
+  stream.draftByItemId.set(itemId, sanitized);
+  stream.activeDraftItemId = itemId;
+}
+
+function takeDraftLine(stream, itemId) {
+  if (!stream || !itemId) return '';
+  const draft = stream.draftByItemId.get(itemId) || '';
+  stream.draftByItemId.delete(itemId);
+  if (stream.activeDraftItemId === itemId) {
+    stream.activeDraftItemId = getLastDraftItemId(stream);
+  }
+  return sanitizeTranscriptionText(draft);
+}
+
+function appendFinalizedLine(stream, itemId, text) {
+  if (!stream || !itemId) return null;
+  const sanitized = sanitizeTranscriptionText(text);
+  if (!sanitized) return null;
+
+  const existing = stream.finalizedLineByItemId.get(itemId);
+  if (existing) {
+    existing.text = sanitized;
+    existing.corrected = false;
+    return existing;
+  }
+
+  const line = {
+    itemId,
+    text: sanitized,
+    corrected: false,
+  };
+  stream.finalizedLines.push(line);
+  stream.finalizedLineByItemId.set(itemId, line);
+  trimTranscriptionHistory(stream);
+  return line;
+}
+
+function getTranscriptionDisplayParts(stream) {
+  if (!stream) {
+    return { historyLines: [], draftText: '' };
+  }
+
+  const historyLines = stream.finalizedLines
+    .map((line) => sanitizeTranscriptionText(line?.text || ''))
+    .filter(Boolean);
+
+  const draftItemId = stream.activeDraftItemId;
+  const fallbackDraftId = getLastDraftItemId(stream);
+  const selectedDraftId = draftItemId || fallbackDraftId;
+  const draftText = selectedDraftId
+    ? sanitizeTranscriptionText(stream.draftByItemId.get(selectedDraftId) || '')
+    : '';
+
+  return { historyLines, draftText };
+}
+
+function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
+  const { historyLines, draftText } = getTranscriptionDisplayParts(stream);
+  const composed = draftText ? [...historyLines, draftText] : historyLines;
+  const text = sanitizeTranscriptionMultilineText(composed.join('\n'));
+  const isFinal = draftText.length === 0;
+
+  updateTranscriptionState(sessionId, {
+    active: true,
+    status: 'running',
+    text,
+    isFinal,
+    error: '',
+    ...patch,
+  });
+  broadcastTranscriptionState(sessionId);
+  broadcastViewerState(sessionId);
+}
+
+async function correctTranscriptionLine({ client, text, language }) {
+  const original = sanitizeTranscriptionText(text);
+  if (!original) return '';
+
+  const prompt = [
+    {
+      role: 'system',
+      content:
+        'You post-edit speech transcripts. Correct obvious recognition mistakes only. Keep original meaning and language. Return one corrected line only.',
+    },
+    {
+      role: 'user',
+      content: `
+請修正下列語音辨識單行文字中的明顯錯字或同音誤字。
+限制：
+1. 不改變原意。
+2. 不新增不存在的資訊。
+3. 只輸出修正後的一行文字，不要解釋。
+4. 若原句已正確，原樣輸出。
+${language ? `5. 目標語言代碼：${language}` : ''}
+
+原句：
+${original}
+      `.trim(),
+    },
+  ];
+
+  const response = await client.responses.create({
+    model: TRANSCRIPTION_CORRECTION_MODEL,
+    input: prompt,
+    temperature: 0,
+    max_output_tokens: 200,
+  });
+
+  const output = sanitizeTranscriptionText(response.output_text || '');
+  if (!output) return '';
+  if (output.length > Math.max(original.length * 2, 80)) {
+    return original;
+  }
+  return output;
+}
+
+function queueTranscriptionCorrection({
+  stream,
+  isCurrent,
+  client,
+  sessionId,
+  itemId,
+  language,
+}) {
+  if (!TRANSCRIPTION_CORRECTION_ENABLED) return;
+  if (!stream || !itemId) return;
+
+  stream.correctionChain = stream.correctionChain
+    .then(async () => {
+      if (!isCurrent() || stream.closing) return;
+      const line = stream.finalizedLineByItemId.get(itemId);
+      if (!line || !line.text) return;
+
+      try {
+        const corrected = await correctTranscriptionLine({
+          client,
+          text: line.text,
+          language,
+        });
+        if (!isCurrent() || stream.closing) return;
+        if (!corrected) return;
+        if (corrected === line.text) return;
+
+        line.text = corrected;
+        line.corrected = true;
+        syncTranscriptionStateFromStream(sessionId, stream);
+      } catch (error) {
+        stream.lastTransportError =
+          sanitizeLineText(error?.message || '') || stream.lastTransportError;
+      }
+    })
+    .catch(() => {});
+}
+
 function normalizeLanguageCode(rawLanguage) {
   if (typeof rawLanguage !== 'string') return null;
   const trimmed = rawLanguage.trim();
@@ -1050,6 +1258,8 @@ function stopTranscriptionStream(sessionId, options = {}) {
   transcriptionStreams.delete(sessionId);
   stream.closing = true;
   stream.ready = false;
+  clearRealtimeForceCommitTimer(stream);
+  resetRealtimePendingAudio(stream);
   if (stream.initTimeout) {
     clearTimeout(stream.initTimeout);
     stream.initTimeout = null;
@@ -1102,11 +1312,56 @@ function normalizeCloseReason(reason) {
   return '';
 }
 
+function clearRealtimeForceCommitTimer(stream) {
+  if (!stream?.forceCommitTimer) return;
+  clearInterval(stream.forceCommitTimer);
+  stream.forceCommitTimer = null;
+}
+
+function resetRealtimePendingAudio(stream) {
+  if (!stream) return;
+  stream.pendingAppendCount = 0;
+  stream.firstPendingAudioAt = null;
+}
+
+function markRealtimePendingAudio(stream) {
+  if (!stream) return;
+  if (stream.pendingAppendCount === 0) {
+    stream.firstPendingAudioAt = Date.now();
+  }
+  stream.pendingAppendCount += 1;
+}
+
+function commitRealtimeAudioBuffer(stream) {
+  stream.rt.send({
+    type: 'input_audio_buffer.commit',
+  });
+}
+
+function ensureRealtimeForceCommitTimer(stream) {
+  if (!stream || stream.forceCommitTimer) return;
+  stream.forceCommitTimer = setInterval(() => {
+    if (!stream.ready || stream.closing) return;
+    if (!stream.pendingAppendCount || !stream.firstPendingAudioAt) return;
+    if (Date.now() - stream.firstPendingAudioAt < FORCE_COMMIT_INTERVAL_MS) {
+      return;
+    }
+    try {
+      commitRealtimeAudioBuffer(stream);
+      resetRealtimePendingAudio(stream);
+    } catch (error) {
+      stream.lastTransportError =
+        sanitizeLineText(error?.message || '') || stream.lastTransportError;
+    }
+  }, 250);
+}
+
 function sendRealtimeAudioChunk(stream, audio) {
   stream.rt.send({
     type: 'input_audio_buffer.append',
     audio,
   });
+  markRealtimePendingAudio(stream);
 }
 
 function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
@@ -1156,7 +1411,7 @@ function getViewerPayload(session) {
   }
 
   const transcription = ensureTranscriptionState(session);
-  const liveText = sanitizeTranscriptionText(transcription.text);
+  const liveText = sanitizeTranscriptionMultilineText(transcription.text);
   const hasLiveText = transcription.active && liveText.length > 0;
 
   if (!session.displayEnabled) {
@@ -1515,11 +1770,18 @@ function startRealtimeTranscription({
     sessionType: DEFAULT_REALTIME_SESSION_TYPE,
     model: selectedModel,
     language: selectedLanguage,
-    partialByItemId: new Map(),
+    draftByItemId: new Map(),
+    activeDraftItemId: null,
+    finalizedLines: [],
+    finalizedLineByItemId: new Map(),
+    correctionChain: Promise.resolve(),
     pendingAudioChunks: [],
     lastTransportError: '',
     ready: false,
     initTimeout: null,
+    forceCommitTimer: null,
+    pendingAppendCount: 0,
+    firstPendingAudioAt: null,
     closing: false,
   };
   transcriptionStreams.set(sessionId, stream);
@@ -1559,6 +1821,7 @@ function startRealtimeTranscription({
           errorMessage: '語音辨識初始化逾時，請重試',
         });
       }, 8000);
+      ensureRealtimeForceCommitTimer(stream);
     } catch (error) {
       const message =
         sanitizeLineText(error?.message || '') || '初始化語音辨識串流失敗';
@@ -1597,46 +1860,55 @@ function startRealtimeTranscription({
     flushQueuedRealtimeAudio(stream);
   });
 
+  rt.on('input_audio_buffer.committed', () => {
+    if (!isCurrent()) return;
+    resetRealtimePendingAudio(stream);
+  });
+
+  rt.on('input_audio_buffer.cleared', () => {
+    if (!isCurrent()) return;
+    resetRealtimePendingAudio(stream);
+  });
+
+  rt.on('input_audio_buffer.speech_stopped', () => {
+    if (!isCurrent()) return;
+    if (!stream.ready || stream.closing) return;
+    if (!stream.pendingAppendCount) return;
+    try {
+      commitRealtimeAudioBuffer(stream);
+      resetRealtimePendingAudio(stream);
+    } catch (error) {
+      stream.lastTransportError =
+        sanitizeLineText(error?.message || '') || stream.lastTransportError;
+    }
+  });
+
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
     if (!isCurrent()) return;
     if (!event.item_id || typeof event.delta !== 'string') return;
 
-    const previous = stream.partialByItemId.get(event.item_id) || '';
+    const previous = stream.draftByItemId.get(event.item_id) || '';
     const merged = sanitizeTranscriptionText(`${previous}${event.delta}`);
-    stream.partialByItemId.set(event.item_id, merged);
-
-    if (!merged) return;
-
-    updateTranscriptionState(sessionId, {
-      active: true,
-      status: 'running',
-      text: merged,
-      isFinal: false,
-      error: '',
-    });
-    broadcastTranscriptionState(sessionId);
-    broadcastViewerState(sessionId);
+    setDraftLine(stream, event.item_id, merged);
+    syncTranscriptionStateFromStream(sessionId, stream);
   });
 
   rt.on('conversation.item.input_audio_transcription.completed', (event) => {
     if (!isCurrent()) return;
     if (!event.item_id) return;
 
-    const fallback = stream.partialByItemId.get(event.item_id) || '';
-    stream.partialByItemId.delete(event.item_id);
-
+    const fallback = takeDraftLine(stream, event.item_id);
     const transcript = sanitizeTranscriptionText(event.transcript || fallback);
-    if (!transcript) return;
-
-    updateTranscriptionState(sessionId, {
-      active: true,
-      status: 'running',
-      text: transcript,
-      isFinal: true,
-      error: '',
+    appendFinalizedLine(stream, event.item_id, transcript);
+    syncTranscriptionStateFromStream(sessionId, stream);
+    queueTranscriptionCorrection({
+      stream,
+      isCurrent,
+      client,
+      sessionId,
+      itemId: event.item_id,
+      language: selectedLanguage,
     });
-    broadcastTranscriptionState(sessionId);
-    broadcastViewerState(sessionId);
   });
 
   rt.on('conversation.item.input_audio_transcription.failed', (event) => {
@@ -1644,12 +1916,10 @@ function startRealtimeTranscription({
 
     const message =
       sanitizeLineText(event?.error?.message || '') || '語音片段辨識失敗';
-    updateTranscriptionState(sessionId, {
-      active: true,
-      status: 'running',
+    takeDraftLine(stream, event?.item_id);
+    syncTranscriptionStateFromStream(sessionId, stream, {
       error: message,
     });
-    broadcastTranscriptionState(sessionId);
   });
 
   rt.on('error', (error) => {
@@ -1677,6 +1947,8 @@ function startRealtimeTranscription({
     if (!isCurrent()) return;
 
     transcriptionStreams.delete(sessionId);
+    clearRealtimeForceCommitTimer(stream);
+    resetRealtimePendingAudio(stream);
     if (stream.closing) {
       return;
     }
