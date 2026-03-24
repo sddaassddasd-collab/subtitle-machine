@@ -13,6 +13,8 @@ const storageKeys = {
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
 const ALLOWED_TRANSCRIPTION_MODELS = new Set([
   'gpt-4o-transcribe',
+  'gpt-4o-transcribe-latest',
+  'gpt-4o-mini-transcribe',
   'gpt-4o-transcribe-diarize',
   'whisper-1',
 ])

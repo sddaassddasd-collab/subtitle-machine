@@ -46,6 +46,32 @@ client/  Vite + React 控制端/檢視端前端
 - 檢視端只會建立單向連線接收字幕事件，無法反向控制或取得控制端資訊。
 - 若要加入既有場次，可在控制端網址後加上 `?session=<場次ID>`；檢視端同樣使用該參數。
 
+## 即時語音辨識（Realtime）接法
+
+目前專案採用「Realtime WebSocket + 輸入音訊轉錄」模式：
+
+1. 後端以 `wss://api.openai.com/v1/realtime?model=gpt-realtime` 建立連線。
+2. 連線後送出 `session.update`，`session.type` 使用 `realtime`。
+3. 轉錄設定放在 `session.audio.input.transcription`，可使用：
+   - `gpt-4o-transcribe`
+   - `gpt-4o-transcribe-latest`
+   - `gpt-4o-mini-transcribe`
+   - `gpt-4o-transcribe-diarize`
+   - `whisper-1`
+4. 音訊事件使用 `input_audio_buffer.append` 持續送 PCM16(24kHz, mono)。
+5. 以前端 `conversation.item.input_audio_transcription.delta/completed` 顯示逐字稿。
+
+### 常見錯誤對照
+
+- `Missing required parameter: 'session.type'.`
+  - `session.update` 缺少 `session.type`。
+- `Invalid value ... Supported values are ...`
+  - 事件名稱或 payload 結構仍是舊版（例如舊的欄位位置）。
+- `Passing a transcription session update event to a realtime session is not allowed.`
+  - 連線是 realtime session，卻送了 transcription session 形狀。
+- `Model "gpt-4o-mini-transcribe" is not supported in Realtime API`
+  - 通常是把轉錄模型誤當成 WebSocket 連線模型（query `model=`）送出。
+
 ## 其他注意事項
 
 - 後端以記憶體儲存字幕狀態，若伺服器重啟需重新上傳劇本。

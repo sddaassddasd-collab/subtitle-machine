@@ -63,9 +63,12 @@ const MAX_PENDING_AUDIO_CHUNKS = 400;
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
+const DEFAULT_REALTIME_SESSION_TYPE = 'realtime';
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 const VALID_TRANSCRIPTION_MODELS = new Set([
   'gpt-4o-transcribe',
+  'gpt-4o-transcribe-latest',
+  'gpt-4o-mini-transcribe',
   'gpt-4o-transcribe-diarize',
   'whisper-1',
 ]);
@@ -1047,6 +1050,10 @@ function stopTranscriptionStream(sessionId, options = {}) {
   transcriptionStreams.delete(sessionId);
   stream.closing = true;
   stream.ready = false;
+  if (stream.initTimeout) {
+    clearTimeout(stream.initTimeout);
+    stream.initTimeout = null;
+  }
   if (Array.isArray(stream.pendingAudioChunks)) {
     stream.pendingAudioChunks.length = 0;
   }
@@ -1100,6 +1107,35 @@ function sendRealtimeAudioChunk(stream, audio) {
     type: 'input_audio_buffer.append',
     audio,
   });
+}
+
+function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
+  return {
+    type: 'session.update',
+    session: {
+      type: DEFAULT_REALTIME_SESSION_TYPE,
+      audio: {
+        input: {
+          format: {
+            type: 'audio/pcm',
+            rate: 24000,
+          },
+          transcription: {
+            model,
+            ...(language ? { language } : {}),
+          },
+          turn_detection: {
+            type: 'server_vad',
+            create_response: false,
+            interrupt_response: false,
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 450,
+          },
+        },
+      },
+    },
+  };
 }
 
 function flushQueuedRealtimeAudio(stream) {
@@ -1476,12 +1512,14 @@ function startRealtimeTranscription({
     socketId,
     rt,
     wsModel: DEFAULT_REALTIME_WS_MODEL,
+    sessionType: DEFAULT_REALTIME_SESSION_TYPE,
     model: selectedModel,
     language: selectedLanguage,
     partialByItemId: new Map(),
     pendingAudioChunks: [],
     lastTransportError: '',
     ready: false,
+    initTimeout: null,
     closing: false,
   };
   transcriptionStreams.set(sessionId, stream);
@@ -1490,6 +1528,60 @@ function startRealtimeTranscription({
 
   rt.socket.on('open', () => {
     if (!isCurrent()) return;
+
+    updateTranscriptionState(sessionId, {
+      active: false,
+      status: 'connecting',
+      text: '',
+      isFinal: true,
+      language: selectedLanguage,
+      model: selectedModel,
+      error: '',
+    });
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+
+    try {
+      rt.send(
+        buildRealtimeTranscriptionSessionUpdate({
+          model: selectedModel,
+          language: selectedLanguage,
+        }),
+      );
+      if (stream.initTimeout) {
+        clearTimeout(stream.initTimeout);
+      }
+      stream.initTimeout = setTimeout(() => {
+        if (!isCurrent() || stream.ready || stream.closing) return;
+        stopTranscriptionStream(sessionId, {
+          keepText: true,
+          reason: 'transcription init timeout',
+          errorMessage: '語音辨識初始化逾時，請重試',
+        });
+      }, 8000);
+    } catch (error) {
+      const message =
+        sanitizeLineText(error?.message || '') || '初始化語音辨識串流失敗';
+      stopTranscriptionStream(sessionId, {
+        keepText: true,
+        reason: 'transcription init failed',
+        errorMessage: message,
+      });
+    }
+  });
+
+  rt.on('session.updated', (event) => {
+    if (!isCurrent()) return;
+    if (stream.ready) return;
+
+    stream.sessionType =
+      (typeof event?.session?.type === 'string' && event.session.type) ||
+      stream.sessionType;
+    stream.ready = true;
+    if (stream.initTimeout) {
+      clearTimeout(stream.initTimeout);
+      stream.initTimeout = null;
+    }
 
     updateTranscriptionState(sessionId, {
       active: true,
@@ -1502,43 +1594,7 @@ function startRealtimeTranscription({
     });
     broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
-
-    try {
-      rt.send({
-        type: 'session.update',
-        session: {
-          type: 'transcription',
-          audio: {
-            input: {
-              format: {
-                type: 'audio/pcm',
-                rate: 24000,
-              },
-              transcription: {
-                model: selectedModel,
-                ...(selectedLanguage ? { language: selectedLanguage } : {}),
-              },
-              turn_detection: {
-                type: 'server_vad',
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 450,
-              },
-            },
-          },
-        },
-      });
-      stream.ready = true;
-      flushQueuedRealtimeAudio(stream);
-    } catch (error) {
-      const message =
-        sanitizeLineText(error?.message || '') || '初始化語音辨識串流失敗';
-      stopTranscriptionStream(sessionId, {
-        keepText: true,
-        reason: 'transcription init failed',
-        errorMessage: message,
-      });
-    }
+    flushQueuedRealtimeAudio(stream);
   });
 
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
