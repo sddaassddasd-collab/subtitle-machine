@@ -26,6 +26,7 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  semanticSegmentationEnabled: true,
   dualChannelEnabled: false,
   error: '',
   updatedAt: null,
@@ -62,6 +63,7 @@ const normalizeTranscriptionState = (raw) => {
       typeof raw.language === 'string' && raw.language.trim().length > 0
         ? raw.language
         : null,
+    semanticSegmentationEnabled: raw.semanticSegmentationEnabled !== false,
     dualChannelEnabled: raw.dualChannelEnabled === true,
     updatedAt:
       typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
@@ -714,6 +716,8 @@ const ControlPage = () => {
         sessionId,
         hasApiKey: Boolean(apiKey),
         targetSampleRate: TARGET_SAMPLE_RATE,
+        semanticSegmentationEnabled:
+          transcription.semanticSegmentationEnabled !== false,
         dualChannelEnabled: transcription.dualChannelEnabled === true,
       })
       releaseMicrophoneCapture()
@@ -872,12 +876,16 @@ const ControlPage = () => {
         apiKey,
         model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
+        semanticSegmentationEnabled:
+          transcription.semanticSegmentationEnabled !== false,
         dualChannelEnabled: transcription.dualChannelEnabled === true,
       })
       logTranscriptionDebug('socket-start-emitted', {
         sessionId,
         model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
+        semanticSegmentationEnabled:
+          transcription.semanticSegmentationEnabled !== false,
         dualChannelEnabled: transcription.dualChannelEnabled === true,
       })
     } catch (error) {
@@ -1402,6 +1410,8 @@ const ControlPage = () => {
     transcriptionStatusLabelMap[transcription.status] || transcription.status
   const transcriptionBusy =
     transcription.active || transcription.status === 'connecting'
+  const semanticSegmentationEnabled =
+    transcription.semanticSegmentationEnabled !== false
   const dualChannelEnabled = transcription.dualChannelEnabled === true
   const transcriptionPreview =
     transcription.text && transcription.text.trim().length > 0
@@ -1498,6 +1508,21 @@ const ControlPage = () => {
           <label className="checkbox-row">
             <input
               type="checkbox"
+              checked={semanticSegmentationEnabled}
+              disabled={transcriptionBusy}
+              onChange={(event) => {
+                const nextChecked = event.target.checked
+                setTranscription((prev) => ({
+                  ...prev,
+                  semanticSegmentationEnabled: nextChecked,
+                }))
+              }}
+            />
+            開啟語意切段
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
               checked={dualChannelEnabled}
               disabled={transcriptionBusy}
               onChange={(event) => {
@@ -1536,6 +1561,7 @@ const ControlPage = () => {
             <span>
               輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}
             </span>
+            <span>切段：{semanticSegmentationEnabled ? '語意' : '手動'}</span>
             <span>雙通道：{dualChannelEnabled ? '開啟' : '關閉'}</span>
           </div>
           <div

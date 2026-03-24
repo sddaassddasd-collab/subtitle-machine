@@ -47,6 +47,8 @@ const defaultTranscriptionState = () => ({
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  semanticSegmentationEnabled:
+    DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED,
   dualChannelEnabled: DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED,
   error: '',
   updatedAt: null,
@@ -88,6 +90,19 @@ const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
+const DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED =
+  process.env.TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED !== 'false';
+const VALID_SEMANTIC_VAD_EAGERNESS = new Set([
+  'low',
+  'medium',
+  'high',
+  'auto',
+]);
+const TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS = VALID_SEMANTIC_VAD_EAGERNESS.has(
+  process.env.TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS,
+)
+  ? process.env.TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS
+  : 'medium';
 const DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
   process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED === 'true';
 const TRANSCRIPTION_ACCURATE_MODEL =
@@ -1397,6 +1412,11 @@ function normalizeDualChannelEnabled(rawEnabled) {
   return DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED;
 }
 
+function normalizeSemanticSegmentationEnabled(rawEnabled) {
+  if (typeof rawEnabled === 'boolean') return rawEnabled;
+  return DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED;
+}
+
 function normalizeTranscriptionModel(rawModel) {
   if (typeof rawModel !== 'string') {
     return DEFAULT_TRANSCRIPTION_MODEL;
@@ -1424,6 +1444,9 @@ function ensureTranscriptionState(session) {
   ) {
     normalized.model = DEFAULT_TRANSCRIPTION_MODEL;
   }
+  normalized.semanticSegmentationEnabled = normalizeSemanticSegmentationEnabled(
+    normalized.semanticSegmentationEnabled,
+  );
   normalized.dualChannelEnabled = normalizeDualChannelEnabled(
     normalized.dualChannelEnabled,
   );
@@ -1446,6 +1469,7 @@ function getPublicTranscriptionState(session) {
       typeof state.model === 'string' && state.model.trim().length > 0
         ? state.model
         : DEFAULT_TRANSCRIPTION_MODEL,
+    semanticSegmentationEnabled: state.semanticSegmentationEnabled !== false,
     dualChannelEnabled: state.dualChannelEnabled === true,
     error:
       typeof state.error === 'string' && state.error.trim().length > 0
@@ -1733,7 +1757,7 @@ function prepareAccurateSegmentForCommit(stream) {
 
 function settleCommittedAccurateSegment(stream, itemId) {
   if (!stream || stream.dualChannelEnabled !== true) return;
-  const segment = stream.commitSegmentInFlight;
+  const segment = stream.commitSegmentInFlight || takeCapturedAccurateSegment(stream);
   stream.commitSegmentInFlight = null;
   if (!segment) return;
 
@@ -1791,6 +1815,7 @@ function getRealtimePendingAudioMs(stream, now = Date.now()) {
 
 function commitRealtimeAudioBuffer(stream) {
   if (!stream || !stream.ready || stream.closing) return false;
+  if (stream.semanticSegmentationEnabled) return false;
   if (!stream.pendingAppendCount) return false;
   if (stream.commitInFlight) return false;
   const now = Date.now();
@@ -1811,6 +1836,7 @@ function commitRealtimeAudioBuffer(stream) {
 
 function ensureRealtimeForceCommitTimer(stream) {
   if (!stream || stream.forceCommitTimer) return;
+  if (stream.semanticSegmentationEnabled) return;
   if (FORCE_COMMIT_INTERVAL_MS <= 0) return;
   stream.forceCommitTimer = setInterval(() => {
     if (!stream.ready || stream.closing) return;
@@ -1839,7 +1865,11 @@ function sendRealtimeAudioChunk(stream, audio, durationMs = 0) {
   captureAccurateSegmentChunk(stream, audio, durationMs);
 }
 
-function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
+function buildRealtimeTranscriptionSessionUpdate({
+  model,
+  language,
+  semanticSegmentationEnabled,
+}) {
   const transcription = {
     model,
     ...(language ? { language } : {}),
@@ -1850,6 +1880,14 @@ function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
   ) {
     transcription.prompt = TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT;
   }
+
+  const turnDetection =
+    semanticSegmentationEnabled === true
+      ? {
+          type: 'semantic_vad',
+          eagerness: TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS,
+        }
+      : null;
 
   return {
     type: 'session.update',
@@ -1862,6 +1900,7 @@ function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
             rate: AUDIO_PCM_SAMPLE_RATE,
           },
           transcription,
+          turn_detection: turnDetection,
         },
       },
     },
@@ -2237,10 +2276,13 @@ function startRealtimeTranscription({
   apiKey,
   model,
   language,
+  semanticSegmentationEnabled,
   dualChannelEnabled,
 }) {
   const selectedModel = normalizeTranscriptionModel(model);
   const selectedLanguage = normalizeLanguageCode(language);
+  const selectedSemanticSegmentationEnabled =
+    normalizeSemanticSegmentationEnabled(semanticSegmentationEnabled);
   const selectedDualChannelEnabled =
     normalizeDualChannelEnabled(dualChannelEnabled);
   const client = new OpenAI({ apiKey });
@@ -2254,6 +2296,7 @@ function startRealtimeTranscription({
     sessionType: DEFAULT_REALTIME_SESSION_TYPE,
     model: selectedModel,
     language: selectedLanguage,
+    semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
     dualChannelEnabled: selectedDualChannelEnabled,
     draftByItemId: new Map(),
     activeDraftItemId: null,
@@ -2293,6 +2336,7 @@ function startRealtimeTranscription({
       isFinal: true,
       language: selectedLanguage,
       model: selectedModel,
+      semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
       error: '',
     });
@@ -2304,6 +2348,7 @@ function startRealtimeTranscription({
         buildRealtimeTranscriptionSessionUpdate({
           model: selectedModel,
           language: selectedLanguage,
+          semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
         }),
       );
       if (stream.initTimeout) {
@@ -2349,6 +2394,7 @@ function startRealtimeTranscription({
       isFinal: true,
       language: selectedLanguage,
       model: selectedModel,
+      semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
       error: '',
     });
@@ -2513,7 +2559,14 @@ io.on('connection', (socket) => {
 
   socket.on(
     'transcription:start',
-    ({ sessionId, apiKey, language, model, dualChannelEnabled }) => {
+    ({
+      sessionId,
+      apiKey,
+      language,
+      model,
+      semanticSegmentationEnabled,
+      dualChannelEnabled,
+    }) => {
       if (!sessionId) return;
 
       const session = getSession(sessionId);
@@ -2547,6 +2600,9 @@ io.on('connection', (socket) => {
         isFinal: true,
         language: normalizeLanguageCode(language),
         model: normalizeTranscriptionModel(model),
+        semanticSegmentationEnabled: normalizeSemanticSegmentationEnabled(
+          semanticSegmentationEnabled,
+        ),
         dualChannelEnabled: normalizeDualChannelEnabled(dualChannelEnabled),
         error: '',
       });
@@ -2560,6 +2616,7 @@ io.on('connection', (socket) => {
           apiKey: trimmedApiKey,
           language,
           model,
+          semanticSegmentationEnabled,
           dualChannelEnabled,
         });
       } catch (error) {
