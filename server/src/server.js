@@ -1507,16 +1507,24 @@ function startRealtimeTranscription({
       rt.send({
         type: 'session.update',
         session: {
-          input_audio_format: 'pcm16',
-          input_audio_transcription: {
-            model: selectedModel,
-            ...(selectedLanguage ? { language: selectedLanguage } : {}),
-          },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 450,
+          type: 'transcription',
+          audio: {
+            input: {
+              format: {
+                type: 'audio/pcm',
+                rate: 24000,
+              },
+              transcription: {
+                model: selectedModel,
+                ...(selectedLanguage ? { language: selectedLanguage } : {}),
+              },
+              turn_detection: {
+                type: 'server_vad',
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 450,
+              },
+            },
           },
         },
       });
