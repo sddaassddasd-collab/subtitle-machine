@@ -61,13 +61,20 @@ client/  Vite + React 控制端/檢視端前端
 4. 音訊事件使用 `input_audio_buffer.append` 持續送 PCM16(24kHz, mono)。
 5. 以前端 `conversation.item.input_audio_transcription.delta/completed` 顯示逐字稿。
 6. 後端預設使用低延遲手動 commit（約 450ms 一段，且每段至少 180ms 音訊），體感接近聽打輸入。
-7. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
+7. 啟用雙通道解碼：先用 Realtime 快速出字，再以同段原始音訊做一次 `audio.transcriptions.create` 回填精修。
+8. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
 
 可用環境變數微調即時性與穩定性（後端）：
 
 - `TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS`：commit 週期（預設 `450`）。
 - `TRANSCRIPTION_MIN_COMMIT_AUDIO_MS`：最小音訊長度才 commit（預設 `180`）。
 - `TRANSCRIPTION_COMMIT_COOLDOWN_MS`：兩次 commit 的最小間隔（預設 `250`）。
+- `TRANSCRIPTION_DUAL_CHANNEL_ENABLED`：是否啟用二次音訊精修（預設 `true`）。
+- `TRANSCRIPTION_ACCURATE_MODEL`：二次音訊精修模型（預設 `gpt-4o-transcribe-latest`）。
+- `TRANSCRIPTION_ACCURATE_PROMPT`：二次音訊精修用提示詞（選填）。
+- `TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS`：二次精修最短片段長度（預設 `180`）。
+- `TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS`：二次精修最長片段長度（預設 `8000`）。
+- `TRANSCRIPTION_ACCURATE_MAX_PENDING_SEGMENTS`：等待對齊的音訊片段上限（預設 `40`）。
 - `TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED`：是否啟用繁體輸出保證（預設 `true`）。
 - `TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT`：自訂轉錄提示詞（選填，預設空值；若設定可能增加提示詞洩漏到字幕的風險）。
 

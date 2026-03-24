@@ -7,6 +7,7 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
+const { toFile } = require('openai/uploads');
 const iconv = require('iconv-lite');
 const OpenCC = require('opencc-js');
 
@@ -62,6 +63,8 @@ const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
 const MAX_TRANSCRIPTION_DISPLAY_LINES = 8;
+const AUDIO_PCM_SAMPLE_RATE = 24000;
+const AUDIO_PCM_BYTES_PER_SAMPLE = 2;
 const parsedForceCommitIntervalMs = Number(
   process.env.TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS,
 );
@@ -84,6 +87,38 @@ const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
+const TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
+  process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED !== 'false';
+const TRANSCRIPTION_ACCURATE_MODEL =
+  process.env.TRANSCRIPTION_ACCURATE_MODEL || 'gpt-4o-transcribe-latest';
+const TRANSCRIPTION_ACCURATE_PROMPT =
+  typeof process.env.TRANSCRIPTION_ACCURATE_PROMPT === 'string'
+    ? process.env.TRANSCRIPTION_ACCURATE_PROMPT.trim()
+    : '';
+const parsedAccurateMinSegmentMs = Number(
+  process.env.TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS,
+);
+const TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS = Number.isFinite(
+  parsedAccurateMinSegmentMs,
+)
+  ? Math.max(0, parsedAccurateMinSegmentMs)
+  : 180;
+const parsedAccurateMaxSegmentMs = Number(
+  process.env.TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS,
+);
+const TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS = Number.isFinite(
+  parsedAccurateMaxSegmentMs,
+)
+  ? Math.max(1000, parsedAccurateMaxSegmentMs)
+  : 8000;
+const parsedAccurateMaxPendingSegments = Number(
+  process.env.TRANSCRIPTION_ACCURATE_MAX_PENDING_SEGMENTS,
+);
+const TRANSCRIPTION_ACCURATE_MAX_PENDING_SEGMENTS = Number.isFinite(
+  parsedAccurateMaxPendingSegments,
+)
+  ? Math.max(1, parsedAccurateMaxPendingSegments)
+  : 40;
 const TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED =
   process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED !== 'false';
 const TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT =
@@ -1199,6 +1234,56 @@ ${original}
   return output;
 }
 
+async function transcribeAccurateSegmentLine({
+  client,
+  segment,
+  language,
+}) {
+  if (!TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return '';
+  if (!isAccurateSegmentEligible(segment)) return '';
+
+  const wavBuffer = createWavFromPcm16Mono(segment.pcm);
+  if (!wavBuffer.length) return '';
+
+  const audioFile = await toFile(
+    wavBuffer,
+    `segment-${segment.id || Date.now()}.wav`,
+    { type: 'audio/wav' },
+  );
+
+  const response = await client.audio.transcriptions.create({
+    file: audioFile,
+    model: TRANSCRIPTION_ACCURATE_MODEL,
+    ...(language ? { language } : {}),
+    ...(TRANSCRIPTION_ACCURATE_PROMPT
+      ? { prompt: TRANSCRIPTION_ACCURATE_PROMPT }
+      : {}),
+  });
+
+  const rawText =
+    typeof response === 'string' ? response : response?.text || '';
+  return normalizeTranscriptionOutputText(rawText, language);
+}
+
+function shouldApplyAccurateReplacement(currentText, candidateText) {
+  const current = sanitizeTranscriptionText(currentText);
+  const candidate = sanitizeTranscriptionText(candidateText);
+
+  if (!candidate) return false;
+  if (candidate === current) return false;
+  if (punctuationOnlyRegex.test(candidate)) return false;
+  if (!current) return true;
+
+  if (candidate.length > Math.max(current.length * 3, 140)) {
+    return false;
+  }
+  if (current.length >= 12 && candidate.length < Math.floor(current.length * 0.3)) {
+    return false;
+  }
+
+  return true;
+}
+
 function queueTranscriptionCorrection({
   stream,
   isCurrent,
@@ -1206,9 +1291,12 @@ function queueTranscriptionCorrection({
   sessionId,
   itemId,
   language,
+  accurateSegment,
 }) {
-  if (!TRANSCRIPTION_CORRECTION_ENABLED) return;
   if (!stream || !itemId) return;
+  if (!TRANSCRIPTION_CORRECTION_ENABLED && !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) {
+    return;
+  }
 
   stream.correctionChain = stream.correctionChain
     .then(async () => {
@@ -1216,23 +1304,52 @@ function queueTranscriptionCorrection({
       const line = stream.finalizedLineByItemId.get(itemId);
       if (!line || !line.text) return;
 
-      try {
-        const corrected = await correctTranscriptionLine({
-          client,
-          text: line.text,
-          language,
-        });
-        if (!isCurrent() || stream.closing) return;
-        if (!corrected) return;
-        if (corrected === line.text) return;
+      let nextText = line.text;
+      let changed = false;
 
-        line.text = corrected;
-        line.corrected = true;
-        syncTranscriptionStateFromStream(sessionId, stream);
-      } catch (error) {
-        stream.lastTransportError =
-          sanitizeLineText(error?.message || '') || stream.lastTransportError;
+      if (TRANSCRIPTION_DUAL_CHANNEL_ENABLED) {
+        try {
+          const refined = await transcribeAccurateSegmentLine({
+            client,
+            segment: accurateSegment,
+            language,
+          });
+          if (!isCurrent() || stream.closing) return;
+          if (shouldApplyAccurateReplacement(nextText, refined)) {
+            nextText = refined;
+            changed = true;
+          }
+        } catch (error) {
+          stream.lastTransportError =
+            sanitizeLineText(error?.message || '') || stream.lastTransportError;
+        }
       }
+
+      if (TRANSCRIPTION_CORRECTION_ENABLED) {
+        try {
+          const corrected = await correctTranscriptionLine({
+            client,
+            text: nextText,
+            language,
+          });
+          if (!isCurrent() || stream.closing) return;
+          if (corrected && corrected !== nextText) {
+            nextText = corrected;
+            changed = true;
+          }
+        } catch (error) {
+          stream.lastTransportError =
+            sanitizeLineText(error?.message || '') || stream.lastTransportError;
+        }
+      }
+
+      if (!changed || nextText === line.text) {
+        return;
+      }
+
+      line.text = nextText;
+      line.corrected = true;
+      syncTranscriptionStateFromStream(sessionId, stream);
     })
     .catch(() => {});
 }
@@ -1351,6 +1468,7 @@ function stopTranscriptionStream(sessionId, options = {}) {
   clearRealtimeForceCommitTimer(stream);
   resetRealtimePendingAudio(stream);
   resetRealtimeCommitState(stream);
+  resetAccurateTranscriptionState(stream);
   if (stream.initTimeout) {
     clearTimeout(stream.initTimeout);
     stream.initTimeout = null;
@@ -1409,6 +1527,40 @@ function normalizeChunkDurationMs(rawDurationMs) {
   return Math.min(numeric, 2000);
 }
 
+function getPcmDurationMs(byteLength) {
+  if (!Number.isFinite(byteLength) || byteLength <= 0) return 0;
+  return (
+    (byteLength / (AUDIO_PCM_SAMPLE_RATE * AUDIO_PCM_BYTES_PER_SAMPLE)) * 1000
+  );
+}
+
+function createWavFromPcm16Mono(pcmBuffer) {
+  if (!Buffer.isBuffer(pcmBuffer) || pcmBuffer.length === 0) {
+    return Buffer.alloc(0);
+  }
+
+  const dataSize = pcmBuffer.length;
+  const wavBuffer = Buffer.alloc(44 + dataSize);
+  const byteRate = AUDIO_PCM_SAMPLE_RATE * AUDIO_PCM_BYTES_PER_SAMPLE;
+
+  wavBuffer.write('RIFF', 0);
+  wavBuffer.writeUInt32LE(36 + dataSize, 4);
+  wavBuffer.write('WAVE', 8);
+  wavBuffer.write('fmt ', 12);
+  wavBuffer.writeUInt32LE(16, 16);
+  wavBuffer.writeUInt16LE(1, 20);
+  wavBuffer.writeUInt16LE(1, 22);
+  wavBuffer.writeUInt32LE(AUDIO_PCM_SAMPLE_RATE, 24);
+  wavBuffer.writeUInt32LE(byteRate, 28);
+  wavBuffer.writeUInt16LE(AUDIO_PCM_BYTES_PER_SAMPLE, 32);
+  wavBuffer.writeUInt16LE(16, 34);
+  wavBuffer.write('data', 36);
+  wavBuffer.writeUInt32LE(dataSize, 40);
+  pcmBuffer.copy(wavBuffer, 44);
+
+  return wavBuffer;
+}
+
 function isIgnorableRealtimeCommitError(message) {
   if (!message || typeof message !== 'string') return false;
   return (
@@ -1436,6 +1588,155 @@ function resetRealtimeCommitState(stream) {
   if (!stream) return;
   stream.commitInFlight = false;
   stream.lastCommitAt = 0;
+}
+
+function resetAccurateSegmentCapture(stream) {
+  if (!stream) return;
+  stream.currentSegmentChunks = [];
+  stream.currentSegmentBytes = 0;
+  stream.currentSegmentMs = 0;
+}
+
+function resetAccurateTranscriptionState(stream) {
+  if (!stream) return;
+  resetAccurateSegmentCapture(stream);
+  stream.commitSegmentInFlight = null;
+  stream.unboundCommittedSegments = [];
+  stream.segmentByItemId = new Map();
+  stream.nextSegmentId = 1;
+}
+
+function captureAccurateSegmentChunk(stream, audio, durationMs = 0) {
+  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return;
+  if (typeof audio !== 'string' || !audio) return;
+
+  let pcmChunk = null;
+  try {
+    pcmChunk = Buffer.from(audio, 'base64');
+  } catch (_error) {
+    return;
+  }
+
+  if (!pcmChunk || pcmChunk.length === 0) return;
+
+  stream.currentSegmentChunks.push(pcmChunk);
+  stream.currentSegmentBytes += pcmChunk.length;
+  stream.currentSegmentMs += normalizeChunkDurationMs(durationMs);
+
+  const hardMaxBytes =
+    Math.ceil(
+      (TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS / 1000) * AUDIO_PCM_SAMPLE_RATE,
+    ) * AUDIO_PCM_BYTES_PER_SAMPLE;
+
+  if (stream.currentSegmentBytes <= hardMaxBytes) return;
+
+  // Keep newest chunk when an unusually long segment slips through.
+  stream.currentSegmentChunks = [pcmChunk];
+  stream.currentSegmentBytes = pcmChunk.length;
+  stream.currentSegmentMs =
+    normalizeChunkDurationMs(durationMs) || getPcmDurationMs(pcmChunk.length);
+}
+
+function takeCapturedAccurateSegment(stream) {
+  if (!stream || stream.currentSegmentBytes <= 0) return null;
+
+  const pcm = Buffer.concat(stream.currentSegmentChunks, stream.currentSegmentBytes);
+  const durationMs =
+    stream.currentSegmentMs > 0
+      ? stream.currentSegmentMs
+      : getPcmDurationMs(stream.currentSegmentBytes);
+
+  const segment = {
+    id: stream.nextSegmentId,
+    pcm,
+    durationMs,
+    createdAt: Date.now(),
+  };
+  stream.nextSegmentId += 1;
+  resetAccurateSegmentCapture(stream);
+  return segment;
+}
+
+function isAccurateSegmentEligible(segment) {
+  if (!segment || !Buffer.isBuffer(segment.pcm) || segment.pcm.length === 0) {
+    return false;
+  }
+  const durationMs =
+    Number.isFinite(segment.durationMs) && segment.durationMs > 0
+      ? segment.durationMs
+      : getPcmDurationMs(segment.pcm.length);
+  if (durationMs < TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS) return false;
+  if (durationMs > TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS) return false;
+  return true;
+}
+
+function pushUnboundCommittedSegment(stream, segment) {
+  if (!stream || !segment) return;
+  stream.unboundCommittedSegments.push(segment);
+  if (stream.unboundCommittedSegments.length <= TRANSCRIPTION_ACCURATE_MAX_PENDING_SEGMENTS) {
+    return;
+  }
+  stream.unboundCommittedSegments.splice(
+    0,
+    stream.unboundCommittedSegments.length -
+      TRANSCRIPTION_ACCURATE_MAX_PENDING_SEGMENTS,
+  );
+}
+
+function prepareAccurateSegmentForCommit(stream) {
+  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return;
+  const segment = takeCapturedAccurateSegment(stream);
+  if (!segment) return;
+
+  if (stream.commitSegmentInFlight) {
+    pushUnboundCommittedSegment(stream, stream.commitSegmentInFlight);
+  }
+  stream.commitSegmentInFlight = segment;
+}
+
+function settleCommittedAccurateSegment(stream, itemId) {
+  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return;
+  const segment = stream.commitSegmentInFlight;
+  stream.commitSegmentInFlight = null;
+  if (!segment) return;
+
+  if (typeof itemId === 'string' && itemId) {
+    stream.segmentByItemId.set(itemId, segment);
+    if (
+      stream.segmentByItemId.size >
+      TRANSCRIPTION_ACCURATE_MAX_PENDING_SEGMENTS * 3
+    ) {
+      const dropKey = stream.segmentByItemId.keys().next().value;
+      if (dropKey) {
+        stream.segmentByItemId.delete(dropKey);
+      }
+    }
+    return;
+  }
+
+  pushUnboundCommittedSegment(stream, segment);
+}
+
+function takeAccurateSegmentForItem(stream, itemId) {
+  if (!stream || !TRANSCRIPTION_DUAL_CHANNEL_ENABLED) return null;
+
+  if (typeof itemId === 'string' && itemId) {
+    const bound = stream.segmentByItemId.get(itemId) || null;
+    if (bound) {
+      stream.segmentByItemId.delete(itemId);
+      return bound;
+    }
+  }
+
+  if (!Array.isArray(stream.unboundCommittedSegments)) {
+    return null;
+  }
+  return stream.unboundCommittedSegments.shift() || null;
+}
+
+function dropAccurateSegmentForItem(stream, itemId) {
+  if (!stream || !itemId || !stream.segmentByItemId) return;
+  stream.segmentByItemId.delete(itemId);
 }
 
 function markRealtimePendingAudio(stream, durationMs = 0) {
@@ -1470,6 +1771,7 @@ function commitRealtimeAudioBuffer(stream) {
   stream.rt.send({
     type: 'input_audio_buffer.commit',
   });
+  prepareAccurateSegmentForCommit(stream);
   return true;
 }
 
@@ -1500,6 +1802,7 @@ function sendRealtimeAudioChunk(stream, audio, durationMs = 0) {
     audio,
   });
   markRealtimePendingAudio(stream, durationMs);
+  captureAccurateSegmentChunk(stream, audio, durationMs);
 }
 
 function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
@@ -1522,7 +1825,7 @@ function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
         input: {
           format: {
             type: 'audio/pcm',
-            rate: 24000,
+            rate: AUDIO_PCM_SAMPLE_RATE,
           },
           transcription,
           turn_detection: {
@@ -1928,6 +2231,13 @@ function startRealtimeTranscription({
     finalizedLineByItemId: new Map(),
     correctionChain: Promise.resolve(),
     pendingAudioChunks: [],
+    unboundCommittedSegments: [],
+    segmentByItemId: new Map(),
+    commitSegmentInFlight: null,
+    currentSegmentChunks: [],
+    currentSegmentBytes: 0,
+    currentSegmentMs: 0,
+    nextSegmentId: 1,
     lastTransportError: '',
     ready: false,
     initTimeout: null,
@@ -2015,16 +2325,40 @@ function startRealtimeTranscription({
     flushQueuedRealtimeAudio(stream);
   });
 
-  rt.on('input_audio_buffer.committed', () => {
+  rt.on('input_audio_buffer.committed', (event) => {
     if (!isCurrent()) return;
     stream.commitInFlight = false;
     resetRealtimePendingAudio(stream);
+    settleCommittedAccurateSegment(stream, event?.item_id);
+
+    if (
+      event?.item_id &&
+      stream.finalizedLineByItemId.has(event.item_id)
+    ) {
+      const lateAccurateSegment = takeAccurateSegmentForItem(
+        stream,
+        event.item_id,
+      );
+      if (lateAccurateSegment) {
+        queueTranscriptionCorrection({
+          stream,
+          isCurrent,
+          client,
+          sessionId,
+          itemId: event.item_id,
+          language: selectedLanguage,
+          accurateSegment: lateAccurateSegment,
+        });
+      }
+    }
   });
 
   rt.on('input_audio_buffer.cleared', () => {
     if (!isCurrent()) return;
     stream.commitInFlight = false;
     resetRealtimePendingAudio(stream);
+    stream.commitSegmentInFlight = null;
+    resetAccurateSegmentCapture(stream);
   });
 
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
@@ -2050,6 +2384,7 @@ function startRealtimeTranscription({
       selectedLanguage,
     );
     appendFinalizedLine(stream, event.item_id, transcript);
+    const accurateSegment = takeAccurateSegmentForItem(stream, event.item_id);
     syncTranscriptionStateFromStream(sessionId, stream);
     queueTranscriptionCorrection({
       stream,
@@ -2058,6 +2393,7 @@ function startRealtimeTranscription({
       sessionId,
       itemId: event.item_id,
       language: selectedLanguage,
+      accurateSegment,
     });
   });
 
@@ -2067,6 +2403,7 @@ function startRealtimeTranscription({
     const message =
       sanitizeLineText(event?.error?.message || '') || '語音片段辨識失敗';
     takeDraftLine(stream, event?.item_id);
+    dropAccurateSegmentForItem(stream, event?.item_id);
     syncTranscriptionStateFromStream(sessionId, stream, {
       error: message,
     });
@@ -2083,6 +2420,7 @@ function startRealtimeTranscription({
     if (isIgnorableRealtimeCommitError(message)) {
       stream.commitInFlight = false;
       stream.lastCommitAt = Date.now();
+      stream.commitSegmentInFlight = null;
       return;
     }
 
@@ -2106,6 +2444,7 @@ function startRealtimeTranscription({
     clearRealtimeForceCommitTimer(stream);
     resetRealtimePendingAudio(stream);
     resetRealtimeCommitState(stream);
+    resetAccurateTranscriptionState(stream);
     if (stream.closing) {
       return;
     }
