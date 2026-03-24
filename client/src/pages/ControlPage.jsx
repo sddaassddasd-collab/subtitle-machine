@@ -22,6 +22,10 @@ const DEFAULT_TRANSCRIPTION_STATE = {
 }
 
 const TARGET_SAMPLE_RATE = 24000
+const MIC_CAPTURE_WORKLET_URL = new URL(
+  '../worklets/mic-capture-processor.js',
+  import.meta.url,
+)
 
 const normalizeTranscriptionState = (raw) => {
   if (!raw || typeof raw !== 'object') {
@@ -161,7 +165,7 @@ const ControlPage = () => {
     mediaStream: null,
     audioContext: null,
     sourceNode: null,
-    processorNode: null,
+    captureNode: null,
     silenceNode: null,
   })
 
@@ -170,17 +174,22 @@ const ControlPage = () => {
     if (!state) return
 
     const {
-      processorNode,
+      captureNode,
       sourceNode,
       silenceNode,
       audioContext,
       mediaStream,
     } = state
 
-    if (processorNode) {
+    if (captureNode) {
       try {
-        processorNode.onaudioprocess = null
-        processorNode.disconnect()
+        if ('onaudioprocess' in captureNode) {
+          captureNode.onaudioprocess = null
+        }
+        if ('port' in captureNode && captureNode.port) {
+          captureNode.port.onmessage = null
+        }
+        captureNode.disconnect()
       } catch {
         // Ignore cleanup errors.
       }
@@ -216,7 +225,7 @@ const ControlPage = () => {
       mediaStream: null,
       audioContext: null,
       sourceNode: null,
-      processorNode: null,
+      captureNode: null,
       silenceNode: null,
     }
   }
@@ -510,7 +519,7 @@ const ControlPage = () => {
     }
 
     const state = captureStateRef.current
-    if (state?.mediaStream || state?.audioContext || state?.processorNode) {
+    if (state?.mediaStream || state?.audioContext || state?.captureNode) {
       releaseMicrophoneCapture()
     }
   }, [transcription.active, transcription.status])
@@ -621,27 +630,14 @@ const ControlPage = () => {
       await audioContext.resume()
 
       const sourceNode = audioContext.createMediaStreamSource(stream)
-      const processorNode = audioContext.createScriptProcessor(4096, 1, 1)
       const silenceNode = audioContext.createGain()
       silenceNode.gain.value = 0
 
-      sourceNode.connect(processorNode)
-      processorNode.connect(silenceNode)
-      silenceNode.connect(audioContext.destination)
-
-      captureStateRef.current = {
-        mediaStream: stream,
-        audioContext,
-        sourceNode,
-        processorNode,
-        silenceNode,
-      }
-
-      processorNode.onaudioprocess = (event) => {
+      const emitSamples = (sourceSamples) => {
+        if (!sourceSamples?.length) return
         const socket = socketRef.current
         if (!socket || !sessionId) return
 
-        const sourceSamples = event.inputBuffer.getChannelData(0)
         const downsampled = downsampleFloat32(
           sourceSamples,
           audioContext.sampleRate,
@@ -656,6 +652,69 @@ const ControlPage = () => {
         socket.emit('transcription:audio', {
           sessionId,
           audio,
+        })
+      }
+
+      let captureNode = null
+      let usingScriptProcessorFallback = false
+
+      if (
+        audioContext.audioWorklet &&
+        typeof window !== 'undefined' &&
+        typeof window.AudioWorkletNode === 'function'
+      ) {
+        await audioContext.audioWorklet.addModule(MIC_CAPTURE_WORKLET_URL.href)
+        const workletNode = new window.AudioWorkletNode(
+          audioContext,
+          'mic-capture-processor',
+          {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            channelCount: 1,
+          },
+        )
+        workletNode.port.onmessage = (workletEvent) => {
+          const sourceSamples = workletEvent.data
+          if (sourceSamples instanceof Float32Array) {
+            emitSamples(sourceSamples)
+            return
+          }
+          if (
+            sourceSamples &&
+            typeof sourceSamples.length === 'number' &&
+            sourceSamples.length > 0
+          ) {
+            emitSamples(Float32Array.from(sourceSamples))
+          }
+        }
+        sourceNode.connect(workletNode)
+        workletNode.connect(silenceNode)
+        captureNode = workletNode
+      } else {
+        usingScriptProcessorFallback = true
+        const processorNode = audioContext.createScriptProcessor(4096, 1, 1)
+        processorNode.onaudioprocess = (event) => {
+          emitSamples(event.inputBuffer.getChannelData(0))
+        }
+        sourceNode.connect(processorNode)
+        processorNode.connect(silenceNode)
+        captureNode = processorNode
+      }
+
+      silenceNode.connect(audioContext.destination)
+
+      captureStateRef.current = {
+        mediaStream: stream,
+        audioContext,
+        sourceNode,
+        captureNode,
+        silenceNode,
+      }
+
+      if (usingScriptProcessorFallback) {
+        setStatus({
+          kind: 'info',
+          message: '已啟動即時語音辨識（此瀏覽器使用相容模式收音）',
         })
       }
 
