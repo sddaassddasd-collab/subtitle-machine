@@ -63,9 +63,8 @@ const MAX_PENDING_AUDIO_CHUNKS = 400;
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
-const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 const VALID_TRANSCRIPTION_MODELS = new Set([
-  'gpt-4o-mini-transcribe',
   'gpt-4o-transcribe',
   'gpt-4o-transcribe-diarize',
   'whisper-1',

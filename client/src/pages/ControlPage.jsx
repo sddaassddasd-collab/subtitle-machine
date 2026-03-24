@@ -10,13 +10,20 @@ const storageKeys = {
   rememberKey: 'subtitleMachineRememberKey',
 }
 
+const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
+const ALLOWED_TRANSCRIPTION_MODELS = new Set([
+  'gpt-4o-transcribe',
+  'gpt-4o-transcribe-diarize',
+  'whisper-1',
+])
+
 const DEFAULT_TRANSCRIPTION_STATE = {
   active: false,
   status: 'idle',
   text: '',
   isFinal: true,
   language: null,
-  model: 'gpt-4o-mini-transcribe',
+  model: DEFAULT_TRANSCRIPTION_MODEL,
   error: '',
   updatedAt: null,
 }
@@ -44,9 +51,10 @@ const normalizeTranscriptionState = (raw) => {
         ? raw.status
         : 'idle',
     model:
-      typeof raw.model === 'string' && raw.model.trim().length > 0
-        ? raw.model
-        : 'gpt-4o-mini-transcribe',
+      typeof raw.model === 'string' &&
+      ALLOWED_TRANSCRIPTION_MODELS.has(raw.model.trim())
+        ? raw.model.trim()
+        : DEFAULT_TRANSCRIPTION_MODEL,
     language:
       typeof raw.language === 'string' && raw.language.trim().length > 0
         ? raw.language
@@ -810,12 +818,12 @@ const ControlPage = () => {
       socketRef.current.emit('transcription:start', {
         sessionId,
         apiKey,
-        model: transcription.model || 'gpt-4o-mini-transcribe',
+        model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
       })
       logTranscriptionDebug('socket-start-emitted', {
         sessionId,
-        model: transcription.model || 'gpt-4o-mini-transcribe',
+        model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
         language: transcription.language || 'zh',
       })
     } catch (error) {
