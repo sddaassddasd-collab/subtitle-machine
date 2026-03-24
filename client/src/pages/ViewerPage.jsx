@@ -26,10 +26,17 @@ const normalizeViewerPayload = (payload) => {
   const transcriptionIsFinal = transcription.isFinal !== false
   const source =
     typeof payload?.source === 'string' ? payload.source : 'script'
+  const liveLines = Array.isArray(payload?.liveLines)
+    ? payload.liveLines
+        .filter((line) => typeof line === 'string')
+        .map((line) => line.trim())
+        .filter(Boolean)
+    : []
 
   return {
     enabled,
     line: nextLine,
+    liveLines,
     source,
     transcriptionIsFinal,
   }
@@ -44,12 +51,14 @@ const ViewerPage = () => {
   const sessionId = query.get('session') || DEFAULT_SESSION_ID
 
   const [line, setLine] = useState(null)
+  const [liveLines, setLiveLines] = useState([])
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
+  const liveFeedRef = useRef(null)
 
   useEffect(() => {
     if (!sessionId) return
@@ -66,6 +75,7 @@ const ViewerPage = () => {
           const next = normalizeViewerPayload(data)
           setDisplayEnabled(next.enabled)
           setLine(next.line)
+          setLiveLines(next.liveLines)
           setLineSource(next.source)
           setTranscriptionIsFinal(next.transcriptionIsFinal)
         }
@@ -92,6 +102,7 @@ const ViewerPage = () => {
       const next = normalizeViewerPayload(payload)
       setDisplayEnabled(next.enabled)
       setLine(next.line)
+      setLiveLines(next.liveLines)
       setLineSource(next.source)
       setTranscriptionIsFinal(next.transcriptionIsFinal)
     })
@@ -119,6 +130,21 @@ const ViewerPage = () => {
         handleVisibilityChange,
       )
   }, [])
+
+  useEffect(() => {
+    if (lineSource !== 'transcription') return
+    const container = liveFeedRef.current
+    if (!container) return
+
+    const frameId = window.requestAnimationFrame(() => {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: 'smooth',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [lineSource, liveLines])
 
   useEffect(() => {
     const handler = () => {
@@ -214,6 +240,8 @@ const ViewerPage = () => {
       ? '\u00a0'
       : line?.text || ''
     : '字幕暫停中'
+  const latestLiveLine =
+    liveLines.length > 0 ? liveLines[liveLines.length - 1] : ''
 
   return (
     <div className="viewer-page" ref={containerRef}>
@@ -230,7 +258,32 @@ const ViewerPage = () => {
           {transcriptionIsFinal ? '即時語音 最終稿' : '即時語音 草稿'}
         </div>
       )}
-      <div className={textClass}>{displayText}</div>
+      {lineSource === 'transcription' && displayEnabled ? (
+        <div className="viewer-live-feed" ref={liveFeedRef}>
+          {liveLines.map((liveLine, index) => {
+            const isLatest = index === liveLines.length - 1
+            return (
+              <div
+                key={`${index}-${liveLine}`}
+                className={`viewer-live-line${isLatest ? ' viewer-live-line-active' : ''}${
+                  transcriptionIsFinal && isLatest
+                    ? ' viewer-live-line-final'
+                    : ''
+                }`}
+              >
+                {liveLine}
+              </div>
+            )
+          })}
+          {liveLines.length === 0 && (
+            <div className="viewer-live-line viewer-live-line-active">
+              {latestLiveLine || displayText}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className={textClass}>{displayText}</div>
+      )}
     </div>
   )
 }

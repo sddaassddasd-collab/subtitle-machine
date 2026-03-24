@@ -2385,11 +2385,18 @@ function getViewerPayload(session) {
   const transcription = ensureTranscriptionState(session);
   const liveText = sanitizeTranscriptionMultilineText(transcription.text);
   const hasLiveText = transcription.active && liveText.length > 0;
+  const liveLines = hasLiveText
+    ? liveText
+        .split('\n')
+        .map((line) => sanitizeTranscriptionText(line))
+        .filter(Boolean)
+    : [];
 
   if (!session.displayEnabled) {
     return {
       line: null,
       text: '',
+      liveLines: [],
       displayEnabled: false,
       source: 'hidden',
       transcription: getPublicTranscriptionState(session),
@@ -2399,10 +2406,11 @@ function getViewerPayload(session) {
   if (hasLiveText) {
     return {
       line: {
-        text: liveText,
+        text: liveLines[liveLines.length - 1] || liveText,
         type: LINE_TYPES.DIALOGUE,
       },
       text: liveText,
+      liveLines,
       displayEnabled: true,
       source: 'transcription',
       transcription: getPublicTranscriptionState(session),
@@ -2416,6 +2424,7 @@ function getViewerPayload(session) {
       activeLine && activeLine.type === LINE_TYPES.DIRECTION
         ? ''
         : activeLine?.text || '',
+    liveLines: [],
     displayEnabled: true,
     source: 'script',
     transcription: getPublicTranscriptionState(session),
