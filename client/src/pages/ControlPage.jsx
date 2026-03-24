@@ -658,13 +658,17 @@ const ControlPage = () => {
       let captureNode = null
       let usingScriptProcessorFallback = false
 
+      const AudioWorkletNodeClass =
+        typeof globalThis !== 'undefined'
+          ? globalThis.AudioWorkletNode
+          : undefined
+
       if (
         audioContext.audioWorklet &&
-        typeof window !== 'undefined' &&
-        typeof window.AudioWorkletNode === 'function'
+        typeof AudioWorkletNodeClass === 'function'
       ) {
         await audioContext.audioWorklet.addModule(MIC_CAPTURE_WORKLET_URL.href)
-        const workletNode = new window.AudioWorkletNode(
+        const workletNode = new AudioWorkletNodeClass(
           audioContext,
           'mic-capture-processor',
           {
