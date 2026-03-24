@@ -16,6 +16,7 @@
     "iconv-lite": "^0.7.0",
     "multer": "^2.0.2",
     "openai": "^6.7.0",
+    "opencc-js": "^1.0.5",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {

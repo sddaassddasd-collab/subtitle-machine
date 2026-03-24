@@ -61,12 +61,15 @@ client/  Vite + React 控制端/檢視端前端
 4. 音訊事件使用 `input_audio_buffer.append` 持續送 PCM16(24kHz, mono)。
 5. 以前端 `conversation.item.input_audio_transcription.delta/completed` 顯示逐字稿。
 6. 後端預設使用低延遲手動 commit（約 450ms 一段，且每段至少 180ms 音訊），體感接近聽打輸入。
+7. 當語言是 `zh`（或 `zh-*`）時，後端會要求模型輸出繁體中文，並再做一次 OpenCC（簡轉繁，台灣用字）正規化。
 
 可用環境變數微調即時性與穩定性（後端）：
 
 - `TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS`：commit 週期（預設 `450`）。
 - `TRANSCRIPTION_MIN_COMMIT_AUDIO_MS`：最小音訊長度才 commit（預設 `180`）。
 - `TRANSCRIPTION_COMMIT_COOLDOWN_MS`：兩次 commit 的最小間隔（預設 `250`）。
+- `TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED`：是否啟用繁體輸出保證（預設 `true`）。
+- `TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT`：覆蓋預設繁體輸出提示詞（選填）。
 
 ### 常見錯誤對照
 

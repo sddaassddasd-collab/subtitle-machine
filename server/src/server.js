@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const iconv = require('iconv-lite');
+const OpenCC = require('opencc-js');
 
 const PORT = process.env.PORT || 3000;
 const MAX_SCRIPT_SIZE = 512 * 1024; // 512 KB limit for uploads
@@ -83,6 +84,11 @@ const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
+const TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED =
+  process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED !== 'false';
+const TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT =
+  process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT ||
+  '請使用繁體中文（台灣用字）輸出轉錄文字；若原本是英文、數字或專有名詞，請保留原文。';
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
@@ -103,6 +109,16 @@ const fallbackCodes = new Set([
   'MISSING_OUTPUT',
   'EMPTY_OUTPUT',
 ]);
+
+let cnToTraditionalTaiwanConverter = null;
+try {
+  cnToTraditionalTaiwanConverter = OpenCC.Converter({
+    from: 'cn',
+    to: 'twp',
+  });
+} catch (error) {
+  console.warn('Failed to initialize OpenCC converter:', error);
+}
 
 function clampLineType(rawType) {
   if (typeof rawType !== 'string') return null;
@@ -962,6 +978,35 @@ function sanitizeTranscriptionText(text) {
   return sanitizeLineText(text).replace(/\s+/g, ' ').trim();
 }
 
+function isChineseLanguageCode(language) {
+  return typeof language === 'string' && /^zh(?:-|$)/iu.test(language.trim());
+}
+
+function shouldPreferTraditionalChinese(language) {
+  return (
+    TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED && isChineseLanguageCode(language)
+  );
+}
+
+function traditionalizeChineseText(text) {
+  if (!text) return '';
+  if (typeof cnToTraditionalTaiwanConverter !== 'function') return text;
+  try {
+    return cnToTraditionalTaiwanConverter(text);
+  } catch (_error) {
+    return text;
+  }
+}
+
+function normalizeTranscriptionOutputText(text, language) {
+  const sanitized = sanitizeTranscriptionText(text);
+  if (!sanitized) return '';
+  if (!shouldPreferTraditionalChinese(language)) {
+    return sanitized;
+  }
+  return sanitizeTranscriptionText(traditionalizeChineseText(sanitized));
+}
+
 function sanitizeTranscriptionMultilineText(text) {
   if (typeof text !== 'string') {
     text = text == null ? '' : String(text);
@@ -1084,7 +1129,7 @@ function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
 }
 
 async function correctTranscriptionLine({ client, text, language }) {
-  const original = sanitizeTranscriptionText(text);
+  const original = normalizeTranscriptionOutputText(text, language);
   if (!original) return '';
 
   const prompt = [
@@ -1103,6 +1148,7 @@ async function correctTranscriptionLine({ client, text, language }) {
 3. 只輸出修正後的一行文字，不要解釋。
 4. 若原句已正確，原樣輸出。
 ${language ? `5. 目標語言代碼：${language}` : ''}
+${shouldPreferTraditionalChinese(language) ? '6. 若輸出為中文，請一律使用繁體中文（台灣用字）。' : ''}
 
 原句：
 ${original}
@@ -1117,7 +1163,10 @@ ${original}
     max_output_tokens: 200,
   });
 
-  const output = sanitizeTranscriptionText(response.output_text || '');
+  const output = normalizeTranscriptionOutputText(
+    response.output_text || '',
+    language,
+  );
   if (!output) return '';
   if (output.length > Math.max(original.length * 2, 80)) {
     return original;
@@ -1429,6 +1478,14 @@ function sendRealtimeAudioChunk(stream, audio, durationMs = 0) {
 }
 
 function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
+  const transcription = {
+    model,
+    ...(language ? { language } : {}),
+  };
+  if (shouldPreferTraditionalChinese(language)) {
+    transcription.prompt = TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT;
+  }
+
   return {
     type: 'session.update',
     session: {
@@ -1439,10 +1496,7 @@ function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
             type: 'audio/pcm',
             rate: 24000,
           },
-          transcription: {
-            model,
-            ...(language ? { language } : {}),
-          },
+          transcription,
           turn_detection: {
             type: 'server_vad',
             create_response: false,
@@ -1950,7 +2004,10 @@ function startRealtimeTranscription({
     if (!event.item_id || typeof event.delta !== 'string') return;
 
     const previous = stream.draftByItemId.get(event.item_id) || '';
-    const merged = sanitizeTranscriptionText(`${previous}${event.delta}`);
+    const merged = normalizeTranscriptionOutputText(
+      `${previous}${event.delta}`,
+      selectedLanguage,
+    );
     setDraftLine(stream, event.item_id, merged);
     syncTranscriptionStateFromStream(sessionId, stream);
   });
@@ -1960,7 +2017,10 @@ function startRealtimeTranscription({
     if (!event.item_id) return;
 
     const fallback = takeDraftLine(stream, event.item_id);
-    const transcript = sanitizeTranscriptionText(event.transcript || fallback);
+    const transcript = normalizeTranscriptionOutputText(
+      event.transcript || fallback,
+      selectedLanguage,
+    );
     appendFinalizedLine(stream, event.item_id, transcript);
     syncTranscriptionStateFromStream(sessionId, stream);
     queueTranscriptionCorrection({
