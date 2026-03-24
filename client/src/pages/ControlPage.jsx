@@ -287,8 +287,8 @@ const ControlPage = () => {
     if (typeof window === 'undefined') return false
     return window.localStorage.getItem(storageKeys.rememberKey) === 'true'
   })
-  const [uploading, setUploading] = useState(false)
-  const [selectedFile, setSelectedFile] = useState(null)
+  const [parsingScript, setParsingScript] = useState(false)
+  const [scriptInput, setScriptInput] = useState('')
   const [editingIndex, setEditingIndex] = useState(null)
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
@@ -297,7 +297,6 @@ const ControlPage = () => {
   const [accessInput, setAccessInput] = useState('')
   const [accessError, setAccessError] = useState('')
   const socketRef = useRef(null)
-  const fileInputRef = useRef(null)
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
   const skipBlurRef = useRef(new Set())
@@ -733,11 +732,6 @@ const ControlPage = () => {
     } else {
       setAccessError('密碼錯誤，請再試一次')
     }
-  }
-
-  const handleFileChange = (event) => {
-    const file = event.target.files?.[0]
-    setSelectedFile(file ?? null)
   }
 
   const handleToggleDisplay = () => {
@@ -1477,34 +1471,36 @@ const ControlPage = () => {
     }
   }
 
-  const handleUploadScript = async (event) => {
+  const handleParseScript = async (event) => {
     event.preventDefault()
     if (!sessionId) {
-      setStatus({ kind: 'error', message: '尚未建立場次，無法上傳' })
+      setStatus({ kind: 'error', message: '尚未建立場次，無法解析劇本' })
       return
     }
     if (!apiKey) {
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
       return
     }
-    if (!selectedFile) {
-      setStatus({ kind: 'error', message: '請選擇要上傳的劇本檔案' })
+    if (!scriptInput.trim()) {
+      setStatus({ kind: 'error', message: '請先貼上劇本文字' })
       return
     }
 
     try {
-      setUploading(true)
+      setParsingScript(true)
       setStatus({ kind: 'info', message: '正在解析劇本，請稍候…' })
 
-      const formData = new FormData()
-      formData.append('script', selectedFile)
-      formData.append('apiKey', apiKey)
-
       const response = await fetch(
-        `/api/session/${sessionId}/script/upload`,
+        `/api/session/${sessionId}/script/parse`,
         {
           method: 'POST',
-          body: formData,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            apiKey,
+            scriptText: scriptInput,
+          }),
         },
       )
 
@@ -1546,19 +1542,14 @@ const ControlPage = () => {
           : { kind: 'success', message: '劇本解析完成，可以開始播放' }
       setStatus(nextStatus)
       setAutoCenterEnabled(false)
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
-      setSelectedFile(null)
     } catch (error) {
       console.error(error)
       setStatus({
         kind: 'error',
-        message: error.message || '上傳失敗，請重試',
+        message: error.message || '解析失敗，請重試',
       })
     } finally {
-      setUploading(false)
+      setParsingScript(false)
     }
   }
 
@@ -1657,17 +1648,24 @@ const ControlPage = () => {
           </div>
         </header>
 
-        <form className="input-group" onSubmit={handleUploadScript}>
-          <label htmlFor="script-file">上傳劇本文字檔 (.txt)</label>
-          <input
-            id="script-file"
-            ref={fileInputRef}
-            type="file"
-            accept=".txt,.md,.text"
-            onChange={handleFileChange}
+        <form className="input-group" onSubmit={handleParseScript}>
+          <label htmlFor="script-text">
+            貼上劇本文字
+          </label>
+          <textarea
+            id="script-text"
+            rows={10}
+            placeholder={`請直接從 Google Docs、Pages 或其他文件複製全文後貼到這裡。
+
+系統會把貼上的文字送去拆解成字幕，不再需要先轉成 .txt。`}
+            value={scriptInput}
+            onChange={(event) => setScriptInput(event.target.value)}
           />
-          <button type="submit" disabled={uploading}>
-            {uploading ? '解析中…' : '使用 OpenAI 拆解字幕'}
+          <span className="input-note">
+            建議直接複製貼上原始劇本內容，可避免檔案編碼造成的亂碼問題。
+          </span>
+          <button type="submit" disabled={parsingScript}>
+            {parsingScript ? '解析中…' : '使用 OpenAI 拆解字幕'}
           </button>
         </form>
 
@@ -1836,7 +1834,7 @@ const ControlPage = () => {
         <div className="script-list">
           {lines.length === 0 && (
             <p style={{ color: '#94a3b8', textAlign: 'center' }}>
-              尚未載入字幕，請先上傳劇本或手動輸入。
+              尚未載入字幕，請先貼上劇本文字並解析，或手動輸入。
             </p>
           )}
           {lines.map((line, index) => {

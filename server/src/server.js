@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const multer = require('multer');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
@@ -8,11 +7,9 @@ const { Server } = require('socket.io');
 const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
-const iconv = require('iconv-lite');
 const OpenCC = require('opencc-js');
 
 const PORT = process.env.PORT || 3000;
-const MAX_SCRIPT_SIZE = 512 * 1024; // 512 KB limit for uploads
 
 const app = express();
 const server = http.createServer(app);
@@ -28,13 +25,6 @@ app.use(express.json({ limit: '2mb' }));
 
 app.get('/healthz', (_req, res) => {
   res.status(200).send('ok');
-});
-
-const upload = multer({
-  limits: {
-    fileSize: MAX_SCRIPT_SIZE,
-    files: 1,
-  },
 });
 
 const sessions = new Map();
@@ -279,162 +269,6 @@ function isLineMarkedMusic(entry) {
 function stripBom(text) {
   if (!text) return '';
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-}
-
-function detectBomEncoding(buffer) {
-  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
-    return 'utf8';
-  }
-  if (buffer.length >= 2) {
-    if (buffer[0] === 0xff && buffer[1] === 0xfe) {
-      if (buffer.length >= 4 && buffer[2] === 0x00 && buffer[3] === 0x00) {
-        return 'utf32le';
-      }
-      return 'utf16le';
-    }
-    if (buffer[0] === 0xfe && buffer[1] === 0xff) {
-      return 'utf16be';
-    }
-  }
-  if (
-    buffer.length >= 4 &&
-    buffer[0] === 0x00 &&
-    buffer[1] === 0x00 &&
-    buffer[2] === 0xfe &&
-    buffer[3] === 0xff
-  ) {
-    return 'utf32be';
-  }
-  return null;
-}
-
-function analyzeTextStats(text) {
-  let hanCount = 0;
-  let asciiCount = 0;
-  let latinSupplementCount = 0;
-  let replacementCount = 0;
-
-  for (const char of text) {
-    const code = char.codePointAt(0);
-    if (code === 0xfffd) {
-      replacementCount += 1;
-      continue;
-    }
-    if (code >= 0x4e00 && code <= 0x9fff) {
-      hanCount += 1;
-    } else if (code >= 0x3400 && code <= 0x4dbf) {
-      hanCount += 1;
-    } else if (code >= 0x20000 && code <= 0x2a6df) {
-      hanCount += 1;
-    } else if (code >= 0x2a700 && code <= 0x2b73f) {
-      hanCount += 1;
-    } else if (code >= 0x2b740 && code <= 0x2b81f) {
-      hanCount += 1;
-    } else if (code >= 0x2b820 && code <= 0x2ceaf) {
-      hanCount += 1;
-    } else if (code >= 0x2ceb0 && code <= 0x2ebef) {
-      hanCount += 1;
-    } else if (code >= 0x2f800 && code <= 0x2fa1f) {
-      hanCount += 1;
-    } else if (code >= 0x20 && code <= 0x7e) {
-      asciiCount += 1;
-    } else if (code >= 0x80 && code <= 0xff) {
-      latinSupplementCount += 1;
-    }
-  }
-
-  return {
-    hanCount,
-    asciiCount,
-    latinSupplementCount,
-    replacementCount,
-    length: text.length,
-  };
-}
-
-function scoreDecodedText(stats, encoding) {
-  if (stats.length === 0) return -Infinity;
-
-  const { hanCount, asciiCount, latinSupplementCount, replacementCount } = stats;
-  let score = 0;
-
-  score += hanCount * 6;
-  score += asciiCount * 2;
-  score -= latinSupplementCount * 3;
-  score -= replacementCount * 20;
-
-  // Slight bonus for UTF encodings to avoid over-penalizing English scripts.
-  if (encoding === 'utf8' || encoding === 'utf-8') {
-    score += 5;
-  }
-
-  return score;
-}
-
-function decodeWithEncoding(buffer, encoding) {
-  try {
-    switch (encoding) {
-      case 'utf8':
-      case 'utf-8':
-        return stripBom(buffer.toString('utf8'));
-      case 'utf16le':
-      case 'utf-16le':
-        return stripBom(buffer.toString('utf16le'));
-      case 'utf16be':
-      case 'utf-16be':
-        return stripBom(iconv.decode(buffer, 'utf16-be'));
-      case 'utf32le':
-      case 'utf-32le':
-        return stripBom(iconv.decode(buffer, 'utf32le'));
-      case 'utf32be':
-      case 'utf-32be':
-        return stripBom(iconv.decode(buffer, 'utf32be'));
-      default:
-        return stripBom(iconv.decode(buffer, encoding));
-    }
-  } catch (error) {
-    return null;
-  }
-}
-
-function decodeScriptBuffer(buffer) {
-  if (!buffer || buffer.length === 0) return '';
-
-  const detected = detectBomEncoding(buffer);
-  const candidateOrder = [
-    ...(detected ? [detected] : []),
-    'utf8',
-    'utf16le',
-    'utf16be',
-    'gb18030',
-    'big5',
-    'latin1',
-  ];
-
-  let bestText = null;
-  let bestScore = -Infinity;
-
-  for (const encoding of candidateOrder) {
-    const decoded = decodeWithEncoding(buffer, encoding);
-    if (typeof decoded !== 'string' || decoded.length === 0) {
-      continue;
-    }
-
-    const stats = analyzeTextStats(decoded);
-    const score = scoreDecodedText(stats, encoding);
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestText = decoded;
-    }
-  }
-
-  if (bestText && bestScore > -Infinity) {
-    return bestText;
-  }
-
-  // Fallback to default UTF-8 decoding as a last resort.
-  return stripBom(buffer.toString('utf8'));
 }
 
 function extractJsonArray(raw) {
@@ -3056,23 +2890,23 @@ app.get('/api/session/:sessionId/viewer', (req, res) => {
 });
 
 app.post(
-  '/api/session/:sessionId/script/upload',
-  upload.single('script'),
+  '/api/session/:sessionId/script/parse',
   async (req, res) => {
     const { sessionId } = req.params;
     const apiKey = req.body.apiKey?.trim();
-    const file = req.file;
+    const rawScriptText =
+      typeof req.body.scriptText === 'string' ? req.body.scriptText : '';
 
     if (!apiKey) {
       return res.status(400).json({ error: '缺少 OpenAI API Key' });
     }
 
-    if (!file) {
-      return res.status(400).json({ error: '未上傳劇本檔案' });
+    if (!rawScriptText.trim()) {
+      return res.status(400).json({ error: '缺少劇本文字內容' });
     }
 
     const session = ensureSession(sessionId);
-    const rawText = normalizePunctuation(decodeScriptBuffer(file.buffer));
+    const rawText = normalizePunctuation(stripBom(rawScriptText));
 
     try {
       const lines = await parseScriptWithOpenAI(rawText, apiKey);
@@ -3128,7 +2962,7 @@ app.post(
       }
 
       res.status(500).json({
-        error: '解析劇本失敗，請確認檔案內容或稍後再試',
+        error: '解析劇本失敗，請確認貼上的內容或稍後再試',
         details: error.message,
         code: error.code || 'UNKNOWN',
       });
