@@ -87,8 +87,9 @@ const TRANSCRIPTION_CORRECTION_ENABLED =
 const TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED =
   process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_ENABLED !== 'false';
 const TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT =
-  process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT ||
-  '請使用繁體中文（台灣用字）輸出轉錄文字；若原本是英文、數字或專有名詞，請保留原文。';
+  typeof process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT === 'string'
+    ? process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT.trim()
+    : '';
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
@@ -998,8 +999,32 @@ function traditionalizeChineseText(text) {
   }
 }
 
-function normalizeTranscriptionOutputText(text, language) {
+function stripTranscriptionPromptLeak(text) {
   const sanitized = sanitizeTranscriptionText(text);
+  if (!sanitized) return '';
+  if (!TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT) return sanitized;
+
+  const promptText = sanitizeTranscriptionText(
+    TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT,
+  );
+  if (!promptText) return sanitized;
+
+  if (sanitized === promptText) {
+    return '';
+  }
+
+  if (!sanitized.startsWith(promptText)) {
+    return sanitized;
+  }
+
+  return sanitized
+    .slice(promptText.length)
+    .replace(/^[，,。.!?！？；;：:\-\s]+/u, '')
+    .trim();
+}
+
+function normalizeTranscriptionOutputText(text, language) {
+  const sanitized = stripTranscriptionPromptLeak(text);
   if (!sanitized) return '';
   if (!shouldPreferTraditionalChinese(language)) {
     return sanitized;
@@ -1482,7 +1507,10 @@ function buildRealtimeTranscriptionSessionUpdate({ model, language }) {
     model,
     ...(language ? { language } : {}),
   };
-  if (shouldPreferTraditionalChinese(language)) {
+  if (
+    shouldPreferTraditionalChinese(language) &&
+    TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT
+  ) {
     transcription.prompt = TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT;
   }
 
