@@ -59,6 +59,7 @@ const LINE_TYPES = {
 const MAX_LINE_LENGTH = 20;
 const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
+const MAX_PENDING_AUDIO_CHUNKS = 400;
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 const VALID_TRANSCRIPTION_MODELS = new Set([
@@ -1044,6 +1045,10 @@ function stopTranscriptionStream(sessionId, options = {}) {
 
   transcriptionStreams.delete(sessionId);
   stream.closing = true;
+  stream.ready = false;
+  if (Array.isArray(stream.pendingAudioChunks)) {
+    stream.pendingAudioChunks.length = 0;
+  }
   try {
     stream.rt.close({
       code: 1000,
@@ -1069,6 +1074,42 @@ function stopTranscriptionStream(sessionId, options = {}) {
 
   broadcastTranscriptionState(sessionId);
   broadcastViewerState(sessionId);
+}
+
+function normalizeCloseReason(reason) {
+  if (!reason) return '';
+
+  if (Buffer.isBuffer(reason)) {
+    return sanitizeLineText(reason.toString('utf8'));
+  }
+
+  if (reason instanceof Uint8Array) {
+    return sanitizeLineText(Buffer.from(reason).toString('utf8'));
+  }
+
+  if (typeof reason === 'string') {
+    return sanitizeLineText(reason);
+  }
+
+  return '';
+}
+
+function sendRealtimeAudioChunk(stream, audio) {
+  stream.rt.send({
+    type: 'input_audio_buffer.append',
+    audio,
+  });
+}
+
+function flushQueuedRealtimeAudio(stream) {
+  if (!stream || !Array.isArray(stream.pendingAudioChunks)) return;
+  if (stream.pendingAudioChunks.length === 0) return;
+
+  const queued = stream.pendingAudioChunks.splice(0);
+  queued.forEach((audio) => {
+    if (typeof audio !== 'string' || !audio) return;
+    sendRealtimeAudioChunk(stream, audio);
+  });
 }
 
 function getViewerPayload(session) {
@@ -1436,6 +1477,8 @@ function startRealtimeTranscription({
     model: selectedModel,
     language: selectedLanguage,
     partialByItemId: new Map(),
+    pendingAudioChunks: [],
+    ready: false,
     closing: false,
   };
   transcriptionStreams.set(sessionId, stream);
@@ -1457,22 +1500,34 @@ function startRealtimeTranscription({
     broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
 
-    rt.send({
-      type: 'transcription_session.update',
-      session: {
-        input_audio_format: 'pcm16',
-        input_audio_transcription: {
-          model: selectedModel,
-          ...(selectedLanguage ? { language: selectedLanguage } : {}),
+    try {
+      rt.send({
+        type: 'transcription_session.update',
+        session: {
+          input_audio_format: 'pcm16',
+          input_audio_transcription: {
+            model: selectedModel,
+            ...(selectedLanguage ? { language: selectedLanguage } : {}),
+          },
+          turn_detection: {
+            type: 'server_vad',
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 450,
+          },
         },
-        turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 450,
-        },
-      },
-    });
+      });
+      stream.ready = true;
+      flushQueuedRealtimeAudio(stream);
+    } catch (error) {
+      const message =
+        sanitizeLineText(error?.message || '') || '初始化語音辨識串流失敗';
+      stopTranscriptionStream(sessionId, {
+        keepText: true,
+        reason: 'transcription init failed',
+        errorMessage: message,
+      });
+    }
   });
 
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
@@ -1543,7 +1598,7 @@ function startRealtimeTranscription({
     });
   });
 
-  rt.socket.on('close', () => {
+  rt.socket.on('close', (code, reason) => {
     if (!isCurrent()) return;
 
     transcriptionStreams.delete(sessionId);
@@ -1551,7 +1606,14 @@ function startRealtimeTranscription({
       return;
     }
 
-    applyTranscriptionError(sessionId, '語音辨識連線已中斷');
+    const closeReason = normalizeCloseReason(reason);
+    const message =
+      closeReason ||
+      (code === 1008
+        ? 'OpenAI 驗證失敗，請確認 API Key 權限'
+        : '語音辨識連線已中斷');
+
+    applyTranscriptionError(sessionId, message);
   });
 
   return stream;
@@ -1636,11 +1698,19 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (!stream.ready) {
+      stream.pendingAudioChunks.push(audio);
+      if (stream.pendingAudioChunks.length > MAX_PENDING_AUDIO_CHUNKS) {
+        stream.pendingAudioChunks.splice(
+          0,
+          stream.pendingAudioChunks.length - MAX_PENDING_AUDIO_CHUNKS,
+        );
+      }
+      return;
+    }
+
     try {
-      stream.rt.send({
-        type: 'input_audio_buffer.append',
-        audio,
-      });
+      sendRealtimeAudioChunk(stream, audio);
     } catch (error) {
       const message =
         sanitizeLineText(error?.message || '') ||
