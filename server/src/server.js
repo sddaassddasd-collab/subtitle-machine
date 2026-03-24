@@ -111,6 +111,58 @@ const TRANSCRIPTION_SEMANTIC_FALLBACK_COMMIT_MS = Number.isFinite(
 )
   ? Math.max(0, parsedSemanticFallbackCommitMs)
   : 2200;
+const parsedSilenceLevelThreshold = Number(
+  process.env.TRANSCRIPTION_SILENCE_LEVEL_THRESHOLD,
+);
+const TRANSCRIPTION_SILENCE_LEVEL_THRESHOLD = Number.isFinite(
+  parsedSilenceLevelThreshold,
+)
+  ? Math.min(Math.max(parsedSilenceLevelThreshold, 0), 1)
+  : 0.012;
+const parsedBoundaryMinChars = Number(
+  process.env.TRANSCRIPTION_BOUNDARY_MIN_CHARS,
+);
+const TRANSCRIPTION_BOUNDARY_MIN_CHARS = Number.isFinite(parsedBoundaryMinChars)
+  ? Math.max(1, Math.floor(parsedBoundaryMinChars))
+  : 10;
+const parsedBoundarySoftMaxChars = Number(
+  process.env.TRANSCRIPTION_BOUNDARY_SOFT_MAX_CHARS,
+);
+const TRANSCRIPTION_BOUNDARY_SOFT_MAX_CHARS = Number.isFinite(
+  parsedBoundarySoftMaxChars,
+)
+  ? Math.max(TRANSCRIPTION_BOUNDARY_MIN_CHARS, Math.floor(parsedBoundarySoftMaxChars))
+  : 26;
+const parsedBoundaryHardMaxChars = Number(
+  process.env.TRANSCRIPTION_BOUNDARY_HARD_MAX_CHARS,
+);
+const TRANSCRIPTION_BOUNDARY_HARD_MAX_CHARS = Number.isFinite(
+  parsedBoundaryHardMaxChars,
+)
+  ? Math.max(
+      TRANSCRIPTION_BOUNDARY_SOFT_MAX_CHARS,
+      Math.floor(parsedBoundaryHardMaxChars),
+    )
+  : 38;
+const parsedBoundaryWeakPauseMs = Number(
+  process.env.TRANSCRIPTION_BOUNDARY_WEAK_PAUSE_MS,
+);
+const TRANSCRIPTION_BOUNDARY_WEAK_PAUSE_MS = Number.isFinite(
+  parsedBoundaryWeakPauseMs,
+)
+  ? Math.max(0, parsedBoundaryWeakPauseMs)
+  : 120;
+const parsedBoundaryStrongPauseMs = Number(
+  process.env.TRANSCRIPTION_BOUNDARY_STRONG_PAUSE_MS,
+);
+const TRANSCRIPTION_BOUNDARY_STRONG_PAUSE_MS = Number.isFinite(
+  parsedBoundaryStrongPauseMs,
+)
+  ? Math.max(
+      TRANSCRIPTION_BOUNDARY_WEAK_PAUSE_MS,
+      parsedBoundaryStrongPauseMs,
+    )
+  : 320;
 const DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED =
   process.env.TRANSCRIPTION_DUAL_CHANNEL_ENABLED === 'true';
 const TRANSCRIPTION_ACCURATE_MODEL =
@@ -150,6 +202,12 @@ const TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT =
     ? process.env.TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT.trim()
     : '';
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
+const strongSentencePunctuationRegex = /[。！？!?]$/u;
+const weakSentencePunctuationRegex = /[，,、；;：:]$/u;
+const avoidBoundarySuffixRegex =
+  /(的|了|著|过|過|在|跟|和|與|及|而且|但是|如果|因為|所以|就是|然後|還有|對|把|被|給|讓|嗎|呢|吧)$/u;
+const avoidBoundaryPrefixRegex =
+  /^(的|了|著|过|過|在|跟|和|與|及|而且|但是|如果|因為|所以|就是|然後|還有|對|把|被|給|讓|嗎|呢|吧)/u;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
 const DEFAULT_REALTIME_SESSION_TYPE = 'realtime';
@@ -1104,16 +1162,80 @@ function sanitizeTranscriptionMultilineText(text) {
   return lines.join('\n').trim();
 }
 
-function trimTranscriptionHistory(stream) {
-  if (!stream || !Array.isArray(stream.finalizedLines)) return;
-  if (stream.finalizedLines.length <= MAX_TRANSCRIPTION_DISPLAY_LINES) return;
+function getTranscriptionTextLength(text) {
+  return Array.from(sanitizeTranscriptionText(text)).filter((char) => !/\s/u.test(char))
+    .length;
+}
 
-  const removeCount =
-    stream.finalizedLines.length - MAX_TRANSCRIPTION_DISPLAY_LINES;
-  const removed = stream.finalizedLines.splice(0, removeCount);
-  removed.forEach((line) => {
-    if (!line?.itemId) return;
-    stream.finalizedLineByItemId.delete(line.itemId);
+function joinTranscriptionTexts(leftText, rightText) {
+  const left = sanitizeTranscriptionText(leftText);
+  const right = sanitizeTranscriptionText(rightText);
+  if (!left) return right;
+  if (!right) return left;
+
+  const lastChar = left.slice(-1);
+  const firstChar = right.charAt(0);
+  if (!lastChar || !firstChar) {
+    return sanitizeTranscriptionText(`${left}${right}`);
+  }
+
+  const needsSpace =
+    /[\p{L}\p{N}]/u.test(lastChar) &&
+    /[\p{L}\p{N}]/u.test(firstChar) &&
+    !/[\p{Script=Han}]/u.test(lastChar) &&
+    !/[\p{Script=Han}]/u.test(firstChar);
+
+  return sanitizeTranscriptionText(needsSpace ? `${left} ${right}` : `${left}${right}`);
+}
+
+function composeFragmentTexts(fragments) {
+  if (!Array.isArray(fragments) || fragments.length === 0) return '';
+  return fragments.reduce(
+    (combined, fragment) =>
+      joinTranscriptionTexts(combined, fragment?.text || ''),
+    '',
+  );
+}
+
+function mergeAccurateSegments(segments) {
+  if (!Array.isArray(segments) || segments.length === 0) return null;
+
+  const validSegments = segments.filter(
+    (segment) =>
+      segment &&
+      Buffer.isBuffer(segment.pcm) &&
+      segment.pcm.length > 0,
+  );
+  if (validSegments.length === 0) return null;
+
+  const totalBytes = validSegments.reduce(
+    (sum, segment) => sum + segment.pcm.length,
+    0,
+  );
+  const totalDurationMs = validSegments.reduce((sum, segment) => {
+    const durationMs =
+      Number.isFinite(segment.durationMs) && segment.durationMs > 0
+        ? segment.durationMs
+        : getPcmDurationMs(segment.pcm.length);
+    return sum + durationMs;
+  }, 0);
+
+  return {
+    id: validSegments.map((segment) => segment.id).join('+'),
+    pcm: Buffer.concat(
+      validSegments.map((segment) => segment.pcm),
+      totalBytes,
+    ),
+    durationMs: totalDurationMs,
+    createdAt: Date.now(),
+  };
+}
+
+function clearMergedLineOverridesForItem(stream, itemId) {
+  if (!stream?.mergedLineOverrides || !itemId) return;
+  Array.from(stream.mergedLineOverrides.keys()).forEach((key) => {
+    if (!key.split('|').includes(itemId)) return;
+    stream.mergedLineOverrides.delete(key);
   });
 }
 
@@ -1152,27 +1274,182 @@ function takeDraftLine(stream, itemId) {
   return sanitizeTranscriptionText(draft);
 }
 
-function appendFinalizedLine(stream, itemId, text) {
+function upsertCompletedFragment(
+  stream,
+  { itemId, text, accurateSegment = null, boundaryMeta = null } = {},
+) {
   if (!stream || !itemId) return null;
   const sanitized = sanitizeTranscriptionText(text);
   if (!sanitized) return null;
 
-  const existing = stream.finalizedLineByItemId.get(itemId);
+  const existing = stream.fragmentByItemId.get(itemId);
   if (existing) {
     existing.text = sanitized;
     existing.corrected = false;
+    existing.accurateSegment =
+      accurateSegment || existing.accurateSegment || null;
+    existing.boundaryMeta = boundaryMeta || existing.boundaryMeta || null;
+    clearMergedLineOverridesForItem(stream, itemId);
     return existing;
   }
 
-  const line = {
+  const fragment = {
     itemId,
     text: sanitized,
     corrected: false,
+    accurateSegment: accurateSegment || null,
+    boundaryMeta: boundaryMeta || null,
+    completedAt: Date.now(),
   };
-  stream.finalizedLines.push(line);
-  stream.finalizedLineByItemId.set(itemId, line);
-  trimTranscriptionHistory(stream);
-  return line;
+  stream.completedFragments.push(fragment);
+  stream.fragmentByItemId.set(itemId, fragment);
+  clearMergedLineOverridesForItem(stream, itemId);
+  return fragment;
+}
+
+function shouldBreakBetweenFragments({
+  currentText,
+  previousFragment,
+  nextFragment,
+}) {
+  const left = sanitizeTranscriptionText(currentText);
+  const right = sanitizeTranscriptionText(nextFragment?.text || '');
+  if (!left) return false;
+  if (!right) return true;
+
+  const mergedText = joinTranscriptionTexts(left, right);
+  const leftLength = getTranscriptionTextLength(left);
+  const mergedLength = getTranscriptionTextLength(mergedText);
+  if (mergedLength >= TRANSCRIPTION_BOUNDARY_HARD_MAX_CHARS) {
+    return true;
+  }
+
+  const boundaryMeta = previousFragment?.boundaryMeta || {};
+  let score = 0;
+
+  if (boundaryMeta.reason === 'semantic') score += 2;
+  if (boundaryMeta.pauseMs >= TRANSCRIPTION_BOUNDARY_STRONG_PAUSE_MS) {
+    score += 2;
+  } else if (boundaryMeta.pauseMs >= TRANSCRIPTION_BOUNDARY_WEAK_PAUSE_MS) {
+    score += 1;
+  }
+
+  if (strongSentencePunctuationRegex.test(left)) {
+    score += 2;
+  } else if (weakSentencePunctuationRegex.test(left)) {
+    score += 0.5;
+  }
+
+  if (avoidBoundarySuffixRegex.test(left)) {
+    score -= 2;
+  }
+  if (avoidBoundaryPrefixRegex.test(right)) {
+    score -= 2;
+  }
+
+  if (boundaryMeta.forced) {
+    score -= 1.5;
+  }
+  if (leftLength < TRANSCRIPTION_BOUNDARY_MIN_CHARS) {
+    score -= 1.5;
+  }
+  if (mergedLength >= TRANSCRIPTION_BOUNDARY_SOFT_MAX_CHARS) {
+    score += 1.5;
+  }
+
+  return score >= 2.5;
+}
+
+function buildDisplayLineFromFragments(stream, fragments) {
+  const itemIds = fragments.map((fragment) => fragment.itemId);
+  const key = itemIds.join('|');
+  const baseText = composeFragmentTexts(fragments);
+  const overrideText = sanitizeTranscriptionText(
+    stream?.mergedLineOverrides?.get(key) || '',
+  );
+  const text =
+    overrideText && shouldApplyAccurateReplacement(baseText, overrideText)
+      ? overrideText
+      : baseText;
+
+  return {
+    key,
+    itemIds,
+    itemId: itemIds[0] || null,
+    text,
+    corrected:
+      fragments.some((fragment) => fragment.corrected === true) ||
+      Boolean(overrideText),
+    fragments,
+    accurateSegment: mergeAccurateSegments(
+      fragments.map((fragment) => fragment.accurateSegment),
+    ),
+  };
+}
+
+function refreshGroupedTranscriptionLines(stream) {
+  if (!stream) {
+    return [];
+  }
+
+  const builtLines = [];
+  let currentGroup = [];
+
+  stream.completedFragments.forEach((fragment) => {
+    if (!fragment?.itemId || !fragment.text) return;
+    if (currentGroup.length === 0) {
+      currentGroup = [fragment];
+      return;
+    }
+
+    const previousFragment = currentGroup[currentGroup.length - 1];
+    const currentText = composeFragmentTexts(currentGroup);
+    if (
+      shouldBreakBetweenFragments({
+        currentText,
+        previousFragment,
+        nextFragment: fragment,
+      })
+    ) {
+      builtLines.push(buildDisplayLineFromFragments(stream, currentGroup));
+      currentGroup = [fragment];
+      return;
+    }
+
+    currentGroup.push(fragment);
+  });
+
+  if (currentGroup.length > 0) {
+    builtLines.push(buildDisplayLineFromFragments(stream, currentGroup));
+  }
+
+  const keptLines = builtLines.slice(-MAX_TRANSCRIPTION_DISPLAY_LINES);
+  const keptItemIds = new Set(
+    keptLines.flatMap((line) => line.itemIds),
+  );
+  if (stream.completedFragments.length > keptItemIds.size) {
+    stream.completedFragments = stream.completedFragments.filter((fragment) =>
+      keptItemIds.has(fragment.itemId),
+    );
+    stream.fragmentByItemId = new Map(
+      stream.completedFragments.map((fragment) => [fragment.itemId, fragment]),
+    );
+  }
+
+  stream.finalizedLines = keptLines;
+  stream.finalizedLineByItemId = new Map();
+  keptLines.forEach((line) => {
+    line.itemIds.forEach((itemId) => {
+      stream.finalizedLineByItemId.set(itemId, line);
+    });
+  });
+
+  Array.from(stream.mergedLineOverrides.keys()).forEach((key) => {
+    if (stream.finalizedLines.some((line) => line.key === key)) return;
+    stream.mergedLineOverrides.delete(key);
+  });
+
+  return keptLines;
 }
 
 function getTranscriptionDisplayParts(stream) {
@@ -1180,7 +1457,7 @@ function getTranscriptionDisplayParts(stream) {
     return { historyLines: [], draftText: '' };
   }
 
-  const historyLines = stream.finalizedLines
+  const historyLines = refreshGroupedTranscriptionLines(stream)
     .map((line) => sanitizeTranscriptionText(line?.text || ''))
     .filter(Boolean);
 
@@ -1191,7 +1468,28 @@ function getTranscriptionDisplayParts(stream) {
     ? sanitizeTranscriptionText(stream.draftByItemId.get(selectedDraftId) || '')
     : '';
 
-  return { historyLines, draftText };
+  if (!draftText || historyLines.length === 0) {
+    return { historyLines, draftText };
+  }
+
+  const lastFragment =
+    Array.isArray(stream.completedFragments) && stream.completedFragments.length > 0
+      ? stream.completedFragments[stream.completedFragments.length - 1]
+      : null;
+  const currentLineText = historyLines[historyLines.length - 1] || '';
+  const shouldStartNewLine = shouldBreakBetweenFragments({
+    currentText: currentLineText,
+    previousFragment: lastFragment,
+    nextFragment: { text: draftText },
+  });
+
+  if (shouldStartNewLine) {
+    return { historyLines, draftText };
+  }
+
+  const mergedHistory = historyLines.slice(0, -1);
+  mergedHistory.push(joinTranscriptionTexts(currentLineText, draftText));
+  return { historyLines: mergedHistory, draftText: '' };
 }
 
 function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
@@ -1351,10 +1649,10 @@ function queueTranscriptionCorrection({
   stream.correctionChain = stream.correctionChain
     .then(async () => {
       if (!isCurrent() || stream.closing) return;
-      const line = stream.finalizedLineByItemId.get(itemId);
-      if (!line || !line.text) return;
+      const fragment = stream.fragmentByItemId.get(itemId);
+      if (!fragment || !fragment.text) return;
 
-      let nextText = line.text;
+      let nextText = fragment.text;
       let changed = false;
 
       if (dualChannelEnabled) {
@@ -1394,15 +1692,110 @@ function queueTranscriptionCorrection({
         }
       }
 
-      if (!changed || nextText === line.text) {
+      if (!changed || nextText === fragment.text) {
         return;
       }
 
-      line.text = nextText;
-      line.corrected = true;
+      fragment.text = nextText;
+      fragment.corrected = true;
+      clearMergedLineOverridesForItem(stream, itemId);
       syncTranscriptionStateFromStream(sessionId, stream);
     })
     .catch(() => {});
+}
+
+function queueMergedLineCorrection({
+  stream,
+  isCurrent,
+  client,
+  sessionId,
+  line,
+  language,
+}) {
+  if (!stream || !line?.key || !Array.isArray(line.itemIds) || line.itemIds.length < 2) {
+    return;
+  }
+
+  const key = line.key;
+  if (stream.mergedLineCorrectionKeys.has(key)) return;
+
+  const fragments = line.itemIds
+    .map((itemId) => stream.fragmentByItemId.get(itemId) || null)
+    .filter(Boolean);
+  if (fragments.length < 2) return;
+
+  const baseText = composeFragmentTexts(fragments);
+  if (!baseText) return;
+
+  const mergedSegment = mergeAccurateSegments(
+    fragments.map((fragment) => fragment.accurateSegment),
+  );
+  const dualChannelEnabled = stream.dualChannelEnabled === true;
+  const shouldUseMergedAudio =
+    dualChannelEnabled &&
+    fragments.some((fragment) => fragment.boundaryMeta?.forced === true) &&
+    isAccurateSegmentEligible(mergedSegment);
+
+  if (!shouldUseMergedAudio && !TRANSCRIPTION_CORRECTION_ENABLED) {
+    return;
+  }
+
+  stream.mergedLineCorrectionKeys.add(key);
+  stream.correctionChain = stream.correctionChain
+    .then(async () => {
+      if (!isCurrent() || stream.closing) return;
+
+      let nextText = baseText;
+      let changed = false;
+
+      if (shouldUseMergedAudio) {
+        try {
+          const refined = await transcribeAccurateSegmentLine({
+            client,
+            segment: mergedSegment,
+            language,
+            dualChannelEnabled,
+          });
+          if (!isCurrent() || stream.closing) return;
+          if (shouldApplyAccurateReplacement(nextText, refined)) {
+            nextText = refined;
+            changed = true;
+          }
+        } catch (error) {
+          stream.lastTransportError =
+            sanitizeLineText(error?.message || '') || stream.lastTransportError;
+        }
+      }
+
+      if (TRANSCRIPTION_CORRECTION_ENABLED) {
+        try {
+          const corrected = await correctTranscriptionLine({
+            client,
+            text: nextText,
+            language,
+          });
+          if (!isCurrent() || stream.closing) return;
+          if (corrected && corrected !== nextText) {
+            nextText = corrected;
+            changed = true;
+          }
+        } catch (error) {
+          stream.lastTransportError =
+            sanitizeLineText(error?.message || '') || stream.lastTransportError;
+        }
+      }
+
+      if (!changed || nextText === baseText) {
+        return;
+      }
+
+      stream.mergedLineOverrides.set(key, nextText);
+      syncTranscriptionStateFromStream(sessionId, stream);
+    })
+    .catch(() => {})
+    .finally(() => {
+      stream.mergedLineCorrectionKeys.delete(key);
+    });
 }
 
 function normalizeLanguageCode(rawLanguage) {
@@ -1596,6 +1989,39 @@ function normalizeChunkDurationMs(rawDurationMs) {
   return Math.min(numeric, 2000);
 }
 
+function normalizeAudioLevel(rawLevel) {
+  const numeric = Number(rawLevel);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return Math.min(Math.max(numeric, 0), 1);
+}
+
+function trackRealtimeInputLevel(stream, level = 0, durationMs = 0) {
+  if (!stream) return;
+  const normalizedDurationMs = normalizeChunkDurationMs(durationMs);
+  const normalizedLevel = normalizeAudioLevel(level);
+  stream.lastInputLevel = normalizedLevel;
+  if (normalizedDurationMs <= 0) return;
+
+  if (normalizedLevel <= TRANSCRIPTION_SILENCE_LEVEL_THRESHOLD) {
+    stream.trailingSilenceMs += normalizedDurationMs;
+    return;
+  }
+
+  stream.trailingSilenceMs = 0;
+}
+
+function createBoundaryMeta(stream, reason = 'semantic') {
+  return {
+    reason,
+    pauseMs:
+      Number.isFinite(stream?.trailingSilenceMs) && stream.trailingSilenceMs > 0
+        ? stream.trailingSilenceMs
+        : 0,
+    forced: reason !== 'semantic',
+    committedAt: Date.now(),
+  };
+}
+
 function getPcmDurationMs(byteLength) {
   if (!Number.isFinite(byteLength) || byteLength <= 0) return 0;
   return (
@@ -1657,6 +2083,7 @@ function resetRealtimeCommitState(stream) {
   if (!stream) return;
   stream.commitInFlight = false;
   stream.lastCommitAt = 0;
+  stream.pendingCommitBoundaryMeta = null;
 }
 
 function resetAccurateSegmentCapture(stream) {
@@ -1673,6 +2100,9 @@ function resetAccurateTranscriptionState(stream) {
   stream.unboundCommittedSegments = [];
   stream.segmentByItemId = new Map();
   stream.nextSegmentId = 1;
+  stream.boundaryMetaByItemId = new Map();
+  stream.trailingSilenceMs = 0;
+  stream.lastInputLevel = 0;
 }
 
 function captureAccurateSegmentChunk(stream, audio, durationMs = 0) {
@@ -1838,6 +2268,10 @@ function commitRealtimeAudioBuffer(
 
   stream.commitInFlight = true;
   stream.lastCommitAt = now;
+  stream.pendingCommitBoundaryMeta = createBoundaryMeta(
+    stream,
+    stream.semanticSegmentationEnabled ? 'fallback' : 'manual',
+  );
   stream.rt.send({
     type: 'input_audio_buffer.commit',
   });
@@ -1873,12 +2307,13 @@ function ensureRealtimeForceCommitTimer(stream) {
   }, 100);
 }
 
-function sendRealtimeAudioChunk(stream, audio, durationMs = 0) {
+function sendRealtimeAudioChunk(stream, audio, durationMs = 0, level = 0) {
   stream.rt.send({
     type: 'input_audio_buffer.append',
     audio,
   });
   markRealtimePendingAudio(stream, durationMs);
+  trackRealtimeInputLevel(stream, level, durationMs);
   captureAccurateSegmentChunk(stream, audio, durationMs);
 }
 
@@ -1937,7 +2372,7 @@ function flushQueuedRealtimeAudio(stream) {
     }
 
     if (!chunk || typeof chunk.audio !== 'string' || !chunk.audio) return;
-    sendRealtimeAudioChunk(stream, chunk.audio, chunk.durationMs);
+    sendRealtimeAudioChunk(stream, chunk.audio, chunk.durationMs, chunk.level);
   });
 }
 
@@ -2317,18 +2752,26 @@ function startRealtimeTranscription({
     dualChannelEnabled: selectedDualChannelEnabled,
     draftByItemId: new Map(),
     activeDraftItemId: null,
+    completedFragments: [],
+    fragmentByItemId: new Map(),
     finalizedLines: [],
     finalizedLineByItemId: new Map(),
+    mergedLineOverrides: new Map(),
+    mergedLineCorrectionKeys: new Set(),
     correctionChain: Promise.resolve(),
     pendingAudioChunks: [],
     unboundCommittedSegments: [],
     segmentByItemId: new Map(),
+    boundaryMetaByItemId: new Map(),
+    pendingCommitBoundaryMeta: null,
     commitSegmentInFlight: null,
     currentSegmentChunks: [],
     currentSegmentBytes: 0,
     currentSegmentMs: 0,
     nextSegmentId: 1,
     lastTransportError: '',
+    lastInputLevel: 0,
+    trailingSilenceMs: 0,
     ready: false,
     initTimeout: null,
     forceCommitTimer: null,
@@ -2426,9 +2869,16 @@ function startRealtimeTranscription({
     resetRealtimePendingAudio(stream);
     settleCommittedAccurateSegment(stream, event?.item_id);
 
+    const boundaryMeta =
+      stream.pendingCommitBoundaryMeta || createBoundaryMeta(stream, 'semantic');
+    stream.pendingCommitBoundaryMeta = null;
+    if (event?.item_id) {
+      stream.boundaryMetaByItemId.set(event.item_id, boundaryMeta);
+    }
+
     if (
       event?.item_id &&
-      stream.finalizedLineByItemId.has(event.item_id)
+      stream.fragmentByItemId.has(event.item_id)
     ) {
       const lateAccurateSegment = takeAccurateSegmentForItem(
         stream,
@@ -2452,6 +2902,7 @@ function startRealtimeTranscription({
     if (!isCurrent()) return;
     stream.commitInFlight = false;
     resetRealtimePendingAudio(stream);
+    stream.pendingCommitBoundaryMeta = null;
     stream.commitSegmentInFlight = null;
     resetAccurateSegmentCapture(stream);
   });
@@ -2478,8 +2929,15 @@ function startRealtimeTranscription({
       event.transcript || fallback,
       selectedLanguage,
     );
-    appendFinalizedLine(stream, event.item_id, transcript);
     const accurateSegment = takeAccurateSegmentForItem(stream, event.item_id);
+    const boundaryMeta = stream.boundaryMetaByItemId.get(event.item_id) || null;
+    stream.boundaryMetaByItemId.delete(event.item_id);
+    upsertCompletedFragment(stream, {
+      itemId: event.item_id,
+      text: transcript,
+      accurateSegment,
+      boundaryMeta,
+    });
     syncTranscriptionStateFromStream(sessionId, stream);
     queueTranscriptionCorrection({
       stream,
@@ -2490,6 +2948,18 @@ function startRealtimeTranscription({
       language: selectedLanguage,
       accurateSegment,
     });
+
+    const mergedLine = stream.finalizedLineByItemId.get(event.item_id) || null;
+    if (mergedLine?.itemIds?.length > 1) {
+      queueMergedLineCorrection({
+        stream,
+        isCurrent,
+        client,
+        sessionId,
+        line: mergedLine,
+        language: selectedLanguage,
+      });
+    }
   });
 
   rt.on('conversation.item.input_audio_transcription.failed', (event) => {
@@ -2498,6 +2968,7 @@ function startRealtimeTranscription({
     const message =
       sanitizeLineText(event?.error?.message || '') || '語音片段辨識失敗';
     takeDraftLine(stream, event?.item_id);
+    stream.boundaryMetaByItemId.delete(event?.item_id);
     dropAccurateSegmentForItem(stream, event?.item_id);
     syncTranscriptionStateFromStream(sessionId, stream, {
       error: message,
@@ -2515,6 +2986,7 @@ function startRealtimeTranscription({
     if (isIgnorableRealtimeCommitError(message)) {
       stream.commitInFlight = false;
       stream.lastCommitAt = Date.now();
+      stream.pendingCommitBoundaryMeta = null;
       stream.commitSegmentInFlight = null;
       return;
     }
@@ -2644,10 +3116,11 @@ io.on('connection', (socket) => {
     },
   );
 
-  socket.on('transcription:audio', ({ sessionId, audio, durationMs }) => {
+  socket.on('transcription:audio', ({ sessionId, audio, durationMs, level }) => {
     if (!sessionId) return;
     if (typeof audio !== 'string' || !audio) return;
     const normalizedDurationMs = normalizeChunkDurationMs(durationMs);
+    const normalizedLevel = normalizeAudioLevel(level);
 
     const stream = transcriptionStreams.get(sessionId);
     if (!stream || stream.socketId !== socket.id || stream.closing) {
@@ -2658,6 +3131,7 @@ io.on('connection', (socket) => {
       stream.pendingAudioChunks.push({
         audio,
         durationMs: normalizedDurationMs,
+        level: normalizedLevel,
       });
       if (stream.pendingAudioChunks.length > MAX_PENDING_AUDIO_CHUNKS) {
         stream.pendingAudioChunks.splice(
@@ -2669,7 +3143,7 @@ io.on('connection', (socket) => {
     }
 
     try {
-      sendRealtimeAudioChunk(stream, audio, normalizedDurationMs);
+      sendRealtimeAudioChunk(stream, audio, normalizedDurationMs, normalizedLevel);
     } catch (error) {
       const message =
         sanitizeLineText(error?.message || '') ||

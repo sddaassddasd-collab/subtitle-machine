@@ -148,6 +148,20 @@ const downsampleFloat32 = (input, inputSampleRate, outputSampleRate) => {
   return output
 }
 
+const computeSignalLevel = (input) => {
+  if (!input?.length) {
+    return 0
+  }
+
+  let sumSquares = 0
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = input[index]
+    sumSquares += sample * sample
+  }
+
+  return Math.min(1, Math.sqrt(sumSquares / input.length))
+}
+
 const float32ToInt16 = (input) => {
   const output = new Int16Array(input.length)
   for (let index = 0; index < input.length; index += 1) {
@@ -776,11 +790,13 @@ const ControlPage = () => {
         const audio = int16ToBase64(pcm16)
         if (!audio) return
         const durationMs = (pcm16.length / TARGET_SAMPLE_RATE) * 1000
+        const level = computeSignalLevel(downsampled)
 
         socket.emit('transcription:audio', {
           sessionId,
           audio,
           durationMs,
+          level,
         })
       }
 
