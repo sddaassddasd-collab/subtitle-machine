@@ -204,6 +204,64 @@ const logTranscriptionDebug = (stage, payload = {}, level = 'info') => {
   logger(`[transcription][${timestamp}] ${stage}`, payload)
 }
 
+const isLineMarkedMusic = (line) =>
+  Boolean(line && typeof line === 'object' && line.music === true)
+
+const applyLineMusicState = (sourceLines, index, music) =>
+  sourceLines.map((line, lineIndex) => {
+    if (lineIndex !== index) return line
+    if (line && typeof line === 'object') {
+      return { ...line, music }
+    }
+    return {
+      text: typeof line === 'string' ? line : '',
+      type: 'dialogue',
+      music,
+    }
+  })
+
+const applyMusicRangeState = (sourceLines, startIndex, endIndex, music) => {
+  const rangeStart = Math.min(startIndex, endIndex)
+  const rangeEnd = Math.max(startIndex, endIndex)
+  return sourceLines.map((line, index) => {
+    if (index < rangeStart || index > rangeEnd) return line
+    if (line && typeof line === 'object') {
+      return { ...line, music }
+    }
+    return {
+      text: typeof line === 'string' ? line : '',
+      type: 'dialogue',
+      music,
+    }
+  })
+}
+
+const getMusicRangeAroundIndex = (sourceLines, index) => {
+  if (!Array.isArray(sourceLines) || index < 0 || index >= sourceLines.length) {
+    return null
+  }
+  if (!isLineMarkedMusic(sourceLines[index])) return null
+
+  let startIndex = index
+  let endIndex = index
+
+  while (
+    startIndex > 0 &&
+    isLineMarkedMusic(sourceLines[startIndex - 1])
+  ) {
+    startIndex -= 1
+  }
+
+  while (
+    endIndex < sourceLines.length - 1 &&
+    isLineMarkedMusic(sourceLines[endIndex + 1])
+  ) {
+    endIndex += 1
+  }
+
+  return { startIndex, endIndex }
+}
+
 const ControlPage = () => {
   const location = useLocation()
   const navigate = useNavigate()
@@ -232,6 +290,8 @@ const ControlPage = () => {
   const [uploading, setUploading] = useState(false)
   const [selectedFile, setSelectedFile] = useState(null)
   const [editingIndex, setEditingIndex] = useState(null)
+  const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
+    useState(null)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
   const [accessInput, setAccessInput] = useState('')
@@ -338,6 +398,16 @@ const ControlPage = () => {
       setEditingIndex(null)
     }
   }, [lines, editingIndex])
+
+  useEffect(() => {
+    if (
+      pendingMusicRangeStartIndex != null &&
+      (pendingMusicRangeStartIndex < 0 ||
+        pendingMusicRangeStartIndex >= lines.length)
+    ) {
+      setPendingMusicRangeStartIndex(null)
+    }
+  }, [lines, pendingMusicRangeStartIndex])
 
   useEffect(() => {
     const node = lineRefs.current[currentIndex]
@@ -984,7 +1054,11 @@ const ControlPage = () => {
       if (typeof previous === 'object' && previous) {
         next[index] = { ...previous, text: newText }
       } else {
-        next[index] = { text: newText }
+        next[index] = {
+          text: newText,
+          type: 'dialogue',
+          music: false,
+        }
       }
       return next
     })
@@ -1018,6 +1092,70 @@ const ControlPage = () => {
     setStatus({
       kind: 'success',
       message: nextType === 'direction' ? '已標記為舞台指示' : '已標記為台詞',
+    })
+  }
+
+  const handleToggleLineMusic = (event, index) => {
+    event.stopPropagation()
+    if (!socketRef.current || !sessionId) return
+    const checked = event.target.checked
+
+    if (!checked) {
+      const range = getMusicRangeAroundIndex(lines, index)
+      const targetRange =
+        range || { startIndex: index, endIndex: index }
+      setLines((prev) =>
+        applyMusicRangeState(
+          prev,
+          targetRange.startIndex,
+          targetRange.endIndex,
+          false,
+        ),
+      )
+      setPendingMusicRangeStartIndex(null)
+      socketRef.current.emit('setLineMusicRange', {
+        sessionId,
+        startIndex: targetRange.startIndex,
+        endIndex: targetRange.endIndex,
+        music: false,
+      })
+      setStatus({ kind: 'info', message: '已清除音樂範圍標記' })
+      return
+    }
+
+    if (
+      pendingMusicRangeStartIndex != null &&
+      pendingMusicRangeStartIndex !== index
+    ) {
+      const rangeStart = Math.min(pendingMusicRangeStartIndex, index)
+      const rangeEnd = Math.max(pendingMusicRangeStartIndex, index)
+      setLines((prev) =>
+        applyMusicRangeState(prev, rangeStart, rangeEnd, true),
+      )
+      setPendingMusicRangeStartIndex(null)
+      socketRef.current.emit('setLineMusicRange', {
+        sessionId,
+        startIndex: rangeStart,
+        endIndex: rangeEnd,
+        music: true,
+      })
+      setStatus({
+        kind: 'success',
+        message: `已設定音樂範圍：第 ${rangeStart + 1} 行到第 ${rangeEnd + 1} 行`,
+      })
+      return
+    }
+
+    setLines((prev) => applyLineMusicState(prev, index, true))
+    setPendingMusicRangeStartIndex(index)
+    socketRef.current.emit('setLineMusic', {
+      sessionId,
+      index,
+      music: true,
+    })
+    setStatus({
+      kind: 'info',
+      message: `已選擇第 ${index + 1} 行為音樂起點，請再勾選結束行`,
     })
   }
 
@@ -1101,6 +1239,7 @@ const ControlPage = () => {
       typeof currentLine === 'object' && currentLine?.type === 'direction'
         ? 'direction'
         : 'dialogue'
+    const currentMusic = isLineMarkedMusic(currentLine)
 
     if (normalizedFull) {
       setLines((prev) => {
@@ -1120,7 +1259,11 @@ const ControlPage = () => {
         if (typeof existing === 'object' && existing) {
           next[index] = { ...existing, text: normalizedFull }
         } else {
-          next[index] = { text: normalizedFull, type: currentType }
+          next[index] = {
+            text: normalizedFull,
+            type: currentType,
+            music: currentMusic,
+          }
         }
         return next
       })
@@ -1145,15 +1288,23 @@ const ControlPage = () => {
         if (typeof existing === 'object' && existing) {
           next[index] = { ...existing, text: beforeText }
         } else {
-          next[index] = { text: beforeText, type: currentType }
+          next[index] = {
+            text: beforeText,
+            type: currentType,
+            music: currentMusic,
+          }
         }
         next.splice(index + 1, 0, {
           text: '',
           type: currentType,
+          music: currentMusic,
         })
         return next
       })
       setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
+      setPendingMusicRangeStartIndex((prev) =>
+        prev != null && prev > index ? prev + 1 : prev,
+      )
       setEditingIndex(index + 1)
       setAutoCenterEnabled(true)
       socketRef.current.emit('insertLineAfter', {
@@ -1177,16 +1328,24 @@ const ControlPage = () => {
       if (typeof existing === 'object' && existing) {
         next[index] = { ...existing, text: beforeText }
       } else {
-        next[index] = { text: beforeText, type: currentType }
+        next[index] = {
+          text: beforeText,
+          type: currentType,
+          music: currentMusic,
+        }
       }
       next.splice(index + 1, 0, {
         text: afterText,
         type: currentType,
+        music: currentMusic,
       })
       return next
     })
 
     setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
+    setPendingMusicRangeStartIndex((prev) =>
+      prev != null && prev > index ? prev + 1 : prev,
+    )
     setEditingIndex(index + 1)
     setAutoCenterEnabled(true)
     socketRef.current.emit('splitLine', {
@@ -1212,6 +1371,12 @@ const ControlPage = () => {
       return prev
     })
     setEditingIndex((prev) => {
+      if (prev == null) return prev
+      if (prev === index) return null
+      if (prev > index) return prev - 1
+      return prev
+    })
+    setPendingMusicRangeStartIndex((prev) => {
       if (prev == null) return prev
       if (prev === index) return null
       if (prev > index) return prev - 1
@@ -1259,6 +1424,7 @@ const ControlPage = () => {
 
       const data = await response.json()
       setLines(Array.isArray(data.lines) ? data.lines : [])
+      setPendingMusicRangeStartIndex(null)
       setCurrentIndex(
         Number.isInteger(data.currentIndex) ? data.currentIndex : 0,
       )
@@ -1364,6 +1530,7 @@ const ControlPage = () => {
 
       const data = await response.json()
       setLines(Array.isArray(data.lines) ? data.lines : [])
+      setPendingMusicRangeStartIndex(null)
       setCurrentIndex(
         Number.isInteger(data.currentIndex) ? data.currentIndex : 0,
       )
@@ -1443,6 +1610,11 @@ const ControlPage = () => {
     transcription.active || transcription.status === 'connecting'
   const speakerRecognitionEnabled =
     transcription.speakerRecognitionEnabled === true
+  const currentLineMusicActive = isLineMarkedMusic(lines[currentIndex])
+  const musicSelectionHint =
+    pendingMusicRangeStartIndex != null
+      ? `音樂範圍選取中：已選第 ${pendingMusicRangeStartIndex + 1} 行為起點，請再勾選結束行。`
+      : '勾選「此處有音樂」後，再勾選另一行可自動標記頭尾之間的整段音樂範圍。'
   const transcriptionPreview =
     transcription.text && transcription.text.trim().length > 0
       ? transcription.text
@@ -1615,6 +1787,8 @@ const ControlPage = () => {
               displayEnabled ? '' : 'viewer-muted'
             } ${
               lines[currentIndex]?.type === 'direction' ? 'viewer-direction' : ''
+            } ${
+              currentLineMusicActive ? 'viewer-music-preview' : ''
             }`}
           >
             {lines.length
@@ -1625,6 +1799,9 @@ const ControlPage = () => {
                 : '—'
               : '尚未載入字幕'}
           </div>
+          {currentLineMusicActive && (
+            <div className="viewer-preview-music">此處有音樂</div>
+          )}
           <div className="control-instructions">
             • Enter/點擊字幕可立即跳行
             <br />
@@ -1650,7 +1827,10 @@ const ControlPage = () => {
       <section className="script-panel">
         <header className="script-header">
           <h2>劇本字幕清單</h2>
-          <small>右側內容可直接編輯，雙擊或點擊即跳轉</small>
+          <div className="script-header-meta">
+            <small>右側內容可直接編輯，雙擊或點擊即跳轉</small>
+            <small className="script-music-hint">{musicSelectionHint}</small>
+          </div>
         </header>
 
         <div className="script-list">
@@ -1666,27 +1846,63 @@ const ControlPage = () => {
               typeof line === 'object' && line?.type === 'direction'
                 ? 'direction'
                 : 'dialogue'
+            const musicActive = isLineMarkedMusic(line)
+            const previousMusicActive = isLineMarkedMusic(lines[index - 1])
+            const nextMusicActive = isLineMarkedMusic(lines[index + 1])
+            const musicBoundaryLabel = musicActive
+              ? !previousMusicActive && !nextMusicActive
+                ? '音樂'
+                : !previousMusicActive
+                  ? '音樂起'
+                  : !nextMusicActive
+                    ? '音樂迄'
+                    : '音樂中'
+              : ''
 
             return (
               <div
                 key={`${index}-${lineText.slice(0, 10)}`}
                 className={`script-line ${
                   currentIndex === index ? 'active' : ''
-                } ${lineType === 'direction' ? 'direction' : ''}`}
+                } ${lineType === 'direction' ? 'direction' : ''} ${
+                  musicActive ? 'music' : ''
+                } ${musicActive && !previousMusicActive ? 'music-start' : ''} ${
+                  musicActive && !nextMusicActive ? 'music-end' : ''
+                }`}
                 onClick={() => handleLineClick(index)}
               >
                 {typeof line === 'object' && (
                   <div className="script-line-header">
-                    <span
-                      className={`script-line-type ${
-                        lineType === 'direction'
-                          ? 'type-direction'
-                          : 'type-dialogue'
-                      }`}
-                    >
-                      {lineType === 'direction' ? '舞台指示' : '台詞'}
-                    </span>
+                    <div className="script-line-tags">
+                      <span
+                        className={`script-line-type ${
+                          lineType === 'direction'
+                            ? 'type-direction'
+                            : 'type-dialogue'
+                        }`}
+                      >
+                        {lineType === 'direction' ? '舞台指示' : '台詞'}
+                      </span>
+                      {musicBoundaryLabel && (
+                        <span className="script-line-type type-music">
+                          {musicBoundaryLabel}
+                        </span>
+                      )}
+                    </div>
                     <div className="script-line-actions">
+                      <label
+                        className="line-music-toggle"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={musicActive}
+                          onChange={(event) =>
+                            handleToggleLineMusic(event, index)
+                          }
+                        />
+                        <span>此處有音樂</span>
+                      </label>
                       <button
                         type="button"
                         className="line-action toggle"

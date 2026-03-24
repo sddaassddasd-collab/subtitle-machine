@@ -44,12 +44,19 @@ const normalizeViewerPayload = (payload) => {
         .map((line) => line.trim())
         .filter(Boolean)
     : []
+  const musicActive = payload?.musicActive === true
+  const musicText =
+    typeof payload?.musicText === 'string' && payload.musicText.trim().length > 0
+      ? payload.musicText.trim()
+      : '此處有音樂'
 
   return {
     enabled,
     line: nextLine,
     liveEntries,
     liveLines,
+    musicActive,
+    musicText,
     source,
     transcriptionIsFinal,
   }
@@ -66,6 +73,8 @@ const ViewerPage = () => {
   const [line, setLine] = useState(null)
   const [liveEntries, setLiveEntries] = useState([])
   const [liveLines, setLiveLines] = useState([])
+  const [musicActive, setMusicActive] = useState(false)
+  const [musicText, setMusicText] = useState('此處有音樂')
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
@@ -91,6 +100,8 @@ const ViewerPage = () => {
           setLine(next.line)
           setLiveEntries(next.liveEntries)
           setLiveLines(next.liveLines)
+          setMusicActive(next.musicActive)
+          setMusicText(next.musicText)
           setLineSource(next.source)
           setTranscriptionIsFinal(next.transcriptionIsFinal)
         }
@@ -119,6 +130,8 @@ const ViewerPage = () => {
       setLine(next.line)
       setLiveEntries(next.liveEntries)
       setLiveLines(next.liveLines)
+      setMusicActive(next.musicActive)
+      setMusicText(next.musicText)
       setLineSource(next.source)
       setTranscriptionIsFinal(next.transcriptionIsFinal)
     })
@@ -269,6 +282,15 @@ const ViewerPage = () => {
       >
         ⛶
       </button>
+      {displayEnabled && musicActive && (
+        <div
+          className={`viewer-music-badge${
+            lineSource === 'transcription' ? ' with-live-badge' : ''
+          }`}
+        >
+          {musicText}
+        </div>
+      )}
       {lineSource === 'transcription' && displayEnabled && (
         <div className="viewer-live-badge">
           {transcriptionIsFinal ? '即時語音 最終稿' : '即時語音 草稿'}

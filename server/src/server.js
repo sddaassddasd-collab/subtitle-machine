@@ -268,6 +268,14 @@ function clampLineType(rawType) {
   return null;
 }
 
+function normalizeLineMusic(rawMusic) {
+  return rawMusic === true;
+}
+
+function isLineMarkedMusic(entry) {
+  return Boolean(entry && typeof entry === 'object' && entry.music === true);
+}
+
 function stripBom(text) {
   if (!text) return '';
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
@@ -704,6 +712,7 @@ function normalizeLineEntry(entry, keepEmpty = false) {
         return {
           text: '',
           type: LINE_TYPES.DIALOGUE,
+          music: false,
         };
       }
       return null;
@@ -711,6 +720,7 @@ function normalizeLineEntry(entry, keepEmpty = false) {
     return {
       text,
       type: isLikelyDirection(text) ? LINE_TYPES.DIRECTION : LINE_TYPES.DIALOGUE,
+      music: false,
     };
   }
 
@@ -732,7 +742,13 @@ function normalizeLineEntry(entry, keepEmpty = false) {
         : LINE_TYPES.DIALOGUE;
     }
 
-    return { text, type };
+    return {
+      text,
+      type,
+      music: normalizeLineMusic(
+        entry.music ?? entry.hasMusic ?? entry.isMusic,
+      ),
+    };
   }
 
   return null;
@@ -758,6 +774,7 @@ function normalizeScriptLines(entries, options = {}) {
             base.type === LINE_TYPES.DIRECTION
               ? LINE_TYPES.DIRECTION
               : LINE_TYPES.DIALOGUE,
+          music: base.music === true,
         });
       }
       return;
@@ -774,6 +791,7 @@ function normalizeScriptLines(entries, options = {}) {
               item.type === LINE_TYPES.DIRECTION
                 ? LINE_TYPES.DIRECTION
                 : LINE_TYPES.DIALOGUE,
+            music: item.music === true,
           });
         }
         return;
@@ -794,6 +812,7 @@ function normalizeScriptLines(entries, options = {}) {
           item.type === LINE_TYPES.DIRECTION
             ? LINE_TYPES.DIRECTION
             : LINE_TYPES.DIALOGUE,
+        music: item.music === true,
       });
     });
   });
@@ -838,6 +857,7 @@ function expandStageDirectionSegments(entry) {
       segments.push({
         text: sanitized,
         type,
+        music: entry.music === true,
       });
     }
   };
@@ -884,6 +904,7 @@ function enforceLineLengths(entries, limit = MAX_LINE_LENGTH) {
       result.push({
         text,
         type: LINE_TYPES.DIALOGUE,
+        music: entry.music === true,
       });
     });
   });
@@ -2841,6 +2862,10 @@ function getViewerPayload(session) {
             .map((line) => sanitizeTranscriptionText(line))
             .filter(Boolean))
     : [];
+  const activeScriptLine =
+    lines.length > 0 ? lines[session.currentIndex] || null : null;
+  const musicActive = isLineMarkedMusic(activeScriptLine);
+  const musicText = musicActive ? '此處有音樂' : '';
 
   if (!session.displayEnabled) {
     return {
@@ -2848,6 +2873,8 @@ function getViewerPayload(session) {
       text: '',
       liveEntries: [],
       liveLines: [],
+      musicActive: false,
+      musicText: '',
       displayEnabled: false,
       source: 'hidden',
       transcription: getPublicTranscriptionState(session),
@@ -2863,21 +2890,24 @@ function getViewerPayload(session) {
       text: liveText,
       liveEntries,
       liveLines,
+      musicActive,
+      musicText,
       displayEnabled: true,
       source: 'transcription',
       transcription: getPublicTranscriptionState(session),
     };
   }
 
-  const activeLine = lines.length > 0 ? lines[session.currentIndex] || null : null;
   return {
-    line: activeLine,
+    line: activeScriptLine,
     text:
-      activeLine && activeLine.type === LINE_TYPES.DIRECTION
+      activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
         ? ''
-        : activeLine?.text || '',
+        : activeScriptLine?.text || '',
     liveEntries: [],
     liveLines: [],
+    musicActive,
+    musicText,
     displayEnabled: true,
     source: 'script',
     transcription: getPublicTranscriptionState(session),
@@ -3714,7 +3744,7 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('updateLine', ({ sessionId, index, text, type }) => {
+  socket.on('updateLine', ({ sessionId, index, text, type, music }) => {
     const session = getSession(sessionId);
     if (!session) return;
 
@@ -3737,8 +3767,20 @@ io.on('connection', (socket) => {
 
       session.lines[index] =
         existingRaw && typeof existingRaw === 'object'
-          ? { ...existingRaw, text: sanitized, type: nextType }
-          : { text: sanitized, type: nextType };
+          ? {
+              ...existingRaw,
+              text: sanitized,
+              type: nextType,
+              music:
+                typeof music === 'boolean'
+                  ? normalizeLineMusic(music)
+                  : existingRaw.music === true,
+            }
+          : {
+              text: sanitized,
+              type: nextType,
+              music: normalizeLineMusic(music),
+            };
 
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
@@ -3769,7 +3811,85 @@ io.on('connection', (socket) => {
     session.lines[index] = {
       text,
       type: normalizedType,
+      music: isLineMarkedMusic(existing),
     };
+
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setLineMusic', ({ sessionId, index, music }) => {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= session.lines.length ||
+      typeof music !== 'boolean'
+    ) {
+      return;
+    }
+
+    const existing = session.lines[index];
+    if (!existing) return;
+
+    const text = sanitizeLineText(
+      typeof existing === 'string' ? existing : existing.text,
+    );
+    const type =
+      existing && typeof existing === 'object'
+        ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
+        : LINE_TYPES.DIALOGUE;
+
+    session.lines[index] = {
+      text,
+      type,
+      music: normalizeLineMusic(music),
+    };
+
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setLineMusicRange', ({ sessionId, startIndex, endIndex, music }) => {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    if (
+      !Number.isInteger(startIndex) ||
+      !Number.isInteger(endIndex) ||
+      startIndex < 0 ||
+      endIndex < 0 ||
+      startIndex >= session.lines.length ||
+      endIndex >= session.lines.length ||
+      typeof music !== 'boolean'
+    ) {
+      return;
+    }
+
+    const rangeStart = Math.min(startIndex, endIndex);
+    const rangeEnd = Math.max(startIndex, endIndex);
+    const nextMusic = normalizeLineMusic(music);
+
+    for (let index = rangeStart; index <= rangeEnd; index += 1) {
+      const existing = session.lines[index];
+      if (!existing) continue;
+
+      const text = sanitizeLineText(
+        typeof existing === 'string' ? existing : existing.text,
+      );
+      const type =
+        existing && typeof existing === 'object'
+          ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
+          : LINE_TYPES.DIALOGUE;
+
+      session.lines[index] = {
+        text,
+        type,
+        music: nextMusic,
+      };
+    }
 
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
@@ -3802,10 +3922,12 @@ io.on('connection', (socket) => {
     const firstLine = {
       text: before,
       type,
+      music: isLineMarkedMusic(existing),
     };
     const secondLine = {
       text: after,
       type,
+      music: isLineMarkedMusic(existing),
     };
 
     session.lines.splice(index, 1, firstLine, secondLine);
@@ -3837,6 +3959,7 @@ io.on('connection', (socket) => {
     session.lines.splice(index + 1, 0, {
       text: '',
       type: baseType,
+      music: isLineMarkedMusic(existing),
     });
 
     if (session.currentIndex > index) {
