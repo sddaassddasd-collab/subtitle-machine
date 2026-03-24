@@ -61,6 +61,8 @@ const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
+const DEFAULT_REALTIME_WS_MODEL =
+  process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 const VALID_TRANSCRIPTION_MODELS = new Set([
   'gpt-4o-mini-transcribe',
@@ -1468,16 +1470,18 @@ function startRealtimeTranscription({
   const selectedModel = normalizeTranscriptionModel(model);
   const selectedLanguage = normalizeLanguageCode(language);
   const client = new OpenAI({ apiKey });
-  const rt = new OpenAIRealtimeWS({ model: selectedModel }, client);
+  const rt = new OpenAIRealtimeWS({ model: DEFAULT_REALTIME_WS_MODEL }, client);
 
   const stream = {
     sessionId,
     socketId,
     rt,
+    wsModel: DEFAULT_REALTIME_WS_MODEL,
     model: selectedModel,
     language: selectedLanguage,
     partialByItemId: new Map(),
     pendingAudioChunks: [],
+    lastTransportError: '',
     ready: false,
     closing: false,
   };
@@ -1591,6 +1595,14 @@ function startRealtimeTranscription({
     const message =
       sanitizeLineText(error?.error?.message || error?.message || '') ||
       '語音辨識連線發生錯誤';
+    stream.lastTransportError = message;
+
+    if (!stream.ready && /could not send data/i.test(message)) {
+      // If websocket is being closed during initialization, close handler usually
+      // carries the more specific upstream reason.
+      return;
+    }
+
     stopTranscriptionStream(sessionId, {
       keepText: true,
       reason: 'transcription error',
@@ -1609,6 +1621,7 @@ function startRealtimeTranscription({
     const closeReason = normalizeCloseReason(reason);
     const message =
       closeReason ||
+      sanitizeLineText(stream.lastTransportError || '') ||
       (code === 1008
         ? 'OpenAI 驗證失敗，請確認 API Key 權限'
         : '語音辨識連線已中斷');
