@@ -61,8 +61,18 @@ const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
 const MAX_TRANSCRIPTION_DISPLAY_LINES = 8;
-const FORCE_COMMIT_INTERVAL_MS =
-  Number(process.env.TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS) || 2000;
+const parsedForceCommitIntervalMs = Number(
+  process.env.TRANSCRIPTION_FORCE_COMMIT_INTERVAL_MS,
+);
+const FORCE_COMMIT_INTERVAL_MS = Number.isFinite(parsedForceCommitIntervalMs)
+  ? Math.max(0, parsedForceCommitIntervalMs)
+  : 3500;
+const parsedCommitCooldownMs = Number(
+  process.env.TRANSCRIPTION_COMMIT_COOLDOWN_MS,
+);
+const COMMIT_COOLDOWN_MS = Number.isFinite(parsedCommitCooldownMs)
+  ? Math.max(0, parsedCommitCooldownMs)
+  : 400;
 const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const TRANSCRIPTION_CORRECTION_ENABLED =
@@ -1260,6 +1270,7 @@ function stopTranscriptionStream(sessionId, options = {}) {
   stream.ready = false;
   clearRealtimeForceCommitTimer(stream);
   resetRealtimePendingAudio(stream);
+  resetRealtimeCommitState(stream);
   if (stream.initTimeout) {
     clearTimeout(stream.initTimeout);
     stream.initTimeout = null;
@@ -1312,6 +1323,16 @@ function normalizeCloseReason(reason) {
   return '';
 }
 
+function isIgnorableRealtimeCommitError(message) {
+  if (!message || typeof message !== 'string') return false;
+  return (
+    /committing input audio buffer/i.test(message) &&
+    (/buffer too small/i.test(message) ||
+      /buffer only has 0(?:\.0+)?ms of audio/i.test(message) ||
+      /0\.00ms of audio/i.test(message))
+  );
+}
+
 function clearRealtimeForceCommitTimer(stream) {
   if (!stream?.forceCommitTimer) return;
   clearInterval(stream.forceCommitTimer);
@@ -1324,6 +1345,12 @@ function resetRealtimePendingAudio(stream) {
   stream.firstPendingAudioAt = null;
 }
 
+function resetRealtimeCommitState(stream) {
+  if (!stream) return;
+  stream.commitInFlight = false;
+  stream.lastCommitAt = 0;
+}
+
 function markRealtimePendingAudio(stream) {
   if (!stream) return;
   if (stream.pendingAppendCount === 0) {
@@ -1333,13 +1360,25 @@ function markRealtimePendingAudio(stream) {
 }
 
 function commitRealtimeAudioBuffer(stream) {
+  if (!stream || !stream.ready || stream.closing) return false;
+  if (!stream.pendingAppendCount) return false;
+  if (stream.commitInFlight) return false;
+  const now = Date.now();
+  if (now - stream.lastCommitAt < COMMIT_COOLDOWN_MS) {
+    return false;
+  }
+
+  stream.commitInFlight = true;
+  stream.lastCommitAt = now;
   stream.rt.send({
     type: 'input_audio_buffer.commit',
   });
+  return true;
 }
 
 function ensureRealtimeForceCommitTimer(stream) {
   if (!stream || stream.forceCommitTimer) return;
+  if (FORCE_COMMIT_INTERVAL_MS <= 0) return;
   stream.forceCommitTimer = setInterval(() => {
     if (!stream.ready || stream.closing) return;
     if (!stream.pendingAppendCount || !stream.firstPendingAudioAt) return;
@@ -1347,8 +1386,10 @@ function ensureRealtimeForceCommitTimer(stream) {
       return;
     }
     try {
-      commitRealtimeAudioBuffer(stream);
-      resetRealtimePendingAudio(stream);
+      const committed = commitRealtimeAudioBuffer(stream);
+      if (committed) {
+        resetRealtimePendingAudio(stream);
+      }
     } catch (error) {
       stream.lastTransportError =
         sanitizeLineText(error?.message || '') || stream.lastTransportError;
@@ -1782,6 +1823,8 @@ function startRealtimeTranscription({
     forceCommitTimer: null,
     pendingAppendCount: 0,
     firstPendingAudioAt: null,
+    commitInFlight: false,
+    lastCommitAt: 0,
     closing: false,
   };
   transcriptionStreams.set(sessionId, stream);
@@ -1862,25 +1905,14 @@ function startRealtimeTranscription({
 
   rt.on('input_audio_buffer.committed', () => {
     if (!isCurrent()) return;
+    stream.commitInFlight = false;
     resetRealtimePendingAudio(stream);
   });
 
   rt.on('input_audio_buffer.cleared', () => {
     if (!isCurrent()) return;
+    stream.commitInFlight = false;
     resetRealtimePendingAudio(stream);
-  });
-
-  rt.on('input_audio_buffer.speech_stopped', () => {
-    if (!isCurrent()) return;
-    if (!stream.ready || stream.closing) return;
-    if (!stream.pendingAppendCount) return;
-    try {
-      commitRealtimeAudioBuffer(stream);
-      resetRealtimePendingAudio(stream);
-    } catch (error) {
-      stream.lastTransportError =
-        sanitizeLineText(error?.message || '') || stream.lastTransportError;
-    }
   });
 
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
@@ -1930,6 +1962,12 @@ function startRealtimeTranscription({
       '語音辨識連線發生錯誤';
     stream.lastTransportError = message;
 
+    if (isIgnorableRealtimeCommitError(message)) {
+      stream.commitInFlight = false;
+      stream.lastCommitAt = Date.now();
+      return;
+    }
+
     if (!stream.ready && /could not send data/i.test(message)) {
       // If websocket is being closed during initialization, close handler usually
       // carries the more specific upstream reason.
@@ -1949,6 +1987,7 @@ function startRealtimeTranscription({
     transcriptionStreams.delete(sessionId);
     clearRealtimeForceCommitTimer(stream);
     resetRealtimePendingAudio(stream);
+    resetRealtimeCommitState(stream);
     if (stream.closing) {
       return;
     }
