@@ -1505,7 +1505,7 @@ function startRealtimeTranscription({
 
     try {
       rt.send({
-        type: 'transcription_session.update',
+        type: 'session.update',
         session: {
           input_audio_format: 'pcm16',
           input_audio_transcription: {
