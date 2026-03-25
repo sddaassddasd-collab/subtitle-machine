@@ -1818,7 +1818,7 @@ async function transcribeSpeakerWindow({
   segment,
   language,
 }) {
-  if (!isAccurateSegmentEligible(segment)) return null;
+  if (!getSpeakerRecognitionSegmentEligibility(segment).eligible) return null;
 
   const wavBuffer = createWavFromPcm16Mono(segment.pcm);
   if (!wavBuffer.length) return null;
@@ -1846,13 +1846,7 @@ async function transcribeSpeakerWindow({
 
 function getLineDurationMs(line) {
   if (!line?.accurateSegment) return 0;
-  if (
-    Number.isFinite(line.accurateSegment.durationMs) &&
-    line.accurateSegment.durationMs > 0
-  ) {
-    return line.accurateSegment.durationMs;
-  }
-  return getPcmDurationMs(line.accurateSegment.pcm?.length || 0);
+  return getSegmentDurationMs(line.accurateSegment);
 }
 
 function getLineSpeakerId(line) {
@@ -1874,12 +1868,33 @@ function getLineSpeakerId(line) {
 }
 
 function buildSpeakerRecognitionWindow(stream) {
-  if (!stream?.speakerRecognitionEnabled) return null;
+  if (!stream?.speakerRecognitionEnabled) {
+    return {
+      key: '',
+      lines: [],
+      segment: null,
+      reason: 'disabled',
+    };
+  }
 
-  const diarizableLines = refreshGroupedTranscriptionLines(stream).filter(
-    (line) => isAccurateSegmentEligible(line?.accurateSegment),
+  const groupedLines = refreshGroupedTranscriptionLines(stream);
+  const diarizableLines = groupedLines.filter(
+    (line) => getSpeakerRecognitionSegmentEligibility(line?.accurateSegment).eligible,
   );
-  if (diarizableLines.length < 2) return null;
+  if (diarizableLines.length < 2) {
+    return {
+      key: '',
+      lines: [],
+      segment: null,
+      reason: 'not-enough-eligible-lines',
+      eligibleLineCount: diarizableLines.length,
+      totalLineCount: groupedLines.length,
+      totalDurationMs: diarizableLines.reduce(
+        (sum, line) => sum + getLineDurationMs(line),
+        0,
+      ),
+    };
+  }
 
   const selectedLines = [];
   let totalDurationMs = 0;
@@ -1902,14 +1917,43 @@ function buildSpeakerRecognitionWindow(stream) {
     totalDurationMs += durationMs;
   }
 
-  if (selectedLines.length < 2) return null;
+  if (selectedLines.length < 2) {
+    return {
+      key: '',
+      lines: selectedLines,
+      segment: null,
+      reason: 'window-too-small',
+      eligibleLineCount: diarizableLines.length,
+      totalLineCount: groupedLines.length,
+      totalDurationMs,
+    };
+  }
+
+  const segment = mergeAccurateSegments(
+    selectedLines.map((line) => line.accurateSegment),
+  );
+  const key = selectedLines.map((line) => line.key).join('||');
+  const eligibility = getSpeakerRecognitionSegmentEligibility(segment);
+  if (!eligibility.eligible) {
+    return {
+      key,
+      lines: selectedLines,
+      segment: null,
+      reason: `window-${eligibility.reason}`,
+      eligibleLineCount: diarizableLines.length,
+      totalLineCount: groupedLines.length,
+      totalDurationMs: eligibility.durationMs,
+    };
+  }
 
   return {
-    key: selectedLines.map((line) => line.key).join('||'),
+    key,
     lines: selectedLines,
-    segment: mergeAccurateSegments(
-      selectedLines.map((line) => line.accurateSegment),
-    ),
+    segment,
+    reason: '',
+    eligibleLineCount: diarizableLines.length,
+    totalLineCount: groupedLines.length,
+    totalDurationMs: eligibility.durationMs,
   };
 }
 
@@ -2029,8 +2073,25 @@ function queueSpeakerRecognition({
   if (!stream?.speakerRecognitionEnabled) return;
 
   const window = buildSpeakerRecognitionWindow(stream);
-  if (!window?.segment || !window.key) return;
-  if (stream.pendingSpeakerWindowKeys.has(window.key)) return;
+  if (!window?.segment || !window.key) {
+    logSpeakerRecognitionDiagnostic(stream, window?.reason || 'window-unavailable', {
+      eligibleLineCount: window?.eligibleLineCount,
+      totalLineCount: window?.totalLineCount,
+      selectedLineCount: window?.lines?.length || 0,
+      totalDurationMs: window?.totalDurationMs,
+    });
+    return;
+  }
+  if (stream.pendingSpeakerWindowKeys.has(window.key)) {
+    logSpeakerRecognitionDiagnostic(stream, 'window-already-pending', {
+      key: window.key,
+      selectedLineCount: window.lines.length,
+      totalDurationMs: window.totalDurationMs,
+    });
+    return;
+  }
+
+  clearSpeakerRecognitionDiagnostic(stream);
 
   stream.pendingSpeakerWindowKeys.add(window.key);
   stream.speakerRecognitionChain = stream.speakerRecognitionChain
@@ -2042,10 +2103,26 @@ function queueSpeakerRecognition({
         segment: window.segment,
         language,
       });
-      if (!isCurrent() || stream.closing || !response?.segments?.length) return;
+      if (!isCurrent() || stream.closing) return;
+      if (!response?.segments?.length) {
+        logSpeakerRecognitionDiagnostic(stream, 'diarize-empty-response', {
+          key: window.key,
+          selectedLineCount: window.lines.length,
+          totalDurationMs: window.totalDurationMs,
+        });
+        return;
+      }
 
       const assignments = mapDiarizedSpeakersToLines(window, response.segments);
-      if (assignments.length === 0) return;
+      if (assignments.length === 0) {
+        logSpeakerRecognitionDiagnostic(stream, 'no-line-assignments', {
+          key: window.key,
+          selectedLineCount: window.lines.length,
+          diarizedSegmentCount: response.segments.length,
+          totalDurationMs: window.totalDurationMs,
+        });
+        return;
+      }
 
       const localToGlobal = resolveGlobalSpeakerMappings(stream, assignments);
       let changed = false;
@@ -2057,6 +2134,7 @@ function queueSpeakerRecognition({
         }
       });
 
+      clearSpeakerRecognitionDiagnostic(stream);
       if (changed) {
         syncTranscriptionStateFromStream(sessionId, stream);
       }
@@ -2064,6 +2142,9 @@ function queueSpeakerRecognition({
     .catch((error) => {
       stream.lastTransportError =
         sanitizeLineText(error?.message || '') || stream.lastTransportError;
+      logSpeakerRecognitionDiagnostic(stream, 'request-failed', {
+        message: sanitizeLineText(error?.message || ''),
+      });
     })
     .finally(() => {
       stream.pendingSpeakerWindowKeys.delete(window.key);
@@ -2447,17 +2528,83 @@ function takeCapturedAccurateSegment(stream) {
   return segment;
 }
 
-function isAccurateSegmentEligible(segment) {
+function getSegmentDurationMs(segment) {
   if (!segment || !Buffer.isBuffer(segment.pcm) || segment.pcm.length === 0) {
-    return false;
+    return 0;
   }
-  const durationMs =
-    Number.isFinite(segment.durationMs) && segment.durationMs > 0
-      ? segment.durationMs
-      : getPcmDurationMs(segment.pcm.length);
-  if (durationMs < TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS) return false;
-  if (durationMs > TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS) return false;
-  return true;
+  if (Number.isFinite(segment.durationMs) && segment.durationMs > 0) {
+    return segment.durationMs;
+  }
+  return getPcmDurationMs(segment.pcm.length);
+}
+
+function getSegmentEligibility(
+  segment,
+  { minDurationMs = 0, maxDurationMs = Infinity } = {},
+) {
+  if (!segment || !Buffer.isBuffer(segment.pcm) || segment.pcm.length === 0) {
+    return {
+      eligible: false,
+      reason: 'missing-audio',
+      durationMs: 0,
+    };
+  }
+  const durationMs = getSegmentDurationMs(segment);
+  if (durationMs < minDurationMs) {
+    return {
+      eligible: false,
+      reason: 'too-short',
+      durationMs,
+    };
+  }
+  if (durationMs > maxDurationMs) {
+    return {
+      eligible: false,
+      reason: 'too-long',
+      durationMs,
+    };
+  }
+  return {
+    eligible: true,
+    reason: 'ok',
+    durationMs,
+  };
+}
+
+function isAccurateSegmentEligible(segment) {
+  return getSegmentEligibility(segment, {
+    minDurationMs: TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS,
+    maxDurationMs: TRANSCRIPTION_ACCURATE_MAX_SEGMENT_MS,
+  }).eligible;
+}
+
+function getSpeakerRecognitionSegmentEligibility(segment) {
+  return getSegmentEligibility(segment, {
+    minDurationMs: TRANSCRIPTION_ACCURATE_MIN_SEGMENT_MS,
+    maxDurationMs: TRANSCRIPTION_SPEAKER_WINDOW_MAX_MS,
+  });
+}
+
+function logSpeakerRecognitionDiagnostic(stream, reason, details = {}) {
+  if (!stream || typeof reason !== 'string' || !reason) return;
+
+  const payload = Object.entries(details).reduce((accumulator, [key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return accumulator;
+    }
+    accumulator[key] = value;
+    return accumulator;
+  }, {});
+  const signature = JSON.stringify({ reason, ...payload });
+  if (stream.lastSpeakerRecognitionDiagnostic === signature) return;
+
+  stream.lastSpeakerRecognitionDiagnostic = signature;
+  console.info(`[speaker-recognition][${stream.sessionId}] ${reason}`, payload);
+}
+
+function clearSpeakerRecognitionDiagnostic(stream) {
+  if (!stream) return;
+  stream.lastSpeakerRecognitionDiagnostic = '';
 }
 
 function pushUnboundCommittedSegment(stream, segment) {
@@ -3113,6 +3260,7 @@ function startRealtimeTranscription({
     nextSegmentId: 1,
     nextSpeakerId: 1,
     lastTransportError: '',
+    lastSpeakerRecognitionDiagnostic: '',
     lastInputLevel: 0,
     trailingSilenceMs: 0,
     ready: false,
