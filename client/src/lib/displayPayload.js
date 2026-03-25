@@ -1,0 +1,117 @@
+const clampInt = (rawValue, fallback, min, max) => {
+  const parsed = Number(rawValue)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(Math.max(Math.round(parsed), min), max)
+}
+
+export const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
+  fontSizePercent: 100,
+  offsetX: 0,
+  offsetY: 24,
+})
+
+export const normalizeProjectorLayout = (rawLayout) => {
+  const source =
+    rawLayout && typeof rawLayout === 'object'
+      ? rawLayout
+      : DEFAULT_PROJECTOR_LAYOUT
+
+  return {
+    fontSizePercent: clampInt(
+      source.fontSizePercent,
+      DEFAULT_PROJECTOR_LAYOUT.fontSizePercent,
+      60,
+      220,
+    ),
+    offsetX: clampInt(source.offsetX, DEFAULT_PROJECTOR_LAYOUT.offsetX, -35, 35),
+    offsetY: clampInt(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY, -20, 35),
+  }
+}
+
+export const normalizeDisplayPayload = (payload) => {
+  const enabled =
+    typeof payload?.displayEnabled === 'boolean'
+      ? payload.displayEnabled
+      : true
+
+  const lineCandidate = payload?.line
+  const nextLine =
+    lineCandidate && typeof lineCandidate === 'object'
+      ? {
+          text: typeof lineCandidate.text === 'string' ? lineCandidate.text : '',
+          type:
+            lineCandidate.type === 'direction' ? 'direction' : 'dialogue',
+          role:
+            typeof lineCandidate.role === 'string' && lineCandidate.role.trim()
+              ? lineCandidate.role.trim()
+              : null,
+          translations:
+            lineCandidate.translations && typeof lineCandidate.translations === 'object'
+              ? lineCandidate.translations
+              : {},
+        }
+      : null
+
+  const transcription = payload?.transcription || {}
+  const transcriptionIsFinal = transcription.isFinal !== false
+  const source =
+    typeof payload?.source === 'string' ? payload.source : 'script'
+  const liveEntries = Array.isArray(payload?.liveEntries)
+    ? payload.liveEntries
+        .map((entry) => ({
+          text: typeof entry?.text === 'string' ? entry.text.trim() : '',
+          speakerId:
+            Number.isInteger(entry?.speakerId) && entry.speakerId > 0
+              ? entry.speakerId
+              : null,
+          isFinal: entry?.isFinal !== false,
+        }))
+        .filter((entry) => entry.text)
+    : []
+  const liveLines = Array.isArray(payload?.liveLines)
+    ? payload.liveLines
+        .filter((line) => typeof line === 'string')
+        .map((line) => line.trim())
+        .filter(Boolean)
+    : []
+  const musicActive = payload?.musicActive === true
+  const musicText =
+    typeof payload?.musicText === 'string' && payload.musicText.trim().length > 0
+      ? payload.musicText.trim()
+      : '此處有音樂'
+
+  return {
+    enabled,
+    line: nextLine,
+    liveEntries,
+    liveLines,
+    musicActive,
+    musicText,
+    source,
+    languages: Array.isArray(payload?.languages) ? payload.languages : [],
+    transcriptionIsFinal,
+    layout: normalizeProjectorLayout(payload?.layout),
+  }
+}
+
+export const resolveLineText = (line, languageId) => {
+  if (!line) return ''
+  if (
+    languageId &&
+    line.translations &&
+    typeof line.translations[languageId] === 'string' &&
+    line.translations[languageId].trim().length > 0
+  ) {
+    return line.translations[languageId]
+  }
+  return line.text || ''
+}
+
+export const roleToColor = (role) => {
+  if (!role) return ''
+  let hash = 0
+  for (let index = 0; index < role.length; index += 1) {
+    hash = (hash * 31 + role.charCodeAt(index)) % 360
+  }
+  return `hsl(${hash}deg 90% 76%)`
+}

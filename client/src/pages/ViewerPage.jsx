@@ -1,92 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
+import {
+  normalizeDisplayPayload,
+  resolveLineText,
+  roleToColor,
+} from '../lib/displayPayload'
 
-const normalizeViewerPayload = (payload) => {
-  const enabled =
-    typeof payload?.displayEnabled === 'boolean'
-      ? payload.displayEnabled
-      : true
+const VIEWER_FONT_STORAGE_KEY = 'subtitleMachineViewerFontPercent'
+const DEFAULT_VIEWER_FONT_PERCENT = 100
+const MIN_VIEWER_FONT_PERCENT = 70
+const MAX_VIEWER_FONT_PERCENT = 180
+const VIEWER_FONT_STEP = 10
 
-  const lineCandidate = payload?.line
-  const nextLine =
-    lineCandidate && typeof lineCandidate === 'object'
-      ? {
-          text: typeof lineCandidate.text === 'string' ? lineCandidate.text : '',
-          type:
-            lineCandidate.type === 'direction' ? 'direction' : 'dialogue',
-          role:
-            typeof lineCandidate.role === 'string' && lineCandidate.role.trim()
-              ? lineCandidate.role.trim()
-              : null,
-          translations:
-            lineCandidate.translations && typeof lineCandidate.translations === 'object'
-              ? lineCandidate.translations
-              : {},
-        }
-      : null
-
-  const transcription = payload?.transcription || {}
-  const transcriptionIsFinal = transcription.isFinal !== false
-  const source =
-    typeof payload?.source === 'string' ? payload.source : 'script'
-  const liveEntries = Array.isArray(payload?.liveEntries)
-    ? payload.liveEntries
-        .map((entry) => ({
-          text: typeof entry?.text === 'string' ? entry.text.trim() : '',
-          speakerId:
-            Number.isInteger(entry?.speakerId) && entry.speakerId > 0
-              ? entry.speakerId
-              : null,
-          isFinal: entry?.isFinal !== false,
-        }))
-        .filter((entry) => entry.text)
-    : []
-  const liveLines = Array.isArray(payload?.liveLines)
-    ? payload.liveLines
-        .filter((line) => typeof line === 'string')
-        .map((line) => line.trim())
-        .filter(Boolean)
-    : []
-  const musicActive = payload?.musicActive === true
-  const musicText =
-    typeof payload?.musicText === 'string' && payload.musicText.trim().length > 0
-      ? payload.musicText.trim()
-      : '此處有音樂'
-
-  return {
-    enabled,
-    line: nextLine,
-    liveEntries,
-    liveLines,
-    musicActive,
-    musicText,
-    source,
-    languages: Array.isArray(payload?.languages) ? payload.languages : [],
-    transcriptionIsFinal,
-  }
-}
-
-const resolveLineText = (line, languageId) => {
-  if (!line) return ''
-  if (
-    languageId &&
-    line.translations &&
-    typeof line.translations[languageId] === 'string' &&
-    line.translations[languageId].trim().length > 0
-  ) {
-    return line.translations[languageId]
-  }
-  return line.text || ''
-}
-
-const roleToColor = (role) => {
-  if (!role) return ''
-  let hash = 0
-  for (let index = 0; index < role.length; index += 1) {
-    hash = (hash * 31 + role.charCodeAt(index)) % 360
-  }
-  return `hsl(${hash}deg 90% 76%)`
+const getInitialViewerFontPercent = () => {
+  if (typeof window === 'undefined') return DEFAULT_VIEWER_FONT_PERCENT
+  const stored = Number(window.localStorage.getItem(VIEWER_FONT_STORAGE_KEY))
+  if (!Number.isFinite(stored)) return DEFAULT_VIEWER_FONT_PERCENT
+  return Math.min(
+    Math.max(Math.round(stored), MIN_VIEWER_FONT_PERCENT),
+    MAX_VIEWER_FONT_PERCENT,
+  )
 }
 
 const ViewerPage = () => {
@@ -109,10 +43,21 @@ const ViewerPage = () => {
   const [languages, setLanguages] = useState([])
   const [selectedLanguageId, setSelectedLanguageId] = useState('primary')
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
+  const [viewerFontPercent, setViewerFontPercent] = useState(
+    getInitialViewerFontPercent,
+  )
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const liveFeedRef = useRef(null)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(
+      VIEWER_FONT_STORAGE_KEY,
+      String(viewerFontPercent),
+    )
+  }, [viewerFontPercent])
 
   useEffect(() => {
     if (!resolvedViewerToken) {
@@ -129,7 +74,7 @@ const ViewerPage = () => {
         }
         const data = await response.json()
         if (!cancelled) {
-          const next = normalizeViewerPayload(data)
+          const next = normalizeDisplayPayload(data)
           setDisplayEnabled(next.enabled)
           setLine(next.line)
           setLiveEntries(next.liveEntries)
@@ -160,7 +105,7 @@ const ViewerPage = () => {
     socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
 
     socket.on('viewer:update', (payload) => {
-      const next = normalizeViewerPayload(payload)
+      const next = normalizeDisplayPayload(payload)
       setDisplayEnabled(next.enabled)
       setLine(next.line)
       setLiveEntries(next.liveEntries)
@@ -279,6 +224,15 @@ const ViewerPage = () => {
     }
   }
 
+  const adjustViewerFontSize = (delta) => {
+    setViewerFontPercent((prev) =>
+      Math.min(
+        Math.max(prev + delta, MIN_VIEWER_FONT_PERCENT),
+        MAX_VIEWER_FONT_PERCENT,
+      ),
+    )
+  }
+
   if (error) {
     return (
       <div className="viewer-page">
@@ -308,9 +262,14 @@ const ViewerPage = () => {
   const liveFeedClassName = `viewer-live-feed${
     musicActive ? ' with-music-banner' : ''
   }`
+  const viewerFontScale = viewerFontPercent / 100
 
   return (
-    <div className="viewer-page" ref={containerRef}>
+    <div
+      className="viewer-page"
+      ref={containerRef}
+      style={{ '--viewer-font-scale': viewerFontScale }}
+    >
       <button
         type="button"
         className="fullscreen-button"
@@ -321,6 +280,29 @@ const ViewerPage = () => {
       </button>
 
       <div className="viewer-toolbar">
+        <div className="viewer-toolbar-group viewer-font-controls">
+          <span>字級</span>
+          <button
+            type="button"
+            className="viewer-toolbar-button"
+            onClick={() => adjustViewerFontSize(-VIEWER_FONT_STEP)}
+            disabled={viewerFontPercent <= MIN_VIEWER_FONT_PERCENT}
+            aria-label="縮小字體"
+          >
+            −
+          </button>
+          <span className="viewer-font-value">{viewerFontPercent}%</span>
+          <button
+            type="button"
+            className="viewer-toolbar-button"
+            onClick={() => adjustViewerFontSize(VIEWER_FONT_STEP)}
+            disabled={viewerFontPercent >= MAX_VIEWER_FONT_PERCENT}
+            aria-label="放大字體"
+          >
+            +
+          </button>
+        </div>
+
         {languages.length > 1 && (
           <label className="viewer-toolbar-group">
             <span>語言</span>

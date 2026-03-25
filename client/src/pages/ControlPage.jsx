@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
+import { normalizeProjectorLayout } from '../lib/displayPayload'
 
 const storageKeys = {
   apiKey: 'subtitleMachineApiKey',
@@ -265,6 +266,9 @@ const ControlPage = () => {
   const [lines, setLines] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [projectorLayout, setProjectorLayout] = useState(() =>
+    normalizeProjectorLayout(),
+  )
   const [historyState, setHistoryState] = useState({
     canUndo: false,
     canRedo: false,
@@ -350,6 +354,11 @@ const ControlPage = () => {
     return `${window.location.origin}/viewer/${sessionMeta.viewerToken}`
   }, [sessionMeta?.viewerToken])
 
+  const projectorUrl = useMemo(() => {
+    if (typeof window === 'undefined' || !sessionMeta?.projectorToken) return ''
+    return `${window.location.origin}/projector/${sessionMeta.projectorToken}`
+  }, [sessionMeta?.projectorToken])
+
   useEffect(() => {
     let cancelled = false
 
@@ -394,6 +403,7 @@ const ControlPage = () => {
         ? payload.displayEnabled
         : true,
     )
+    setProjectorLayout(normalizeProjectorLayout(payload?.projector?.layout))
     setTranscription(normalizeTranscriptionState(payload?.transcription))
     setHistoryState({
       canUndo: payload?.history?.canUndo === true,
@@ -725,7 +735,7 @@ const ControlPage = () => {
     setDisplayEnabled(nextState)
     setStatus({
       kind: 'info',
-      message: nextState ? '檢視端已重新顯示' : '檢視端已遮蔽字幕',
+      message: nextState ? '外部字幕已重新顯示' : '檢視端與投影端已遮蔽字幕',
     })
   }
 
@@ -1472,6 +1482,69 @@ const ControlPage = () => {
     }
   }
 
+  const handleCopyProjectorLink = async () => {
+    if (!projectorUrl) return
+    try {
+      await navigator.clipboard.writeText(projectorUrl)
+      setStatus({ kind: 'success', message: '投影端連結已複製' })
+    } catch {
+      setStatus({
+        kind: 'error',
+        message: '無法複製，請手動複製投影連結',
+      })
+    }
+  }
+
+  const handleOpenProjectorWindow = () => {
+    if (!projectorUrl) return
+    const nextWindow = window.open(projectorUrl, 'subtitle-machine-projector')
+    if (nextWindow) {
+      nextWindow.focus()
+      setStatus({
+        kind: 'info',
+        message: '投影頁已開啟，請拖到外接螢幕後切換全螢幕',
+      })
+      return
+    }
+    setStatus({
+      kind: 'error',
+      message: '瀏覽器封鎖了新視窗，請允許彈出視窗後重試',
+    })
+  }
+
+  const updateProjectorLayout = (patch, successMessage = '') => {
+    if (!socketRef.current || !sessionId) return
+    const nextLayout = normalizeProjectorLayout({
+      ...projectorLayout,
+      ...patch,
+    })
+    setProjectorLayout(nextLayout)
+    socketRef.current.emit('updateProjectorLayout', {
+      sessionId,
+      layout: patch,
+    })
+    if (successMessage) {
+      setStatus({ kind: 'success', message: successMessage })
+    }
+  }
+
+  const handleProjectorSliderChange = (field) => (event) => {
+    const nextValue = Number(event.target.value)
+    if (!Number.isFinite(nextValue)) return
+    updateProjectorLayout({ [field]: nextValue })
+  }
+
+  const handleResetProjectorLayout = () => {
+    updateProjectorLayout(
+      {
+        fontSizePercent: 100,
+        offsetX: 0,
+        offsetY: 24,
+      },
+      '投影版面已重設',
+    )
+  }
+
   const handleDownloadQrCode = async () => {
     if (!qrCodeUrl) return
     try {
@@ -1575,14 +1648,16 @@ const ControlPage = () => {
 
   const handleEndSession = async () => {
     if (!sessionId) return
-    const confirmed = window.confirm('結束場次後，檢視端亂碼網址會立即失效。要繼續嗎？')
+    const confirmed = window.confirm(
+      '結束場次後，檢視端與投影端網址都會立即失效。要繼續嗎？',
+    )
     if (!confirmed) return
     await performSessionMutation(
       () =>
         fetch(`/api/session/${sessionId}/end`, {
           method: 'POST',
         }),
-      { successMessage: '場次已結束，檢視端已失效' },
+      { successMessage: '場次已結束，檢視端與投影端已失效' },
     )
   }
 
@@ -1612,6 +1687,17 @@ const ControlPage = () => {
       : transcriptionBusy
         ? '請開始說話…'
         : '尚未啟動即時語音辨識'
+  const projectorPreviewText =
+    !displayEnabled
+      ? '字幕已遮蔽'
+      : currentLine?.type === 'direction'
+        ? '舞台指示不投影'
+        : currentLine?.text || '尚未載入字幕'
+  const projectorPreviewStyle = {
+    '--projector-preview-scale': projectorLayout.fontSizePercent / 100,
+    '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
+    '--projector-preview-top': `${50 + projectorLayout.offsetY * 0.9}%`,
+  }
 
   if (!authReady) {
     return (
@@ -1655,7 +1741,7 @@ const ControlPage = () => {
                   <h1>{sessionMeta?.title || '控制端'}</h1>
                   <p className="input-note">
                     {sessionMeta?.status === 'ended'
-                      ? '已結束場次，檢視端亂碼網址已失效'
+                      ? '已結束場次，檢視端與投影端網址已失效'
                       : '進行中場次'}
                   </p>
                 </div>
@@ -1699,6 +1785,65 @@ const ControlPage = () => {
                     </button>
                   </div>
                 )}
+              </div>
+
+              <div className="input-group">
+                <label>投影端網址</label>
+                <div className="viewer-link">
+                  <span>{projectorUrl || '尚未建立場次'}</span>
+                  <button type="button" onClick={handleCopyProjectorLink}>
+                    複製
+                  </button>
+                </div>
+                <div className="projector-link-actions">
+                  <button type="button" className="subtle-button" onClick={handleOpenProjectorWindow}>
+                    開啟投影頁
+                  </button>
+                  <button type="button" className="subtle-button" onClick={handleResetProjectorLayout}>
+                    重設版面
+                  </button>
+                </div>
+                <div className="projector-layout-card">
+                  <label className="range-control">
+                    <span>字體大小</span>
+                    <strong>{projectorLayout.fontSizePercent}%</strong>
+                    <input
+                      type="range"
+                      min="60"
+                      max="220"
+                      step="5"
+                      value={projectorLayout.fontSizePercent}
+                      onChange={handleProjectorSliderChange('fontSizePercent')}
+                    />
+                  </label>
+                  <label className="range-control">
+                    <span>左右位置</span>
+                    <strong>{projectorLayout.offsetX}</strong>
+                    <input
+                      type="range"
+                      min="-35"
+                      max="35"
+                      step="1"
+                      value={projectorLayout.offsetX}
+                      onChange={handleProjectorSliderChange('offsetX')}
+                    />
+                  </label>
+                  <label className="range-control">
+                    <span>上下位置</span>
+                    <strong>{projectorLayout.offsetY}</strong>
+                    <input
+                      type="range"
+                      min="-20"
+                      max="35"
+                      step="1"
+                      value={projectorLayout.offsetY}
+                      onChange={handleProjectorSliderChange('offsetY')}
+                    />
+                  </label>
+                </div>
+                <span className="input-note">
+                  請使用延伸桌面，將投影頁移到外接螢幕後切換全螢幕。
+                </span>
               </div>
             </header>
 
@@ -1843,7 +1988,7 @@ const ControlPage = () => {
                 className={`toggle-button ${displayEnabled ? 'active' : ''}`}
                 onClick={handleToggleDisplay}
               >
-                {displayEnabled ? '遮蔽檢視端字幕' : '重新顯示字幕'}
+                {displayEnabled ? '遮蔽檢視端 / 投影字幕' : '重新顯示外部字幕'}
               </button>
               <button
                 type="button"
@@ -1938,6 +2083,7 @@ const ControlPage = () => {
             </div>
 
             <div className="viewer-preview">
+              <label>投影預覽</label>
               <div
                 className={`viewer-preview-box ${
                   displayEnabled ? '' : 'viewer-muted'
@@ -1946,12 +2092,11 @@ const ControlPage = () => {
                 } ${
                   currentLineMusicActive ? 'viewer-music-preview' : ''
                 }`}
+                style={projectorPreviewStyle}
               >
-                {currentLine
-                  ? currentLine.type === 'direction'
-                    ? `【舞台指示】${currentLine.text || '—'}`
-                    : currentLine.text || '—'
-                  : '尚未載入字幕'}
+                <div className="viewer-preview-stage">
+                  <div className="viewer-preview-text">{projectorPreviewText}</div>
+                </div>
               </div>
               {currentLine?.role && (
                 <div className="viewer-preview-role">角色：{currentLine.role}</div>
@@ -1964,7 +2109,7 @@ const ControlPage = () => {
                 <br />
                 • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 還原
                 <br />
-                • 觀眾可在檢視端自己切換語言
+                • 觀眾可在檢視端自行切換語言與字級
               </div>
             </div>
 

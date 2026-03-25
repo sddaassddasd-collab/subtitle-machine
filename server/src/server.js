@@ -132,6 +132,12 @@ const defaultTranscriptionState = () => ({
   updatedAt: null,
 });
 
+const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
+  fontSizePercent: 100,
+  offsetX: 0,
+  offsetY: 24,
+});
+
 const placeholderRegex = /^[第]?[零〇一二三四五六七八九十百千\d]+[句行條話]$/i;
 
 const LINE_TYPES = {
@@ -350,6 +356,40 @@ function clampLineType(rawType) {
 
 function normalizeLineMusic(rawMusic) {
   return rawMusic === true;
+}
+
+function normalizeBoundedInteger(rawValue, fallback, min, max) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.round(parsed), min), max);
+}
+
+function normalizeProjectorLayout(rawLayout) {
+  const source =
+    rawLayout && typeof rawLayout === 'object'
+      ? rawLayout
+      : DEFAULT_PROJECTOR_LAYOUT;
+
+  return {
+    fontSizePercent: normalizeBoundedInteger(
+      source.fontSizePercent,
+      DEFAULT_PROJECTOR_LAYOUT.fontSizePercent,
+      60,
+      220,
+    ),
+    offsetX: normalizeBoundedInteger(
+      source.offsetX,
+      DEFAULT_PROJECTOR_LAYOUT.offsetX,
+      -35,
+      35,
+    ),
+    offsetY: normalizeBoundedInteger(
+      source.offsetY,
+      DEFAULT_PROJECTOR_LAYOUT.offsetY,
+      -20,
+      35,
+    ),
+  };
 }
 
 function isLineMarkedMusic(entry) {
@@ -907,6 +947,9 @@ function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
       reason,
     });
     io.to(`viewer:${sessionId}`).emit('viewer:expired', {
+      message: '本場次已失效',
+    });
+    io.to(`projector:${sessionId}`).emit('projector:expired', {
       message: '本場次已失效',
     });
     sessions.delete(sessionId);
@@ -1876,6 +1919,10 @@ function ensureSessionStructure(session) {
     typeof session.viewerToken === 'string' && session.viewerToken.trim()
       ? session.viewerToken.trim()
       : createOpaqueToken(18);
+  session.projectorToken =
+    typeof session.projectorToken === 'string' && session.projectorToken.trim()
+      ? session.projectorToken.trim()
+      : createOpaqueToken(18);
   session.createdAt = createdAt;
   session.updatedAt =
     Number.isFinite(session.updatedAt) && session.updatedAt > 0
@@ -1887,6 +1934,7 @@ function ensureSessionStructure(session) {
       ? session.endedAt
       : null;
   session.displayEnabled = session.displayEnabled !== false;
+  session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
 
   ensureSessionLanguages(session);
   const primaryLanguageId = getPrimaryLanguageId(session);
@@ -1924,11 +1972,13 @@ function createSessionRecord(ownerUserId) {
     id: generateId('session'),
     ownerUserId,
     viewerToken: createOpaqueToken(18),
+    projectorToken: createOpaqueToken(18),
     title: '',
     createdAt: now,
     updatedAt: now,
     status: 'active',
     displayEnabled: true,
+    projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
     languages: [createLanguageDefinition({}, 0)],
     selectedCellId: null,
     currentIndex: 0,
@@ -1943,11 +1993,13 @@ function serializeSessionForStorage(session) {
     ownerUserId: normalized.ownerUserId,
     title: normalized.title,
     viewerToken: normalized.viewerToken,
+    projectorToken: normalized.projectorToken,
     status: normalized.status,
     createdAt: normalized.createdAt,
     updatedAt: normalized.updatedAt,
     endedAt: normalized.endedAt,
     displayEnabled: normalized.displayEnabled,
+    projectorLayout: normalized.projectorLayout,
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
     languages: normalized.languages.map((language) => ({
@@ -4070,6 +4122,7 @@ function getSessionSummary(session) {
     id: normalized.id,
     title: normalized.title,
     viewerToken: normalized.viewerToken,
+    projectorToken: normalized.projectorToken,
     status: normalized.status,
     createdAt: normalized.createdAt,
     updatedAt: normalized.updatedAt,
@@ -4093,6 +4146,10 @@ function getControlPayload(session) {
     lines,
     currentIndex: normalized.currentIndex,
     displayEnabled: normalized.displayEnabled,
+    projector: {
+      token: normalized.projectorToken,
+      layout: normalized.projectorLayout,
+    },
     transcription: getPublicTranscriptionState(normalized),
     history: {
       canUndo: canUndoSession(normalized),
@@ -4101,7 +4158,7 @@ function getControlPayload(session) {
   };
 }
 
-function getViewerPayload(session) {
+function getSessionDisplayState(session) {
   const normalized = ensureSessionStructure(session);
   const lines = ensureSessionLines(normalized);
   if (normalized.currentIndex >= lines.length) {
@@ -4134,6 +4191,32 @@ function getViewerPayload(session) {
   const musicActive = isLineMarkedMusic(activeScriptLine);
   const musicText = musicActive ? '此處有音樂' : '';
 
+  return {
+    normalized,
+    activeScriptLine,
+    liveEntries,
+    liveLines,
+    liveText,
+    hasLiveText,
+    musicActive,
+    musicText,
+    transcription: getPublicTranscriptionState(normalized),
+  };
+}
+
+function getViewerPayload(session) {
+  const {
+    normalized,
+    activeScriptLine,
+    liveEntries,
+    liveLines,
+    liveText,
+    hasLiveText,
+    musicActive,
+    musicText,
+    transcription,
+  } = getSessionDisplayState(session);
+
   if (!normalized.displayEnabled) {
     return {
       sessionId: normalized.id,
@@ -4148,7 +4231,7 @@ function getViewerPayload(session) {
       musicText: '',
       displayEnabled: false,
       source: 'hidden',
-      transcription: getPublicTranscriptionState(normalized),
+      transcription,
     };
   }
 
@@ -4169,7 +4252,7 @@ function getViewerPayload(session) {
       musicText,
       displayEnabled: true,
       source: 'transcription',
-      transcription: getPublicTranscriptionState(normalized),
+      transcription,
     };
   }
 
@@ -4189,7 +4272,79 @@ function getViewerPayload(session) {
     musicText,
     displayEnabled: true,
     source: 'script',
-    transcription: getPublicTranscriptionState(normalized),
+    transcription,
+  };
+}
+
+function getProjectorPayload(session) {
+  const {
+    normalized,
+    activeScriptLine,
+    liveEntries,
+    liveLines,
+    liveText,
+    hasLiveText,
+    musicActive,
+    musicText,
+    transcription,
+  } = getSessionDisplayState(session);
+
+  if (!normalized.displayEnabled) {
+    return {
+      sessionId: normalized.id,
+      projectorToken: normalized.projectorToken,
+      status: normalized.status,
+      line: null,
+      text: '',
+      liveEntries: [],
+      liveLines: [],
+      musicActive: false,
+      musicText: '',
+      displayEnabled: false,
+      source: 'hidden',
+      layout: normalized.projectorLayout,
+      transcription,
+    };
+  }
+
+  if (hasLiveText) {
+    return {
+      sessionId: normalized.id,
+      projectorToken: normalized.projectorToken,
+      status: normalized.status,
+      line: {
+        text: liveLines[liveLines.length - 1] || liveText,
+        type: LINE_TYPES.DIALOGUE,
+      },
+      text: liveText,
+      liveEntries,
+      liveLines,
+      musicActive,
+      musicText,
+      displayEnabled: true,
+      source: 'transcription',
+      layout: normalized.projectorLayout,
+      transcription,
+    };
+  }
+
+  return {
+    sessionId: normalized.id,
+    projectorToken: normalized.projectorToken,
+    status: normalized.status,
+    line: toPublicLine(activeScriptLine),
+    text:
+      activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
+        ? ''
+        : activeScriptLine?.text || '',
+    liveEntries: [],
+    liveLines: [],
+    musicActive,
+    musicText,
+    displayEnabled: true,
+    source: 'script',
+    layout: normalized.projectorLayout,
+    transcription,
   };
 }
 
@@ -4218,6 +4373,15 @@ function getSessionByViewerToken(viewerToken) {
   return (
     Array.from(sessions.values()).find(
       (session) => session.viewerToken === viewerToken.trim(),
+    ) || null
+  );
+}
+
+function getSessionByProjectorToken(projectorToken) {
+  if (typeof projectorToken !== 'string' || !projectorToken.trim()) return null;
+  return (
+    Array.from(sessions.values()).find(
+      (session) => session.projectorToken === projectorToken.trim(),
     ) || null
   );
 }
@@ -4260,8 +4424,21 @@ function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
 
-  const payload = getViewerPayload(session);
-  io.to(`viewer:${sessionId}`).emit('viewer:update', payload);
+  io.to(`viewer:${sessionId}`).emit('viewer:update', getViewerPayload(session));
+  io.to(`projector:${sessionId}`).emit(
+    'projector:update',
+    getProjectorPayload(session),
+  );
+}
+
+function broadcastProjectorState(sessionId) {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  io.to(`projector:${sessionId}`).emit(
+    'projector:update',
+    getProjectorPayload(session),
+  );
 }
 
 async function parseScriptWithOpenAI(rawText, apiKey) {
@@ -4740,6 +4917,14 @@ app.get('/api/viewer/:viewerToken', (req, res) => {
   res.json(getViewerPayload(session));
 });
 
+app.get('/api/projector/:projectorToken', (req, res) => {
+  const session = getSessionByProjectorToken(req.params.projectorToken);
+  if (!session || session.status === 'ended') {
+    return res.status(410).json({ error: '場次不存在或已結束' });
+  }
+  res.json(getProjectorPayload(session));
+});
+
 app.post('/api/session/:sessionId/end', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
@@ -4756,6 +4941,9 @@ app.post('/api/session/:sessionId/end', requireAuth, (req, res) => {
   broadcastControlState(session.id);
   io.to(`viewer:${session.id}`).emit('viewer:expired', {
     message: '本場次已結束，檢視端已失效',
+  });
+  io.to(`projector:${session.id}`).emit('projector:expired', {
+    message: '本場次已結束，投影端已失效',
   });
 
   res.json(getControlPayload(session));
@@ -5474,7 +5662,7 @@ io.on('connection', (socket) => {
     return getOwnedSession(sessionId, socketUser.id);
   };
 
-  socket.on('join', ({ sessionId, role, viewerToken }) => {
+  socket.on('join', ({ sessionId, role, viewerToken, projectorToken }) => {
     if (role === 'viewer') {
       const viewerSession = viewerToken
         ? getSessionByViewerToken(viewerToken)
@@ -5487,6 +5675,21 @@ io.on('connection', (socket) => {
       }
       socket.join(`viewer:${viewerSession.id}`);
       broadcastViewerState(viewerSession.id);
+      return;
+    }
+
+    if (role === 'projector') {
+      const projectorSession = projectorToken
+        ? getSessionByProjectorToken(projectorToken)
+        : getSession(sessionId);
+      if (!projectorSession || projectorSession.status === 'ended') {
+        socket.emit('projector:expired', {
+          message: '場次不存在或已結束',
+        });
+        return;
+      }
+      socket.join(`projector:${projectorSession.id}`);
+      broadcastProjectorState(projectorSession.id);
       return;
     }
 
@@ -5678,6 +5881,20 @@ io.on('connection', (socket) => {
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
+  });
+
+  socket.on('updateProjectorLayout', ({ sessionId, layout }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    const nextLayout = normalizeProjectorLayout({
+      ...session.projectorLayout,
+      ...(layout && typeof layout === 'object' ? layout : {}),
+    });
+    session.projectorLayout = nextLayout;
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastProjectorState(sessionId);
   });
 
   socket.on('updateLine', ({ sessionId, index, text, type, music, languageId }) => {
