@@ -243,6 +243,20 @@ const AdminPage = () => {
                 <div className="info-panel compact">
                   <strong>有進行中的忘記密碼重設</strong>
                   <span>到期時間：{formatDateTime(account.passwordReset.expiresAt)}</span>
+                  <button
+                    type="button"
+                    className="subtle-button"
+                    onClick={() =>
+                      patchUser(
+                        account.id,
+                        { clearPasswordReset: true },
+                        `已清除 ${account.username} 的重設申請`,
+                      )
+                    }
+                    disabled={savingUserId === account.id}
+                  >
+                    清除申請
+                  </button>
                 </div>
               )}
 

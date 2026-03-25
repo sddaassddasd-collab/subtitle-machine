@@ -20,17 +20,68 @@ const {
 } = require('./persistence');
 
 const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const IS_PRODUCTION = NODE_ENV === 'production';
+const DEV_ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+const ALLOWED_ORIGINS = parseAllowedOrigins(
+  process.env.ALLOWED_ORIGINS,
+  IS_PRODUCTION ? [] : DEV_ALLOWED_ORIGINS,
+);
+const COOKIE_SECURE = normalizeBooleanEnv(
+  process.env.COOKIE_SECURE,
+  IS_PRODUCTION,
+);
+const COOKIE_SAME_SITE = normalizeSameSiteValue(
+  process.env.COOKIE_SAME_SITE,
+  'lax',
+);
+const TRUST_PROXY_SETTING = normalizeTrustProxySetting(
+  process.env.TRUST_PROXY,
+  IS_PRODUCTION ? 1 : false,
+);
+const rateLimitBuckets = new Map();
+let lastRateLimitSweepAt = 0;
+
+if (IS_PRODUCTION && ALLOWED_ORIGINS.size === 0) {
+  console.warn(
+    'ALLOWED_ORIGINS is empty in production; configure it before exposing this service publicly.',
+  );
+}
+
+if (COOKIE_SAME_SITE === 'none' && !COOKIE_SECURE) {
+  console.warn(
+    'COOKIE_SAME_SITE=none without COOKIE_SECURE=true is unsafe and may break modern browsers.',
+  );
+}
 
 const app = express();
+app.set('trust proxy', TRUST_PROXY_SETTING);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: (origin, callback) => {
+      callback(null, !origin || isOriginAllowed(origin));
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true,
   },
 });
 
-app.use(cors());
+app.use(appSecurityHeaders);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      callback(null, !origin || isOriginAllowed(origin));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  }),
+);
 app.use(express.json({ limit: '6mb' }));
 app.use(authMiddleware);
 
@@ -386,9 +437,146 @@ function normalizePassword(rawPassword) {
   return rawPassword.trim();
 }
 
-function normalizeResetCode(rawCode) {
-  if (typeof rawCode !== 'string') return '';
-  return rawCode.trim().toUpperCase();
+function normalizeBooleanEnv(rawValue, fallback = false) {
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function normalizeSameSiteValue(rawValue, fallback = 'lax') {
+  if (typeof rawValue !== 'string') return fallback;
+  const normalized = rawValue.trim().toLowerCase();
+  if (normalized === 'strict' || normalized === 'lax' || normalized === 'none') {
+    return normalized;
+  }
+  return fallback;
+}
+
+function parseAllowedOrigins(rawValue, fallbackOrigins = []) {
+  const providedOrigins =
+    typeof rawValue === 'string' && rawValue.trim()
+      ? rawValue
+          .split(',')
+          .map((origin) => origin.trim())
+          .filter(Boolean)
+      : [];
+  return new Set(providedOrigins.length > 0 ? providedOrigins : fallbackOrigins);
+}
+
+function normalizeTrustProxySetting(rawValue, fallback = false) {
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (['false', '0', 'off', 'no'].includes(normalized)) {
+    return false;
+  }
+  if (['true', '1', 'on', 'yes'].includes(normalized)) {
+    return true;
+  }
+  if (/^\d+$/.test(normalized)) {
+    return Number.parseInt(normalized, 10);
+  }
+
+  return rawValue.trim();
+}
+
+function isOriginAllowed(origin) {
+  if (typeof origin !== 'string' || !origin.trim()) {
+    return true;
+  }
+  return ALLOWED_ORIGINS.has(origin.trim());
+}
+
+function appSecurityHeaders(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+
+  if (IS_PRODUCTION) {
+    res.setHeader(
+      'Strict-Transport-Security',
+      'max-age=31536000; includeSubDomains',
+    );
+  }
+
+  next();
+}
+
+function sweepRateLimitBucketsIfNeeded() {
+  const now = Date.now();
+  if (now - lastRateLimitSweepAt < 60 * 1000) {
+    return;
+  }
+
+  lastRateLimitSweepAt = now;
+  Array.from(rateLimitBuckets.entries()).forEach(([bucketKey, bucket]) => {
+    if (!bucket || !Number.isFinite(bucket.resetAt) || bucket.resetAt <= now) {
+      rateLimitBuckets.delete(bucketKey);
+    }
+  });
+}
+
+function getRequestIp(req) {
+  return (
+    req.ip ||
+    req.headers['x-forwarded-for'] ||
+    req.socket?.remoteAddress ||
+    'unknown'
+  );
+}
+
+function createRateLimitMiddleware({
+  windowMs,
+  max,
+  message,
+  keyPrefix,
+  keyGenerator,
+}) {
+  return (req, res, next) => {
+    sweepRateLimitBucketsIfNeeded();
+    const now = Date.now();
+    const derivedKey =
+      typeof keyGenerator === 'function'
+        ? keyGenerator(req)
+        : getRequestIp(req);
+    const bucketKey = `${keyPrefix}:${derivedKey || 'unknown'}`;
+    const currentBucket = rateLimitBuckets.get(bucketKey);
+
+    if (!currentBucket || currentBucket.resetAt <= now) {
+      rateLimitBuckets.set(bucketKey, {
+        count: 1,
+        resetAt: now + windowMs,
+      });
+      return next();
+    }
+
+    if (currentBucket.count >= max) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((currentBucket.resetAt - now) / 1000),
+      );
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      return res.status(429).json({ error: message });
+    }
+
+    currentBucket.count += 1;
+    rateLimitBuckets.set(bucketKey, currentBucket);
+    return next();
+  };
 }
 
 function normalizeUserRole(rawRole, fallbackRole = USER_ROLES.VIEWER) {
@@ -429,8 +617,10 @@ function getPublicResetState(user) {
 
   return {
     requestedAt:
-      Number.isFinite(reset.createdAt) && reset.createdAt > 0
-        ? reset.createdAt
+      Number.isFinite(reset.requestedAt) && reset.requestedAt > 0
+        ? reset.requestedAt
+        : Number.isFinite(reset.createdAt) && reset.createdAt > 0
+          ? reset.createdAt
         : null,
     expiresAt: reset.expiresAt,
   };
@@ -603,8 +793,8 @@ function requireSessionManager(req, res, next) {
 function setAuthCookie(res, token) {
   res.cookie(AUTH_COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: false,
+    sameSite: COOKIE_SAME_SITE,
+    secure: COOKIE_SECURE,
     path: '/',
     maxAge: AUTH_TOKEN_TTL_MS,
   });
@@ -613,44 +803,25 @@ function setAuthCookie(res, token) {
 function clearAuthCookie(res) {
   res.clearCookie(AUTH_COOKIE_NAME, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: false,
+    sameSite: COOKIE_SAME_SITE,
+    secure: COOKIE_SECURE,
     path: '/',
   });
 }
 
-function generatePasswordResetCode() {
-  return createOpaqueToken(6).slice(0, 10).toUpperCase();
-}
-
-function issuePasswordResetCode(user) {
-  const code = generatePasswordResetCode();
+function requestPasswordReset(user) {
+  const now = Date.now();
   user.passwordReset = {
-    codeHash: hashToken(code),
-    createdAt: Date.now(),
-    expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
+    requestedAt: now,
+    expiresAt: now + PASSWORD_RESET_TTL_MS,
+    status: 'pending',
   };
-  return code;
+  return user.passwordReset;
 }
 
 function clearPasswordResetCode(user) {
   if (!user) return;
   user.passwordReset = null;
-}
-
-function verifyPasswordResetCode(user, code) {
-  const reset = user?.passwordReset;
-  if (
-    !reset ||
-    typeof reset !== 'object' ||
-    typeof reset.codeHash !== 'string' ||
-    !Number.isFinite(reset.expiresAt) ||
-    reset.expiresAt <= Date.now()
-  ) {
-    return false;
-  }
-
-  return hashToken(code) === reset.codeHash;
 }
 
 function createUserRecord({
@@ -4170,7 +4341,40 @@ function getOwnedSessionFromRequest(req, res) {
   return session;
 }
 
-app.post('/api/auth/register', (req, res) => {
+const registerRateLimit = createRateLimitMiddleware({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: '註冊嘗試過多，請稍後再試',
+  keyPrefix: 'auth:register',
+});
+
+const loginRateLimit = createRateLimitMiddleware({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: '登入嘗試過多，請稍後再試',
+  keyPrefix: 'auth:login',
+  keyGenerator: (req) =>
+    `${getRequestIp(req)}:${normalizeUsername(req.body?.username) || '*'}`,
+});
+
+const forgotPasswordRateLimit = createRateLimitMiddleware({
+  windowMs: 30 * 60 * 1000,
+  max: 5,
+  message: '忘記密碼申請過多，請稍後再試',
+  keyPrefix: 'auth:forgot',
+  keyGenerator: (req) =>
+    `${getRequestIp(req)}:${normalizeUsername(req.body?.username) || '*'}`,
+});
+
+const changePasswordRateLimit = createRateLimitMiddleware({
+  windowMs: 30 * 60 * 1000,
+  max: 8,
+  message: '修改密碼操作過多，請稍後再試',
+  keyPrefix: 'auth:change-password',
+  keyGenerator: (req) => `${getRequestIp(req)}:${req.authUser?.id || 'guest'}`,
+});
+
+app.post('/api/auth/register', registerRateLimit, (req, res) => {
   const username = normalizeDisplayName(req.body?.username);
   const usernameNormalized = normalizeUsername(req.body?.username);
   const password = normalizePassword(req.body?.password);
@@ -4201,7 +4405,7 @@ app.post('/api/auth/register', (req, res) => {
   res.json({ user: serializeUser(user) });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', loginRateLimit, (req, res) => {
   const usernameNormalized = normalizeUsername(req.body?.username);
   const password = normalizePassword(req.body?.password);
   const user = findUserByNormalizedUsername(usernameNormalized);
@@ -4220,7 +4424,11 @@ app.post('/api/auth/login', (req, res) => {
   res.json({ user: serializeUser(user) });
 });
 
-app.post('/api/auth/change-password', requireAuth, (req, res) => {
+app.post(
+  '/api/auth/change-password',
+  requireAuth,
+  changePasswordRateLimit,
+  (req, res) => {
   const currentPassword = normalizePassword(req.body?.currentPassword);
   const nextPassword = normalizePassword(req.body?.newPassword);
 
@@ -4240,57 +4448,32 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
   persistApplicationStore();
   setAuthCookie(res, token);
   res.json({ user: serializeUser(req.authUser) });
-});
+},
+);
 
-app.post('/api/auth/forgot-password/request', (req, res) => {
+app.post('/api/auth/forgot-password/request', forgotPasswordRateLimit, (req, res) => {
   const usernameNormalized = normalizeUsername(req.body?.username);
   const user = findUserByNormalizedUsername(usernameNormalized);
 
   if (!user || isUserDisabled(user)) {
     return res.json({
       ok: true,
-      message: '如果帳號存在，系統已產生重設資訊',
+      message: '如果帳號存在，系統已收到重設申請，請聯絡管理員協助',
     });
   }
 
-  const resetCode = issuePasswordResetCode(user);
+  requestPasswordReset(user);
   persistApplicationStore();
   return res.json({
     ok: true,
-    message: '已產生重設碼，請在有效時間內完成重設',
-    resetCode,
+    message: '如果帳號存在，系統已收到重設申請，請聯絡管理員協助',
     expiresAt: user.passwordReset?.expiresAt || null,
   });
 });
 
 app.post('/api/auth/forgot-password/reset', (req, res) => {
-  const usernameNormalized = normalizeUsername(req.body?.username);
-  const code = normalizeResetCode(req.body?.code);
-  const nextPassword = normalizePassword(req.body?.newPassword);
-  const user = findUserByNormalizedUsername(usernameNormalized);
-
-  if (!user || isUserDisabled(user)) {
-    return res.status(400).json({ error: '重設碼無效或已失效' });
-  }
-  if (nextPassword.length < 6) {
-    return res.status(400).json({ error: '新密碼至少需要 6 個字' });
-  }
-  if (!verifyPasswordResetCode(user, code)) {
-    return res.status(400).json({ error: '重設碼無效或已失效' });
-  }
-
-  user.passwordHash = createPasswordHash(nextPassword);
-  clearPasswordResetCode(user);
-  revokeUserAuthSessions(user.id);
-
-  const { token, record } = createAuthTokenRecord(user.id);
-  authSessions.set(record.tokenHash, record);
-  persistApplicationStore();
-  setAuthCookie(res, token);
-  res.json({
-    ok: true,
-    message: '密碼已重設並登入',
-    user: serializeUser(user),
+  res.status(410).json({
+    error: '此部署已停用前端重設碼流程，請聯絡管理員於後台重設密碼',
   });
 });
 
@@ -4330,6 +4513,7 @@ app.patch('/api/admin/users/:userId', requireAdmin, (req, res) => {
     req.body || {},
     'newPassword',
   );
+  const hasResetClear = req.body?.clearPasswordReset === true;
   const requestedRole = normalizeUserRole(req.body?.role, targetUser.role);
   const requestedDisabled =
     typeof req.body?.disabled === 'boolean'
@@ -4373,6 +4557,9 @@ app.patch('/api/admin/users/:userId', requireAdmin, (req, res) => {
     targetUser.passwordHash = createPasswordHash(nextPassword);
     clearPasswordResetCode(targetUser);
     revokeUserAuthSessions(targetUser.id);
+  }
+  if (hasResetClear) {
+    clearPasswordResetCode(targetUser);
   }
 
   persistApplicationStore();

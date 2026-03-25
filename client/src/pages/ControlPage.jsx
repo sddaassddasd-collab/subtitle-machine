@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
 
 const storageKeys = {
@@ -288,6 +289,7 @@ const ControlPage = () => {
     useState(null)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [qrCodeUrl, setQrCodeUrl] = useState('')
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
@@ -348,11 +350,35 @@ const ControlPage = () => {
     return `${window.location.origin}/viewer/${sessionMeta.viewerToken}`
   }, [sessionMeta?.viewerToken])
 
-  const qrCodeUrl = useMemo(() => {
-    if (!viewerUrl) return ''
-    return `https://api.qrserver.com/v1/create-qr-code/?size=512x512&format=png&data=${encodeURIComponent(
-      viewerUrl,
-    )}`
+  useEffect(() => {
+    let cancelled = false
+
+    const generateQrCode = async () => {
+      if (!viewerUrl) {
+        setQrCodeUrl('')
+        return
+      }
+
+      try {
+        const nextQrCodeUrl = await QRCode.toDataURL(viewerUrl, {
+          errorCorrectionLevel: 'M',
+          margin: 1,
+          width: 512,
+        })
+        if (!cancelled) {
+          setQrCodeUrl(nextQrCodeUrl)
+        }
+      } catch {
+        if (!cancelled) {
+          setQrCodeUrl('')
+        }
+      }
+    }
+
+    generateQrCode()
+    return () => {
+      cancelled = true
+    }
   }, [viewerUrl])
 
   const applySessionPayload = useCallback((payload) => {
@@ -1449,16 +1475,12 @@ const ControlPage = () => {
   const handleDownloadQrCode = async () => {
     if (!qrCodeUrl) return
     try {
-      const response = await fetch(qrCodeUrl)
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
-      link.href = url
+      link.href = qrCodeUrl
       link.download = `${sessionMeta?.title || 'viewer'}-qr.png`
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
-      URL.revokeObjectURL(url)
       setStatus({ kind: 'success', message: 'QR code 已下載' })
     } catch {
       window.open(qrCodeUrl, '_blank', 'noopener,noreferrer')

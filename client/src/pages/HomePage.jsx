@@ -5,7 +5,6 @@ const AUTH_MODES = {
   LOGIN: 'login',
   REGISTER: 'register',
   FORGOT: 'forgot',
-  RESET: 'reset',
 }
 
 const ROLE_LABELS = {
@@ -17,22 +16,11 @@ const ROLE_LABELS = {
 const emptyAuthForm = {
   username: '',
   password: '',
-  code: '',
-  newPassword: '',
 }
 
 const emptyPasswordForm = {
   currentPassword: '',
   newPassword: '',
-}
-
-function formatResetExpiresAt(expiresAt) {
-  if (!expiresAt) return '未知'
-  try {
-    return new Date(expiresAt).toLocaleString()
-  } catch {
-    return '未知'
-  }
 }
 
 const HomePage = () => {
@@ -50,7 +38,6 @@ const HomePage = () => {
   const [authNotice, setAuthNotice] = useState('')
   const [accountError, setAccountError] = useState('')
   const [accountNotice, setAccountNotice] = useState('')
-  const [resetPreview, setResetPreview] = useState(null)
 
   const loadSessions = async () => {
     const response = await fetch('/api/sessions')
@@ -140,7 +127,6 @@ const HomePage = () => {
 
       await syncUserState(data.user || null)
       setAuthForm(emptyAuthForm)
-      setResetPreview(null)
     } catch (authSubmitError) {
       setAuthError(authSubmitError.message || '登入失敗')
     } finally {
@@ -166,54 +152,12 @@ const HomePage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '無法產生重設碼')
+        throw new Error(data.error || '無法送出申請')
       }
 
-      setResetPreview({
-        code: data.resetCode || '',
-        expiresAt: data.expiresAt || null,
-      })
-      setAuthNotice(data.message || '已產生重設碼')
-      setAuthForm((prev) => ({
-        ...prev,
-        code: data.resetCode || prev.code,
-      }))
-      setMode(AUTH_MODES.RESET)
+      setAuthNotice(data.message || '已送出申請')
     } catch (forgotError) {
-      setAuthError(forgotError.message || '無法產生重設碼')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  const handlePasswordReset = async (event) => {
-    event.preventDefault()
-    setAuthError('')
-    setAuthNotice('')
-    setSubmitting(true)
-
-    try {
-      const response = await fetch('/api/auth/forgot-password/reset', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username: authForm.username,
-          code: authForm.code,
-          newPassword: authForm.newPassword,
-        }),
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        throw new Error(data.error || '密碼重設失敗')
-      }
-
-      await syncUserState(data.user || null)
-      setAuthForm(emptyAuthForm)
-      setResetPreview(null)
-    } catch (resetError) {
-      setAuthError(resetError.message || '密碼重設失敗')
+      setAuthError(forgotError.message || '無法送出申請')
     } finally {
       setSubmitting(false)
     }
@@ -230,7 +174,6 @@ const HomePage = () => {
       setAuthForm(emptyAuthForm)
       setPasswordForm(emptyPasswordForm)
       setMode(AUTH_MODES.LOGIN)
-      setResetPreview(null)
       setAuthError('')
       setAuthNotice('')
       setAccountError('')
@@ -341,13 +284,6 @@ const HomePage = () => {
               >
                 忘記密碼
               </button>
-              <button
-                type="button"
-                className={mode === AUTH_MODES.RESET ? 'active' : ''}
-                onClick={() => handleModeChange(AUTH_MODES.RESET)}
-              >
-                重設密碼
-              </button>
             </div>
 
             {(mode === AUTH_MODES.LOGIN || mode === AUTH_MODES.REGISTER) && (
@@ -394,57 +330,16 @@ const HomePage = () => {
                   onChange={(event) =>
                     setAuthForm((prev) => ({ ...prev, username: event.target.value }))
                   }
-                  placeholder="輸入帳號以取得重設碼"
+                  placeholder="輸入帳號以送出重設申請"
                 />
+                <div className="info-panel compact">
+                  <strong>送出後不會直接顯示重設碼</strong>
+                  <span>管理員會在後台看到申請並協助你重設密碼。</span>
+                </div>
                 <button type="submit" disabled={submitting}>
-                  {submitting ? '產生中…' : '取得重設碼'}
+                  {submitting ? '送出中…' : '送出重設申請'}
                 </button>
               </form>
-            )}
-
-            {mode === AUTH_MODES.RESET && (
-              <form className="auth-form" onSubmit={handlePasswordReset}>
-                <label htmlFor="reset-username">帳號</label>
-                <input
-                  id="reset-username"
-                  type="text"
-                  value={authForm.username}
-                  onChange={(event) =>
-                    setAuthForm((prev) => ({ ...prev, username: event.target.value }))
-                  }
-                  placeholder="輸入帳號"
-                />
-                <label htmlFor="reset-code">重設碼</label>
-                <input
-                  id="reset-code"
-                  type="text"
-                  value={authForm.code}
-                  onChange={(event) =>
-                    setAuthForm((prev) => ({ ...prev, code: event.target.value }))
-                  }
-                  placeholder="輸入重設碼"
-                />
-                <label htmlFor="reset-password">新密碼</label>
-                <input
-                  id="reset-password"
-                  type="password"
-                  value={authForm.newPassword}
-                  onChange={(event) =>
-                    setAuthForm((prev) => ({ ...prev, newPassword: event.target.value }))
-                  }
-                  placeholder="輸入新密碼"
-                />
-                <button type="submit" disabled={submitting}>
-                  {submitting ? '重設中…' : '重設並登入'}
-                </button>
-              </form>
-            )}
-
-            {resetPreview?.code && (
-              <div className="info-panel">
-                <strong>本次重設碼：{resetPreview.code}</strong>
-                <span>有效時間到：{formatResetExpiresAt(resetPreview.expiresAt)}</span>
-              </div>
             )}
             {authNotice && <div className="status-success">{authNotice}</div>}
             {authError && <div className="status-error">{authError}</div>}

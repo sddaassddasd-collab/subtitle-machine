@@ -112,6 +112,17 @@ client/  Vite + React 控制端/檢視端前端
 
 ## 其他注意事項
 
-- 後端以記憶體儲存字幕狀態，若伺服器重啟需重新貼上劇本文字並解析。
+- 後端目前會把帳號、登入 session 與字幕場次資料存到 SQLite。預設資料庫位置不在 repo 內，而是在系統使用者資料夾：
+  - macOS：`~/Library/Application Support/subtitle-machine/app-store.sqlite`
+  - Linux：`~/.local/share/subtitle-machine/app-store.sqlite`
+  - Windows：`%APPDATA%/subtitle-machine/app-store.sqlite`
+- 可用 `SUBTITLE_MACHINE_DATA_DIR` 指定自訂資料夾；伺服器啟動時若偵測到舊的 `server/data/app-store.json`，會自動搬遷到 SQLite，並把舊 JSON 備份到新的資料目錄後刪除原檔。
+- 控制端的 QR code 現在改為本地產生，不會再把 viewer 亂碼網址送到第三方 QR 服務。
+- 忘記密碼流程已改成「送出申請，請管理員於後台協助重設」，前台不再直接取得重設碼。
+- 若要部署到正式環境，至少應設定：
+  - `ALLOWED_ORIGINS=https://你的網域`
+  - `COOKIE_SECURE=true`
+  - `COOKIE_SAME_SITE=lax`（若前後端真的跨站，才考慮 `none`，且必須同時開 `COOKIE_SECURE=true`）
+  - `TRUST_PROXY=1`（若前面有 Nginx / reverse proxy / platform proxy）
 - 為避免洩漏，控制端不會在伺服器保存 OpenAI Key；需於控制端畫面手動輸入。
 - 若需要部署到雲端，請確保 3000 連接埠（或自訂）對控制端與檢視端裝置開放，並可依需求設定 HTTPS。
