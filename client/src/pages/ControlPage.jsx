@@ -1444,6 +1444,38 @@ const ControlPage = () => {
     setStatus({ kind: 'success', message: '字幕 JSON 已匯出' })
   }
 
+  const handleExportSessionBackup = async () => {
+    if (!sessionId) return
+
+    try {
+      const response = await fetch(`/api/session/${sessionId}/backup`)
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '匯出場次備份失敗')
+      }
+
+      const payload = JSON.stringify(data, null, 2)
+      const blob = new Blob([payload], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      const filenameBase = (sessionMeta?.title || sessionId || 'session')
+        .replace(/[<>:"/\\|?*]+/g, '-')
+        .trim()
+      link.href = url
+      link.download = `${filenameBase}.session-backup.json`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      setStatus({ kind: 'success', message: '場次備份 JSON 已匯出' })
+    } catch (error) {
+      setStatus({
+        kind: 'error',
+        message: error.message || '匯出場次備份失敗',
+      })
+    }
+  }
+
   const handleParsePrimaryScript = async (event) => {
     event.preventDefault()
     if (!sessionId || !selectedCellId) return
@@ -2022,13 +2054,13 @@ const ControlPage = () => {
             ))}
 
             <div className="input-group">
-              <label>字幕 JSON 匯入 / 匯出</label>
+              <label>目前儲存格字幕 JSON 匯入 / 匯出</label>
               <div className="json-actions">
                 <button type="button" onClick={() => jsonInputRef.current?.click()}>
-                  匯入 JSON
+                  匯入目前儲存格 JSON
                 </button>
                 <button type="button" onClick={handleExportJson}>
-                  匯出 JSON
+                  匯出目前儲存格 JSON
                 </button>
                 <input
                   ref={jsonInputRef}
@@ -2038,6 +2070,21 @@ const ControlPage = () => {
                   onChange={handleImportJson}
                 />
               </div>
+              <span className="input-note">
+                這裡只會處理目前選取儲存格的字幕內容，不包含整個場次設定。
+              </span>
+            </div>
+
+            <div className="input-group">
+              <label>場次備份 JSON</label>
+              <div className="json-actions">
+                <button type="button" onClick={handleExportSessionBackup}>
+                  匯出場次備份 JSON
+                </button>
+              </div>
+              <span className="input-note">
+                會匯出整個場次的語言、所有儲存格、字幕內容、投影設定與原本場次 ID，可到首頁再匯入還原。
+              </span>
             </div>
 
             <div className="control-actions">

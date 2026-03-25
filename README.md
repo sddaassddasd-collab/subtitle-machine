@@ -40,6 +40,8 @@ client/  Vite + React 控制端/檢視端前端
 4. 拆解完成後，右側會顯示完整字幕清單，可直接編輯（contentEditable）。單擊某一句或使用鍵盤方向鍵 `↑` / `↓` 會切換外部字幕；雙擊文字本身可直接進入編輯，不會再把畫面捲走。
 5. 角色資訊會保留在字幕資料裡，是否以顏色區分角色改由控制端切換，檢視端與投影端會同步套用。
 6. 需要暫時關閉觀眾字幕時，點「遮蔽檢視端字幕」即可讓檢視端畫面變成空白，但控制端仍可瀏覽全文、以 `Command + F` 搜尋並點擊跳轉。
+7. 若要手動備份場次，可在控制端使用「匯出場次備份 JSON」；備份會保留原本 `sessionId`、viewer/projector token、語言、所有儲存格與字幕內容。
+8. 若要還原備份，可回到首頁，使用「匯入場次備份 JSON」；若備份中的 `sessionId` 已存在，系統會拒絕匯入，避免悄悄改號。
 
 ## 檢視端連線方式
 
@@ -119,6 +121,7 @@ client/  Vite + React 控制端/檢視端前端
   - 若未設定 `DATABASE_URL`，才 fallback 到本機 SQLite
 - 首頁目前採用單一共用密碼入口；若未設定環境變數，預設密碼為 `20141017`。可用 `SUBTITLE_MACHINE_ACCESS_PASSWORD` 覆寫。
 - Render 部署建議直接綁定 Render Postgres，平台會自動提供 `DATABASE_URL`，此時帳號、登入 session 與字幕場次資料都會寫進 Postgres，不會因 redeploy 消失。
+- 若你使用 Render 免費 Web Service，又不打算加購 Persistent Disk / Postgres，請把「場次備份 JSON 匯出 / 匯入」當成正式備份流程；免費環境的本機檔案系統不適合長期保存字幕資料。
 - SQLite fallback 模式的預設資料庫位置不在 repo 內，而是在系統使用者資料夾：
   - macOS：`~/Library/Application Support/subtitle-machine/app-store.sqlite`
   - Linux：`~/.local/share/subtitle-machine/app-store.sqlite`

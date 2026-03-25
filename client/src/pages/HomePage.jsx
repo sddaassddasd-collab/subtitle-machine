@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 const HomePage = () => {
   const navigate = useNavigate()
+  const backupInputRef = useRef(null)
   const [password, setPassword] = useState('')
   const [user, setUser] = useState(null)
   const [sessions, setSessions] = useState([])
   const [authLoading, setAuthLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -135,6 +137,47 @@ const HomePage = () => {
     }
   }
 
+  const handleImportSessionBackup = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setImporting(true)
+    setError('')
+    setNotice('')
+
+    try {
+      const content = await file.text()
+      const parsed = JSON.parse(content)
+      const response = await fetch('/api/session/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(parsed),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '匯入場次備份失敗')
+      }
+
+      const nextSessionId = data?.sessionId || data?.session?.id
+      if (!nextSessionId) {
+        throw new Error('匯入完成，但無法取得場次 ID')
+      }
+
+      await loadSessions()
+      setNotice(`場次備份已匯入：${nextSessionId}`)
+      navigate(`/control?session=${encodeURIComponent(nextSessionId)}`)
+    } catch (importError) {
+      setError(importError.message || '匯入場次備份失敗')
+    } finally {
+      setImporting(false)
+      if (backupInputRef.current) {
+        backupInputRef.current.value = ''
+      }
+    }
+  }
+
   if (authLoading) {
     return (
       <div className="page">
@@ -196,6 +239,32 @@ const HomePage = () => {
             >
               離開系統
             </button>
+          </div>
+        </section>
+
+        <section className="dashboard-settings-card">
+          <div>
+            <h2>場次備份</h2>
+            <p>
+              若要在 Render 免費版重部署後保留字幕，可先從控制端匯出場次備份 JSON，再從這裡手動匯入。
+            </p>
+          </div>
+          <div className="dashboard-actions">
+            <button
+              type="button"
+              className="subtle-button"
+              onClick={() => backupInputRef.current?.click()}
+              disabled={importing}
+            >
+              {importing ? '匯入中…' : '匯入場次備份 JSON'}
+            </button>
+            <input
+              ref={backupInputRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={handleImportSessionBackup}
+            />
           </div>
         </section>
 

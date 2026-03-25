@@ -123,6 +123,8 @@ const SHARED_ACCESS_USERNAME = '控制端';
 const SHARED_ACCESS_COOKIE_VALUE = hashToken(
   `shared-access:${SHARED_ACCESS_PASSWORD}`,
 );
+const SESSION_BACKUP_KIND = 'subtitle-machine-session-backup';
+const SESSION_BACKUP_VERSION = 1;
 
 const defaultTranscriptionState = () => ({
   active: false,
@@ -2119,6 +2121,100 @@ function serializeSessionForStorage(session) {
       lines: cell.lines,
     })),
   };
+}
+
+function buildSessionBackupPayload(session) {
+  const normalized = ensureSessionStructure(session);
+  return {
+    kind: SESSION_BACKUP_KIND,
+    version: SESSION_BACKUP_VERSION,
+    exportedAt: Date.now(),
+    session: serializeSessionForStorage(normalized),
+  };
+}
+
+function getSessionBackupSource(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('備份檔格式錯誤');
+  }
+
+  if (
+    payload.kind === SESSION_BACKUP_KIND &&
+    payload.session &&
+    typeof payload.session === 'object' &&
+    !Array.isArray(payload.session)
+  ) {
+    return payload.session;
+  }
+
+  if (
+    payload.session &&
+    typeof payload.session === 'object' &&
+    !Array.isArray(payload.session)
+  ) {
+    return payload.session;
+  }
+
+  if (Array.isArray(payload.cells)) {
+    return payload;
+  }
+
+  throw new Error('備份檔內沒有可還原的場次資料');
+}
+
+function resolveImportedSessionOwnerUserId(rawOwnerUserId, authUser) {
+  const normalizedOwnerUserId =
+    typeof rawOwnerUserId === 'string' && rawOwnerUserId.trim()
+      ? rawOwnerUserId.trim()
+      : '';
+
+  if (!authUser) {
+    return normalizedOwnerUserId;
+  }
+
+  if (isSharedAccessUser(authUser)) {
+    return normalizedOwnerUserId || authUser.id;
+  }
+
+  return authUser.id;
+}
+
+function createImportedSessionFromBackup(payload, authUser) {
+  const rawSession = JSON.parse(JSON.stringify(getSessionBackupSource(payload)));
+  if (
+    typeof rawSession.id !== 'string' ||
+    rawSession.id.trim().length === 0
+  ) {
+    throw new Error('備份檔缺少場次 ID，無法保留原本場次');
+  }
+
+  rawSession.ownerUserId = resolveImportedSessionOwnerUserId(
+    rawSession.ownerUserId,
+    authUser,
+  );
+
+  const session = ensureSessionStructure(rawSession);
+  session.history = { past: [], future: [] };
+  session.transcription = defaultTranscriptionState();
+  syncSelectedCellLines(session);
+
+  return session;
+}
+
+function validateImportedSessionConflict(session) {
+  if (sessions.has(session.id)) {
+    throw new Error('相同場次 ID 已存在，無法匯入此備份');
+  }
+
+  const viewerTokenSession = getSessionByViewerToken(session.viewerToken);
+  if (viewerTokenSession) {
+    throw new Error('viewer 連結已被其他場次使用，無法還原此備份');
+  }
+
+  const projectorTokenSession = getSessionByProjectorToken(session.projectorToken);
+  if (projectorTokenSession) {
+    throw new Error('projector 連結已被其他場次使用，無法還原此備份');
+  }
 }
 
 function hydrateApplicationStore(persistedStore) {
@@ -5053,10 +5149,30 @@ app.post('/api/session', requireSessionManager, (req, res) => {
   res.json(getControlPayload(session));
 });
 
+app.post('/api/session/import', requireSessionManager, (req, res) => {
+  try {
+    const session = createImportedSessionFromBackup(req.body, req.authUser);
+    validateImportedSessionConflict(session);
+    sessions.set(session.id, session);
+    persistSession(session);
+    res.status(201).json(getControlPayload(session));
+  } catch (error) {
+    res.status(400).json({
+      error: error?.message || '匯入場次備份失敗',
+    });
+  }
+});
+
 app.get('/api/session/:sessionId', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
   res.json(getControlPayload(session));
+});
+
+app.get('/api/session/:sessionId/backup', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  res.json(buildSessionBackupPayload(session));
 });
 
 app.get('/api/session/:sessionId/viewer', requireAuth, (req, res) => {
