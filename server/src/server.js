@@ -138,7 +138,12 @@ const LINE_TYPES = {
   DIRECTION: 'direction',
 };
 
-const MAX_LINE_LENGTH = 20;
+const MAX_LINE_WIDTH_UNITS = 20;
+const MAX_LINE_BREAK_OVERSHOOT = 1.5;
+const FULL_WIDTH_SUBTITLE_CHAR_PATTERN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6]/u;
+const SUBTITLE_BREAK_WHITESPACE_PATTERN = /[\s\u3000]/u;
+const SUBTITLE_BREAK_PUNCTUATION_PATTERN = /[，,、；;。．.!！？?：:…]/u;
 const DEFAULT_SESSION_ID = 'default';
 const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
@@ -1462,7 +1467,27 @@ function expandStageDirectionSegments(entry) {
   return segments;
 }
 
-function enforceLineLengths(entries, limit = MAX_LINE_LENGTH) {
+function getSubtitleCharWidth(char) {
+  if (!char) return 0;
+  if (SUBTITLE_BREAK_WHITESPACE_PATTERN.test(char)) {
+    return 0.25;
+  }
+  return FULL_WIDTH_SUBTITLE_CHAR_PATTERN.test(char) ? 1 : 0.5;
+}
+
+function measureSubtitleTextWidth(text) {
+  if (typeof text !== 'string') {
+    text = text == null ? '' : String(text);
+  }
+
+  let width = 0;
+  for (const char of text) {
+    width += getSubtitleCharWidth(char);
+  }
+  return width;
+}
+
+function enforceLineLengths(entries, limit = MAX_LINE_WIDTH_UNITS) {
   const result = [];
 
   entries.forEach((entry) => {
@@ -1470,7 +1495,7 @@ function enforceLineLengths(entries, limit = MAX_LINE_LENGTH) {
 
     if (
       entry.type === LINE_TYPES.DIRECTION ||
-      entry.text.length <= limit
+      measureSubtitleTextWidth(entry.text) <= limit
     ) {
       result.push(entry);
       return;
@@ -1499,7 +1524,7 @@ function enforceLineLengths(entries, limit = MAX_LINE_LENGTH) {
   return result;
 }
 
-function chunkDialogueText(text, limit = MAX_LINE_LENGTH) {
+function chunkDialogueText(text, limit = MAX_LINE_WIDTH_UNITS) {
   const sentences =
     text.match(/[^。！？!?；;，,、]+[。！？!?；;，,、]?/gu) || [text];
   const chunks = [];
@@ -1508,7 +1533,7 @@ function chunkDialogueText(text, limit = MAX_LINE_LENGTH) {
     let remaining = sanitizeLineText(sentence);
     if (!remaining) return;
 
-    while (remaining.length > limit) {
+    while (measureSubtitleTextWidth(remaining) > limit) {
       const cut = findBreakPosition(remaining, limit);
       if (cut >= remaining.length) {
         break;
@@ -1530,23 +1555,71 @@ function chunkDialogueText(text, limit = MAX_LINE_LENGTH) {
 }
 
 function findBreakPosition(text, limit) {
-  if (text.length <= limit) {
+  if (measureSubtitleTextWidth(text) <= limit) {
     return text.length;
   }
 
-  for (let i = Math.min(limit, text.length - 1); i >= 1; i -= 1) {
-    if (/[ \u3000]/.test(text[i - 1])) {
-      return i;
+  let width = 0;
+  let offset = 0;
+  let lastWhitespaceCut = 0;
+  let lastPunctuationCut = 0;
+  let overflowWhitespaceCut = 0;
+  let overflowPunctuationCut = 0;
+  let hardCut = text.length;
+  let exceededLimit = false;
+
+  for (const char of text) {
+    const charWidth = getSubtitleCharWidth(char);
+    const nextOffset = offset + char.length;
+    width += charWidth;
+
+    if (SUBTITLE_BREAK_WHITESPACE_PATTERN.test(char)) {
+      if (!exceededLimit) {
+        lastWhitespaceCut = nextOffset;
+      } else if (!overflowWhitespaceCut) {
+        overflowWhitespaceCut = nextOffset;
+      }
+    } else if (SUBTITLE_BREAK_PUNCTUATION_PATTERN.test(char)) {
+      if (!exceededLimit) {
+        lastPunctuationCut = nextOffset;
+      } else if (!overflowPunctuationCut) {
+        overflowPunctuationCut = nextOffset;
+      }
     }
+
+    if (!exceededLimit && width > limit) {
+      exceededLimit = true;
+      hardCut = Math.max(offset, char.length);
+      if (lastWhitespaceCut > 0) {
+        return lastWhitespaceCut;
+      }
+      if (lastPunctuationCut > 0) {
+        return lastPunctuationCut;
+      }
+    }
+
+    if (exceededLimit) {
+      if (overflowWhitespaceCut > 0) {
+        return overflowWhitespaceCut;
+      }
+      if (overflowPunctuationCut > 0) {
+        return overflowPunctuationCut;
+      }
+      if (width > limit + MAX_LINE_BREAK_OVERSHOOT) {
+        return hardCut;
+      }
+    }
+
+    offset = nextOffset;
   }
 
-  for (let i = limit; i > Math.max(limit - 5, 1); i -= 1) {
-    if (/[，,、；;…]/.test(text[i - 1])) {
-      return i;
-    }
+  if (overflowWhitespaceCut > 0) {
+    return overflowWhitespaceCut;
   }
-
-  return text.length;
+  if (overflowPunctuationCut > 0) {
+    return overflowPunctuationCut;
+  }
+  return hardCut;
 }
 
 function ensureSessionLines(session) {
@@ -2055,7 +2128,12 @@ async function parseChunk({
 請保持原始順序與文字，不新增或刪除任何內容，也不要重複前面處理過的段落。
 如果能明確辨識台詞說話角色，請填入 role；若無法確定就填 null。
 若原文是「角色：台詞」，請把角色放進 role，text 只保留實際台詞。
-若文字過長，請以保留語意為優先，盡量在空格處切開，確保每段不超過 20 個中文字。
+若文字過長，請以保留語意為優先切段。
+每段請控制在不超過 ${MAX_LINE_WIDTH_UNITS} 個全形字寬單位：
+- 中文、日文、韓文與全形標點大約算 1 單位
+- 英文字母、數字與半形標點大約算 0.5 單位
+- 空白更少
+英文或其他拉丁語系請優先在單字邊界切開，不要為了湊長度把單字切碎。
 內容如下：
 ${chunkText}
       `.trim(),
