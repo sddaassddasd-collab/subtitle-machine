@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
-
-const DEFAULT_SESSION_ID = 'default'
 
 const normalizeViewerPayload = (payload) => {
   const enabled =
@@ -14,13 +12,19 @@ const normalizeViewerPayload = (payload) => {
   const nextLine =
     lineCandidate && typeof lineCandidate === 'object'
       ? {
-          text: lineCandidate.text || '',
+          text: typeof lineCandidate.text === 'string' ? lineCandidate.text : '',
           type:
             lineCandidate.type === 'direction' ? 'direction' : 'dialogue',
+          role:
+            typeof lineCandidate.role === 'string' && lineCandidate.role.trim()
+              ? lineCandidate.role.trim()
+              : null,
+          translations:
+            lineCandidate.translations && typeof lineCandidate.translations === 'object'
+              ? lineCandidate.translations
+              : {},
         }
-      : typeof payload?.text === 'string'
-        ? { text: payload.text, type: 'dialogue' }
-        : null
+      : null
 
   const transcription = payload?.transcription || {}
   const transcriptionIsFinal = transcription.isFinal !== false
@@ -58,17 +62,41 @@ const normalizeViewerPayload = (payload) => {
     musicActive,
     musicText,
     source,
+    languages: Array.isArray(payload?.languages) ? payload.languages : [],
     transcriptionIsFinal,
   }
 }
 
+const resolveLineText = (line, languageId) => {
+  if (!line) return ''
+  if (
+    languageId &&
+    line.translations &&
+    typeof line.translations[languageId] === 'string' &&
+    line.translations[languageId].trim().length > 0
+  ) {
+    return line.translations[languageId]
+  }
+  return line.text || ''
+}
+
+const roleToColor = (role) => {
+  if (!role) return ''
+  let hash = 0
+  for (let index = 0; index < role.length; index += 1) {
+    hash = (hash * 31 + role.charCodeAt(index)) % 360
+  }
+  return `hsl(${hash}deg 90% 76%)`
+}
+
 const ViewerPage = () => {
+  const { viewerToken } = useParams()
   const location = useLocation()
   const query = useMemo(
     () => new URLSearchParams(location.search),
     [location.search],
   )
-  const sessionId = query.get('session') || DEFAULT_SESSION_ID
+  const resolvedViewerToken = viewerToken || query.get('viewer') || ''
 
   const [line, setLine] = useState(null)
   const [liveEntries, setLiveEntries] = useState([])
@@ -78,20 +106,26 @@ const ViewerPage = () => {
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
+  const [languages, setLanguages] = useState([])
+  const [selectedLanguageId, setSelectedLanguageId] = useState('primary')
+  const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const liveFeedRef = useRef(null)
 
   useEffect(() => {
-    if (!sessionId) return
+    if (!resolvedViewerToken) {
+      setError('缺少檢視端連結')
+      return
+    }
 
     let cancelled = false
     const fetchInitialState = async () => {
       try {
-        const response = await fetch(`/api/session/${sessionId}/viewer`)
+        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
         if (!response.ok) {
-          throw new Error('場次不存在或已關閉')
+          throw new Error('場次不存在或已結束')
         }
         const data = await response.json()
         if (!cancelled) {
@@ -103,11 +137,12 @@ const ViewerPage = () => {
           setMusicActive(next.musicActive)
           setMusicText(next.musicText)
           setLineSource(next.source)
+          setLanguages(next.languages)
           setTranscriptionIsFinal(next.transcriptionIsFinal)
         }
-      } catch (err) {
+      } catch (fetchError) {
         if (!cancelled) {
-          setError(err.message || '無法載入字幕')
+          setError(fetchError.message || '無法載入字幕')
         }
       }
     }
@@ -116,14 +151,14 @@ const ViewerPage = () => {
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [resolvedViewerToken])
 
   useEffect(() => {
-    if (!sessionId) return
+    if (!resolvedViewerToken) return
 
     const socket = io()
+    socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
 
-    socket.emit('join', { sessionId, role: 'viewer' })
     socket.on('viewer:update', (payload) => {
       const next = normalizeViewerPayload(payload)
       setDisplayEnabled(next.enabled)
@@ -133,32 +168,29 @@ const ViewerPage = () => {
       setMusicActive(next.musicActive)
       setMusicText(next.musicText)
       setLineSource(next.source)
+      setLanguages(next.languages)
       setTranscriptionIsFinal(next.transcriptionIsFinal)
+      setError('')
+    })
+
+    socket.on('viewer:expired', (payload) => {
+      setError(
+        typeof payload?.message === 'string'
+          ? payload.message
+          : '本場次已結束',
+      )
     })
 
     return () => {
       socket.disconnect()
     }
-  }, [sessionId])
+  }, [resolvedViewerToken])
 
   useEffect(() => {
-    if (typeof document === 'undefined') {
-      return
-    }
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        window.location.reload()
-      }
-    }
-
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () =>
-      document.removeEventListener(
-        'visibilitychange',
-        handleVisibilityChange,
-      )
-  }, [])
+    if (!languages.length) return
+    if (languages.some((language) => language.id === selectedLanguageId)) return
+    setSelectedLanguageId(languages[0]?.id || 'primary')
+  }, [languages, selectedLanguageId])
 
   useEffect(() => {
     if (lineSource !== 'transcription') return
@@ -206,7 +238,7 @@ const ViewerPage = () => {
       element.msRequestFullscreen
     if (method) {
       const result = method.call(element)
-      if (result && result.catch) {
+      if (result?.catch) {
         result.catch(() => {})
       }
       return result || Promise.resolve()
@@ -222,7 +254,7 @@ const ViewerPage = () => {
       document.msExitFullscreen
     if (exitMethod) {
       const result = exitMethod.call(document)
-      if (result && result.catch) {
+      if (result?.catch) {
         result.catch(() => {})
       }
       return result || Promise.resolve()
@@ -246,6 +278,7 @@ const ViewerPage = () => {
       exitFullscreen().catch(() => {})
     }
   }
+
   if (error) {
     return (
       <div className="viewer-page">
@@ -257,20 +290,21 @@ const ViewerPage = () => {
     )
   }
 
-  const isStageDirection =
-    displayEnabled && line && line.type === 'direction'
+  const isStageDirection = displayEnabled && line && line.type === 'direction'
+  const displayText = displayEnabled
+    ? isStageDirection
+      ? '\u00a0'
+      : resolveLineText(line, selectedLanguageId)
+    : '字幕暫停中'
+
   const textClass = `viewer-text${
     displayEnabled ? '' : ' viewer-muted'
   }${isStageDirection ? ' viewer-direction' : ''}${
     lineSource === 'transcription' ? ' viewer-live' : ''
   }`
-  const displayText = displayEnabled
-    ? isStageDirection
-      ? '\u00a0'
-      : line?.text || ''
-    : '字幕暫停中'
-  const latestLiveLine =
-    liveLines.length > 0 ? liveLines[liveLines.length - 1] : ''
+
+  const roleColor =
+    roleColorEnabled && !isStageDirection ? roleToColor(line?.role) : ''
   const liveFeedClassName = `viewer-live-feed${
     musicActive ? ' with-music-banner' : ''
   }`
@@ -285,6 +319,34 @@ const ViewerPage = () => {
       >
         ⛶
       </button>
+
+      <div className="viewer-toolbar">
+        {languages.length > 1 && (
+          <label className="viewer-toolbar-group">
+            <span>語言</span>
+            <select
+              value={selectedLanguageId}
+              onChange={(event) => setSelectedLanguageId(event.target.value)}
+            >
+              {languages.map((language) => (
+                <option key={language.id} value={language.id}>
+                  {language.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        <label className="viewer-toolbar-check">
+          <input
+            type="checkbox"
+            checked={roleColorEnabled}
+            onChange={(event) => setRoleColorEnabled(event.target.checked)}
+          />
+          顏色分辨角色
+        </label>
+      </div>
+
       {displayEnabled && musicActive && (
         <div className="viewer-music-banner" role="status" aria-live="polite">
           <div className="viewer-music-banner-inner">
@@ -293,18 +355,23 @@ const ViewerPage = () => {
           </div>
         </div>
       )}
+
       {lineSource === 'transcription' && displayEnabled && (
         <div className="viewer-live-badge">
           {transcriptionIsFinal ? '即時語音 最終稿' : '即時語音 草稿'}
         </div>
       )}
+
       {lineSource === 'transcription' && displayEnabled ? (
         <div className={liveFeedClassName} ref={liveFeedRef}>
-          {(liveEntries.length > 0 ? liveEntries : liveLines.map((text) => ({
-            text,
-            speakerId: null,
-            isFinal: transcriptionIsFinal,
-          }))).map((liveEntry, index, entries) => {
+          {(liveEntries.length > 0
+            ? liveEntries
+            : liveLines.map((text) => ({
+                text,
+                speakerId: null,
+                isFinal: transcriptionIsFinal,
+              }))
+          ).map((liveEntry, index, entries) => {
             const isLatest = index === entries.length - 1
             const speakerClass =
               Number.isInteger(liveEntry.speakerId) && liveEntry.speakerId > 0
@@ -325,14 +392,11 @@ const ViewerPage = () => {
               </div>
             )
           })}
-          {liveLines.length === 0 && (
-            <div className="viewer-live-line viewer-live-line-active">
-              {latestLiveLine || displayText}
-            </div>
-          )}
         </div>
       ) : (
-        <div className={textClass}>{displayText}</div>
+        <div className={textClass} style={roleColor ? { color: roleColor } : undefined}>
+          {displayText}
+        </div>
       )}
     </div>
   )

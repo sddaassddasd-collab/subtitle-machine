@@ -1,9 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { io } from 'socket.io-client'
-
-const DEFAULT_SESSION_ID = 'default'
-const ACCESS_CODE = '20141017'
 
 const storageKeys = {
   apiKey: 'subtitleMachineApiKey',
@@ -193,17 +190,6 @@ const int16ToBase64 = (samples) => {
   return btoa(binary)
 }
 
-const logTranscriptionDebug = (stage, payload = {}, level = 'info') => {
-  const timestamp = new Date().toISOString()
-  const logger =
-    level === 'error'
-      ? console.error
-      : level === 'warn'
-        ? console.warn
-        : console.info
-  logger(`[transcription][${timestamp}] ${stage}`, payload)
-}
-
 const isLineMarkedMusic = (line) =>
   Boolean(line && typeof line === 'object' && line.music === true)
 
@@ -269,12 +255,19 @@ const ControlPage = () => {
     () => new URLSearchParams(location.search),
     [location.search],
   )
-  const initialSessionId = query.get('session') || DEFAULT_SESSION_ID
+  const requestedSessionId = query.get('session') || ''
 
-  const [sessionId, setSessionId] = useState(initialSessionId)
+  const [user, setUser] = useState(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [sessionId, setSessionId] = useState(requestedSessionId)
+  const [sessionMeta, setSessionMeta] = useState(null)
   const [lines, setLines] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [historyState, setHistoryState] = useState({
+    canUndo: false,
+    canRedo: false,
+  })
   const [transcription, setTranscription] = useState(
     DEFAULT_TRANSCRIPTION_STATE,
   )
@@ -287,15 +280,14 @@ const ControlPage = () => {
     if (typeof window === 'undefined') return false
     return window.localStorage.getItem(storageKeys.rememberKey) === 'true'
   })
-  const [parsingScript, setParsingScript] = useState(false)
-  const [scriptInput, setScriptInput] = useState('')
+  const [draftInputs, setDraftInputs] = useState({})
+  const [parsingPrimary, setParsingPrimary] = useState(false)
+  const [parsingLanguageId, setParsingLanguageId] = useState('')
   const [editingIndex, setEditingIndex] = useState(null)
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
-  const [authenticated, setAuthenticated] = useState(false)
-  const [accessInput, setAccessInput] = useState('')
-  const [accessError, setAccessError] = useState('')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
@@ -308,6 +300,80 @@ const ControlPage = () => {
     captureNode: null,
     silenceNode: null,
   })
+
+  const languages = useMemo(() => {
+    const source = Array.isArray(sessionMeta?.languages)
+      ? sessionMeta.languages
+      : []
+    if (source.length > 0) return source
+    return [
+      {
+        id: 'primary',
+        name: '第一語言',
+        code: 'lang-1',
+        isPrimary: true,
+      },
+    ]
+  }, [sessionMeta])
+
+  const cells = useMemo(
+    () => (Array.isArray(sessionMeta?.cells) ? sessionMeta.cells : []),
+    [sessionMeta],
+  )
+  const selectedCellId = sessionMeta?.selectedCellId || cells[0]?.id || ''
+  const selectedCell =
+    cells.find((cell) => cell.id === selectedCellId) || null
+  const extraLanguages = languages.filter((language) => language.id !== 'primary')
+
+  const setDraftInputValue = (cellId, languageId, value) => {
+    if (!cellId || !languageId) return
+    setDraftInputs((prev) => ({
+      ...prev,
+      [cellId]: {
+        ...(prev[cellId] || {}),
+        [languageId]: value,
+      },
+    }))
+  }
+
+  const getDraftInputValue = (cellId, languageId) => {
+    if (!cellId || !languageId) return ''
+    return draftInputs[cellId]?.[languageId] || ''
+  }
+
+  const primaryScriptInput = getDraftInputValue(selectedCellId, 'primary')
+
+  const viewerUrl = useMemo(() => {
+    if (typeof window === 'undefined' || !sessionMeta?.viewerToken) return ''
+    return `${window.location.origin}/viewer/${sessionMeta.viewerToken}`
+  }, [sessionMeta?.viewerToken])
+
+  const qrCodeUrl = useMemo(() => {
+    if (!viewerUrl) return ''
+    return `https://api.qrserver.com/v1/create-qr-code/?size=512x512&format=png&data=${encodeURIComponent(
+      viewerUrl,
+    )}`
+  }, [viewerUrl])
+
+  const applySessionPayload = useCallback((payload) => {
+    const nextSession =
+      payload && typeof payload.session === 'object' ? payload.session : null
+    setSessionMeta(nextSession)
+    setLines(Array.isArray(payload?.lines) ? payload.lines : [])
+    setCurrentIndex(
+      Number.isInteger(payload?.currentIndex) ? payload.currentIndex : 0,
+    )
+    setDisplayEnabled(
+      typeof payload?.displayEnabled === 'boolean'
+        ? payload.displayEnabled
+        : true,
+    )
+    setTranscription(normalizeTranscriptionState(payload?.transcription))
+    setHistoryState({
+      canUndo: payload?.history?.canUndo === true,
+      canRedo: payload?.history?.canRedo === true,
+    })
+  }, [])
 
   const releaseMicrophoneCapture = () => {
     const state = captureStateRef.current
@@ -371,13 +437,66 @@ const ControlPage = () => {
   }
 
   useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(
+      storageKeys.rememberKey,
+      rememberKey ? 'true' : 'false',
+    )
+
+    if (rememberKey && apiKey) {
+      window.localStorage.setItem(storageKeys.apiKey, apiKey)
+    }
+
+    if (!rememberKey) {
+      window.localStorage.removeItem(storageKeys.apiKey)
+    }
+  }, [rememberKey, apiKey])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadAuth = async () => {
+      try {
+        const response = await fetch('/api/auth/me')
+        const data = await response.json().catch(() => ({}))
+        if (cancelled) return
+        if (!data?.user) {
+          navigate('/', { replace: true })
+          return
+        }
+        setUser(data.user)
+      } catch {
+        if (!cancelled) {
+          navigate('/', { replace: true })
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthReady(true)
+        }
+      }
+    }
+
+    loadAuth()
+    return () => {
+      cancelled = true
+    }
+  }, [navigate])
+
+  useEffect(() => {
+    setSessionId(requestedSessionId)
+  }, [requestedSessionId])
+
+  useEffect(() => {
+    if (!authReady || !user) return
+    if (!requestedSessionId) {
+      navigate('/', { replace: true })
+    }
+  }, [authReady, user, requestedSessionId, navigate])
+
+  useEffect(() => {
     if (editingIndex == null) return
     const node = lineRefs.current[editingIndex]
     if (!node) return
-
-    if (typeof window === 'undefined' || typeof document === 'undefined') {
-      return
-    }
 
     requestAnimationFrame(() => {
       node.focus()
@@ -413,9 +532,7 @@ const ControlPage = () => {
     if (!node) return
 
     if (!autoCenterEnabled) {
-      if (currentIndex === 0) {
-        return
-      }
+      if (currentIndex === 0) return
       setAutoCenterEnabled(true)
     }
 
@@ -426,87 +543,12 @@ const ControlPage = () => {
     })
   }, [currentIndex, lines, autoCenterEnabled])
 
-  const viewerUrl = useMemo(() => {
-    if (typeof window === 'undefined') return ''
-    const origin = window.location.origin
-    return `${origin}/viewer`
-  }, [])
-
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    window.localStorage.setItem(
-      storageKeys.rememberKey,
-      rememberKey ? 'true' : 'false',
-    )
-
-    if (rememberKey && apiKey) {
-      window.localStorage.setItem(storageKeys.apiKey, apiKey)
-    }
-
-    if (!rememberKey) {
-      window.localStorage.removeItem(storageKeys.apiKey)
-    }
-  }, [rememberKey, apiKey])
-
-  useEffect(() => {
-    if (!authenticated) return
-
-    let cancelled = false
-    const ensureDefaultSession = async () => {
-      try {
-        const response = await fetch('/api/session', {
-          method: 'POST',
-        })
-
-        if (!response.ok) {
-          throw new Error('無法建立新的場次，請稍後再試')
-        }
-
-        const data = await response.json()
-        if (!cancelled) {
-          const nextSessionId = data.sessionId || DEFAULT_SESSION_ID
-          setSessionId(nextSessionId)
-          if (location.search) {
-            navigate('/control', { replace: true })
-          }
-        }
-      } catch (error) {
-        console.error(error)
-        if (!cancelled) {
-          setStatus({
-            kind: 'error',
-            message: error.message || '無法建立場次',
-          })
-        }
-      }
-    }
-
-    ensureDefaultSession()
-    return () => {
-      cancelled = true
-    }
-  }, [navigate, location.search, authenticated])
-
-  useEffect(() => {
-    if (!authenticated || !sessionId) return
+    if (!authReady || !user || !sessionId) return
 
     let disposed = false
     const socket = io()
     socketRef.current = socket
-
-    const applySessionPayload = (payload) => {
-      if (disposed) return
-      setLines(Array.isArray(payload.lines) ? payload.lines : [])
-      setCurrentIndex(
-        Number.isInteger(payload.currentIndex) ? payload.currentIndex : 0,
-      )
-      setDisplayEnabled(
-        typeof payload.displayEnabled === 'boolean'
-          ? payload.displayEnabled
-          : true,
-      )
-      setTranscription(normalizeTranscriptionState(payload.transcription))
-    }
 
     const joinSession = () => {
       if (disposed || !sessionId) return
@@ -520,19 +562,15 @@ const ControlPage = () => {
           throw new Error('找不到場次或無法載入資料')
         }
         const data = await response.json()
-        applySessionPayload(data)
-        if (!disposed) {
-          setStatus((prev) =>
-            prev.kind === 'error' ? { kind: 'info', message: '' } : prev,
-          )
-        }
-      } catch (error) {
         if (disposed) return
-        setStatus({
-          kind: 'error',
-          message:
-            error?.message || '找不到場次或無法載入資料',
-        })
+        applySessionPayload(data)
+      } catch (error) {
+        if (!disposed) {
+          setStatus({
+            kind: 'error',
+            message: error?.message || '找不到場次或無法載入資料',
+          })
+        }
       }
     }
 
@@ -541,28 +579,8 @@ const ControlPage = () => {
       refreshSession()
     }
 
-    const handleControlUpdate = (payload) => {
-      applySessionPayload(payload)
-    }
-
     const handleTranscriptionUpdate = (payload) => {
-      const nextState = normalizeTranscriptionState(payload?.transcription)
-      if (
-        nextState.status === 'error' ||
-        (typeof nextState.error === 'string' && nextState.error.trim())
-      ) {
-        logTranscriptionDebug(
-          'server-state-error',
-          {
-            sessionId,
-            status: nextState.status,
-            error: nextState.error || '',
-            updatedAt: nextState.updatedAt,
-          },
-          'error',
-        )
-      }
-      setTranscription(nextState)
+      setTranscription(normalizeTranscriptionState(payload?.transcription))
     }
 
     const handleTranscriptionError = (payload) => {
@@ -570,24 +588,12 @@ const ControlPage = () => {
         payload && typeof payload.message === 'string'
           ? payload.message
           : '即時語音辨識發生錯誤'
-      logTranscriptionDebug(
-        'socket-event-error',
-        {
-          sessionId,
-          message,
-          rawPayload: payload,
-        },
-        'error',
-      )
-      setStatus({
-        kind: 'error',
-        message,
-      })
+      setStatus({ kind: 'error', message })
     }
 
     socket.on('connect', rejoinAndRefresh)
     socket.on('reconnect', rejoinAndRefresh)
-    socket.on('control:update', handleControlUpdate)
+    socket.on('control:update', applySessionPayload)
     socket.on('control:transcription', handleTranscriptionUpdate)
     socket.on('transcription:error', handleTranscriptionError)
 
@@ -597,88 +603,16 @@ const ControlPage = () => {
       refreshSession()
     }
 
-    const handleVisibilityChange = () => {
-      if (typeof document === 'undefined') {
-        return
-      }
-      if (document.visibilityState !== 'visible') {
-        return
-      }
-      if (!socket.connected) {
-        socket.connect()
-      } else {
-        rejoinAndRefresh()
-      }
-    }
-
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibilityChange)
-    }
-
     return () => {
       disposed = true
       releaseMicrophoneCapture()
       if (sessionId) {
         socket.emit('transcription:stop', { sessionId })
       }
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', handleVisibilityChange)
-      }
-      socket.off('connect', rejoinAndRefresh)
-      socket.off('reconnect', rejoinAndRefresh)
-      socket.off('control:update', handleControlUpdate)
-      socket.off('control:transcription', handleTranscriptionUpdate)
-      socket.off('transcription:error', handleTranscriptionError)
       socket.disconnect()
       socketRef.current = null
     }
-  }, [sessionId, authenticated])
-
-  useEffect(() => {
-    if (!authenticated || !sessionId) return
-
-    const handleKeyDown = (event) => {
-      const key = event.key
-
-      const activeElement = document.activeElement
-      if (
-        activeElement &&
-        (activeElement.isContentEditable ||
-          ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName))
-      ) {
-        return
-      }
-
-      if (event.metaKey && key.toLowerCase() === 'm') {
-        if (!socketRef.current || !sessionId) return
-        event.preventDefault()
-        const nextState = !displayEnabled
-        socketRef.current.emit('setDisplay', {
-          sessionId,
-          displayEnabled: nextState,
-        })
-        setDisplayEnabled(nextState)
-        setStatus({
-          kind: 'info',
-          message: nextState ? '檢視端已重新顯示' : '檢視端已遮蔽字幕',
-        })
-        return
-      }
-
-      if (!['ArrowUp', 'ArrowDown'].includes(key)) {
-        return
-      }
-
-      if (!socketRef.current) return
-      event.preventDefault()
-
-      const delta = key === 'ArrowUp' ? -1 : 1
-      socketRef.current.emit('shiftIndex', { sessionId, delta })
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [sessionId, displayEnabled, authenticated])
+  }, [authReady, user, sessionId, applySessionPayload])
 
   useEffect(() => {
     return () => {
@@ -708,29 +642,50 @@ const ControlPage = () => {
     }
 
     lastTranscriptionErrorRef.current = transcription.error
-    logTranscriptionDebug(
-      'client-state-error',
-      {
-        error: transcription.error,
-        status: transcription.status,
-        sessionId,
-      },
-      'error',
-    )
     setStatus({
       kind: 'error',
       message: `即時語音辨識：${transcription.error}`,
     })
-  }, [transcription.error, transcription.status, sessionId])
+  }, [transcription.error])
 
-  const handleAccessSubmit = (event) => {
-    event.preventDefault()
-    if (accessInput.trim() === ACCESS_CODE) {
-      setAuthenticated(true)
-      setAccessError('')
-      setAccessInput('')
-    } else {
-      setAccessError('密碼錯誤，請再試一次')
+  const requestSessionRefresh = async () => {
+    if (!sessionId) return
+    const response = await fetch(`/api/session/${sessionId}`)
+    if (!response.ok) {
+      throw new Error('無法重新載入場次')
+    }
+    const data = await response.json()
+    applySessionPayload(data)
+  }
+
+  const performSessionMutation = async (
+    request,
+    { successMessage = '', keepStatus = false } = {},
+  ) => {
+    try {
+      const response = await request()
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '操作失敗')
+      }
+      if (data && typeof data === 'object' && data.session) {
+        applySessionPayload(data)
+      } else if (sessionId) {
+        await requestSessionRefresh()
+      }
+      if (!keepStatus) {
+        setStatus({
+          kind: 'success',
+          message: successMessage || '已完成操作',
+        })
+      }
+      return data
+    } catch (error) {
+      setStatus({
+        kind: 'error',
+        message: error.message || '操作失敗',
+      })
+      throw error
     }
   }
 
@@ -748,23 +703,116 @@ const ControlPage = () => {
     })
   }
 
+  const handleUndo = async () => {
+    if (!sessionId || !historyState.canUndo) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/undo`, {
+          method: 'POST',
+        }),
+      { successMessage: '已復原上一個操作' },
+    )
+  }
+
+  const handleRedo = async () => {
+    if (!sessionId || !historyState.canRedo) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/redo`, {
+          method: 'POST',
+        }),
+      { successMessage: '已還原操作' },
+    )
+  }
+
+  useEffect(() => {
+    if (!sessionId) return
+
+    const runHistoryAction = async (action) => {
+      try {
+        const response = await fetch(`/api/session/${sessionId}/${action}`, {
+          method: 'POST',
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          throw new Error(data.error || '操作失敗')
+        }
+        if (data?.session) {
+          applySessionPayload(data)
+        }
+      } catch (error) {
+        setStatus({
+          kind: 'error',
+          message: error.message || '操作失敗',
+        })
+      }
+    }
+
+    const handleKeyDown = (event) => {
+      const key = event.key.toLowerCase()
+      const activeElement = document.activeElement
+      const editingField =
+        activeElement &&
+        (activeElement.isContentEditable ||
+          ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName))
+
+      if (!editingField && (event.metaKey || event.ctrlKey) && key === 'm') {
+        event.preventDefault()
+        if (!socketRef.current) return
+        const nextState = !displayEnabled
+        socketRef.current.emit('setDisplay', {
+          sessionId,
+          displayEnabled: nextState,
+        })
+        setDisplayEnabled(nextState)
+        return
+      }
+
+      if (!editingField && (event.metaKey || event.ctrlKey) && key === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) {
+          if (historyState.canRedo) {
+            runHistoryAction('redo')
+          }
+        } else {
+          if (historyState.canUndo) {
+            runHistoryAction('undo')
+          }
+        }
+        return
+      }
+
+      if (!editingField && (event.metaKey || event.ctrlKey) && key === 'y') {
+        event.preventDefault()
+        if (historyState.canRedo) {
+          runHistoryAction('redo')
+        }
+        return
+      }
+
+      if (editingField) return
+      if (!socketRef.current) return
+
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault()
+        socketRef.current.emit('shiftIndex', {
+          sessionId,
+          delta: event.key === 'ArrowUp' ? -1 : 1,
+        })
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [sessionId, displayEnabled, historyState.canUndo, historyState.canRedo, applySessionPayload])
+
   const handleStartLiveTranscription = async () => {
     if (!socketRef.current || !sessionId) {
-      logTranscriptionDebug(
-        'start-blocked',
-        { reason: 'socket-not-ready', sessionId },
-        'error',
-      )
       setStatus({ kind: 'error', message: '尚未連上場次，無法啟動語音辨識' })
       return
     }
 
     if (!apiKey) {
-      logTranscriptionDebug(
-        'start-blocked',
-        { reason: 'missing-api-key', sessionId },
-        'error',
-      )
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
       return
     }
@@ -774,11 +822,6 @@ const ControlPage = () => {
       !navigator.mediaDevices ||
       !navigator.mediaDevices.getUserMedia
     ) {
-      logTranscriptionDebug(
-        'start-blocked',
-        { reason: 'browser-not-supported', sessionId },
-        'error',
-      )
       setStatus({
         kind: 'error',
         message: '目前瀏覽器不支援麥克風錄音功能',
@@ -787,27 +830,11 @@ const ControlPage = () => {
     }
 
     if (transcription.active || transcription.status === 'connecting') {
-      logTranscriptionDebug('start-skipped', {
-        reason: 'already-active',
-        sessionId,
-        status: transcription.status,
-      })
       setStatus({ kind: 'info', message: '語音辨識已啟動' })
       return
     }
 
     try {
-      logTranscriptionDebug('start-requested', {
-        sessionId,
-        hasApiKey: Boolean(apiKey),
-        targetSampleRate: TARGET_SAMPLE_RATE,
-        semanticSegmentationEnabled: true,
-        dualChannelEnabled: true,
-        hasTranscriptionContext:
-          Boolean(transcription.transcriptionContext?.trim()),
-        speakerRecognitionEnabled:
-          transcription.speakerRecognitionEnabled === true,
-      })
       releaseMicrophoneCapture()
       setStatus({ kind: 'info', message: '正在啟動即時語音辨識…' })
       setTranscription((prev) => ({
@@ -824,25 +851,17 @@ const ControlPage = () => {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
-          channelCount: {
-            ideal: 2,
-          },
+          channelCount: { ideal: 2 },
         },
       })
 
-      const AudioContextClass =
-        window.AudioContext || window.webkitAudioContext
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext
       if (!AudioContextClass) {
         throw new Error('瀏覽器不支援 AudioContext')
       }
 
       const audioContext = new AudioContextClass()
       await audioContext.resume()
-      logTranscriptionDebug('audio-context-ready', {
-        sessionId,
-        sampleRate: audioContext.sampleRate,
-        hasAudioWorklet: Boolean(audioContext.audioWorklet),
-      })
 
       const sourceNode = audioContext.createMediaStreamSource(stream)
       const silenceNode = audioContext.createGain()
@@ -875,8 +894,6 @@ const ControlPage = () => {
       }
 
       let captureNode = null
-      let usingScriptProcessorFallback = false
-
       const AudioWorkletNodeClass =
         typeof globalThis !== 'undefined'
           ? globalThis.AudioWorkletNode
@@ -887,10 +904,6 @@ const ControlPage = () => {
         typeof AudioWorkletNodeClass === 'function'
       ) {
         await audioContext.audioWorklet.addModule(MIC_CAPTURE_WORKLET_URL.href)
-        logTranscriptionDebug('audio-worklet-enabled', {
-          sessionId,
-          worklet: MIC_CAPTURE_WORKLET_URL.href,
-        })
         const workletNode = new AudioWorkletNodeClass(
           audioContext,
           'mic-capture-processor',
@@ -904,13 +917,7 @@ const ControlPage = () => {
           const sourceSamples = workletEvent.data
           if (sourceSamples instanceof Float32Array) {
             emitSamples(sourceSamples)
-            return
-          }
-          if (
-            sourceSamples &&
-            typeof sourceSamples.length === 'number' &&
-            sourceSamples.length > 0
-          ) {
+          } else if (sourceSamples?.length > 0) {
             emitSamples(Float32Array.from(sourceSamples))
           }
         }
@@ -918,15 +925,6 @@ const ControlPage = () => {
         workletNode.connect(silenceNode)
         captureNode = workletNode
       } else {
-        usingScriptProcessorFallback = true
-        logTranscriptionDebug(
-          'audio-worklet-fallback',
-          {
-            sessionId,
-            reason: 'AudioWorklet unavailable, using ScriptProcessor fallback',
-          },
-          'warn',
-        )
         const processorNode = audioContext.createScriptProcessor(4096, 2, 1)
         processorNode.onaudioprocess = (event) => {
           const channels = []
@@ -945,20 +943,12 @@ const ControlPage = () => {
       }
 
       silenceNode.connect(audioContext.destination)
-
       captureStateRef.current = {
         mediaStream: stream,
         audioContext,
         sourceNode,
         captureNode,
         silenceNode,
-      }
-
-      if (usingScriptProcessorFallback) {
-        setStatus({
-          kind: 'info',
-          message: '已啟動即時語音辨識（此瀏覽器使用相容模式收音）',
-        })
       }
 
       socketRef.current.emit('transcription:start', {
@@ -972,28 +962,7 @@ const ControlPage = () => {
         speakerRecognitionEnabled:
           transcription.speakerRecognitionEnabled === true,
       })
-      logTranscriptionDebug('socket-start-emitted', {
-        sessionId,
-        model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
-        language: transcription.language || 'zh',
-        semanticSegmentationEnabled: true,
-        dualChannelEnabled: true,
-        hasTranscriptionContext:
-          Boolean(transcription.transcriptionContext?.trim()),
-        speakerRecognitionEnabled:
-          transcription.speakerRecognitionEnabled === true,
-      })
     } catch (error) {
-      logTranscriptionDebug(
-        'start-failed',
-        {
-          sessionId,
-          name: error?.name,
-          message: error?.message,
-          stack: error?.stack,
-        },
-        'error',
-      )
       releaseMicrophoneCapture()
       socketRef.current?.emit('transcription:stop', { sessionId })
       setTranscription((prev) => ({
@@ -1011,7 +980,6 @@ const ControlPage = () => {
 
   const handleStopLiveTranscription = () => {
     if (!sessionId) return
-    logTranscriptionDebug('stop-requested', { sessionId })
     releaseMicrophoneCapture()
     socketRef.current?.emit('transcription:stop', { sessionId })
     setStatus({ kind: 'info', message: '已停止即時語音辨識' })
@@ -1032,26 +1000,28 @@ const ControlPage = () => {
     if (editingIndex !== index) return
     setEditingIndex(null)
     const newText = event.currentTarget.textContent ?? ''
-    if (!socketRef.current || !sessionId) return
     const currentLine = lines[index]
-    const currentText = typeof currentLine === 'object' ? currentLine?.text ?? '' : ''
-    if (newText === currentText) return
+    const currentText =
+      typeof currentLine === 'object' ? currentLine?.text ?? '' : ''
+    if (newText === currentText || !socketRef.current || !sessionId) return
 
     socketRef.current.emit('updateLine', {
       sessionId,
       index,
       text: newText,
+      languageId: 'primary',
     })
     setLines((prev) => {
       const next = [...prev]
       const previous = next[index]
       if (typeof previous === 'object' && previous) {
-        next[index] = { ...previous, text: newText }
-      } else {
         next[index] = {
+          ...previous,
           text: newText,
-          type: 'dialogue',
-          music: false,
+          translations: {
+            ...(previous.translations || {}),
+            primary: newText,
+          },
         }
       }
       return next
@@ -1061,18 +1031,14 @@ const ControlPage = () => {
 
   const handleToggleLineType = (event, index) => {
     event.stopPropagation()
-    if (!socketRef.current || !sessionId) return
     const currentLine = lines[index]
-    if (!currentLine || typeof currentLine !== 'object') return
-
+    if (!socketRef.current || !sessionId || !currentLine) return
     const nextType =
       currentLine.type === 'direction' ? 'dialogue' : 'direction'
 
     setLines((prev) => {
       const next = [...prev]
-      const existing = prev[index]
-      if (!existing || typeof existing !== 'object') return prev
-      next[index] = { ...existing, type: nextType }
+      next[index] = { ...currentLine, type: nextType }
       return next
     })
 
@@ -1081,11 +1047,7 @@ const ControlPage = () => {
       index,
       text: currentLine.text,
       type: nextType,
-    })
-
-    setStatus({
-      kind: 'success',
-      message: nextType === 'direction' ? '已標記為舞台指示' : '已標記為台詞',
+      languageId: 'primary',
     })
   }
 
@@ -1096,8 +1058,7 @@ const ControlPage = () => {
 
     if (!checked) {
       const range = getMusicRangeAroundIndex(lines, index)
-      const targetRange =
-        range || { startIndex: index, endIndex: index }
+      const targetRange = range || { startIndex: index, endIndex: index }
       setLines((prev) =>
         applyMusicRangeState(
           prev,
@@ -1123,9 +1084,7 @@ const ControlPage = () => {
     ) {
       const rangeStart = Math.min(pendingMusicRangeStartIndex, index)
       const rangeEnd = Math.max(pendingMusicRangeStartIndex, index)
-      setLines((prev) =>
-        applyMusicRangeState(prev, rangeStart, rangeEnd, true),
-      )
+      setLines((prev) => applyMusicRangeState(prev, rangeStart, rangeEnd, true))
       setPendingMusicRangeStartIndex(null)
       socketRef.current.emit('setLineMusicRange', {
         sessionId,
@@ -1154,42 +1113,23 @@ const ControlPage = () => {
   }
 
   const handleLineKeyDown = (event, index) => {
-    if (event.key !== 'Enter') {
-      return
-    }
+    if (event.key !== 'Enter') return
+    if (event.shiftKey || event.isComposing || event.keyCode === 229) return
+    if (!socketRef.current || !sessionId || !window.getSelection) return
 
-    if (event.shiftKey || event.isComposing || event.keyCode === 229) {
-      return
-    }
-
-    if (!socketRef.current || !sessionId) return
     const node = lineRefs.current[index] ?? event.currentTarget
     if (!node) return
-
-    if (
-      typeof window === 'undefined' ||
-      typeof document === 'undefined' ||
-      !window.getSelection
-    ) {
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
       return
     }
-
-    const selection = window.getSelection()
-    if (!selection || selection.rangeCount === 0) return
-    if (!selection.isCollapsed) return
 
     const range = selection.getRangeAt(0)
-    if (!node.contains(range.endContainer)) {
-      return
-    }
+    if (!node.contains(range.endContainer)) return
 
     const beforeRange = range.cloneRange()
     beforeRange.selectNodeContents(node)
     beforeRange.setEnd(range.endContainer, range.endOffset)
-
-    const afterRange = range.cloneRange()
-    afterRange.selectNodeContents(node)
-    afterRange.setStart(range.endContainer, range.endOffset)
 
     const normalizeSegment = (text, { trim = true } = {}) => {
       const cleaned = (text ?? '')
@@ -1203,7 +1143,6 @@ const ControlPage = () => {
       trim: false,
     })
     const normalizedFull = normalizeSegment(fullTextRaw)
-
     const caretTextRaw = normalizeSegment(beforeRange.toString(), {
       trim: false,
     })
@@ -1214,7 +1153,6 @@ const ControlPage = () => {
 
     let beforeText = normalizeSegment(fullTextRaw.slice(0, caretOffset))
     let afterText = normalizeSegment(fullTextRaw.slice(caretOffset))
-
     const combinedText = normalizeSegment(`${beforeText}${afterText}`)
     if (normalizedFull && combinedText !== normalizedFull) {
       if (afterText) {
@@ -1237,36 +1175,22 @@ const ControlPage = () => {
 
     if (normalizedFull) {
       setLines((prev) => {
-        const existing = prev[index]
-        const existingText =
-          typeof existing === 'object' && existing
-            ? existing.text ?? ''
-            : typeof existing === 'string'
-              ? existing
-              : ''
-
-        if (existingText === normalizedFull) {
-          return prev
-        }
-
         const next = [...prev]
-        if (typeof existing === 'object' && existing) {
-          next[index] = { ...existing, text: normalizedFull }
-        } else {
+        if (next[index]) {
           next[index] = {
+            ...next[index],
             text: normalizedFull,
-            type: currentType,
-            music: currentMusic,
+            translations: {
+              ...(next[index].translations || {}),
+              primary: normalizedFull,
+            },
           }
         }
         return next
       })
     }
 
-    if (!beforeText) {
-      return
-    }
-
+    if (!beforeText) return
     event.preventDefault()
 
     if (!afterText) {
@@ -1278,20 +1202,21 @@ const ControlPage = () => {
 
       setLines((prev) => {
         const next = [...prev]
-        const existing = prev[index]
-        if (typeof existing === 'object' && existing) {
-          next[index] = { ...existing, text: beforeText }
-        } else {
-          next[index] = {
-            text: beforeText,
-            type: currentType,
-            music: currentMusic,
-          }
+        next[index] = {
+          ...next[index],
+          text: beforeText,
+          translations: {
+            ...(next[index]?.translations || {}),
+            primary: beforeText,
+          },
         }
         next.splice(index + 1, 0, {
+          id: `${Date.now()}-${index + 1}`,
           text: '',
           type: currentType,
           music: currentMusic,
+          role: currentLine?.role || null,
+          translations: { primary: '' },
         })
         return next
       })
@@ -1306,36 +1231,34 @@ const ControlPage = () => {
         index,
         type: currentType,
       })
-      setStatus({ kind: 'info', message: '已新增空白字幕' })
       return
     }
 
     skipBlurRef.current.add(index)
-
     if (node.textContent !== beforeText) {
       node.textContent = beforeText
     }
 
     setLines((prev) => {
       const next = [...prev]
-      const existing = prev[index]
-      if (typeof existing === 'object' && existing) {
-        next[index] = { ...existing, text: beforeText }
-      } else {
-        next[index] = {
-          text: beforeText,
-          type: currentType,
-          music: currentMusic,
-        }
+      next[index] = {
+        ...next[index],
+        text: beforeText,
+        translations: {
+          ...(next[index]?.translations || {}),
+          primary: beforeText,
+        },
       }
       next.splice(index + 1, 0, {
+        id: `${Date.now()}-${index + 1}`,
         text: afterText,
         type: currentType,
         music: currentMusic,
+        role: currentLine?.role || null,
+        translations: { primary: afterText },
       })
       return next
     })
-
     setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
     setPendingMusicRangeStartIndex((prev) =>
       prev != null && prev > index ? prev + 1 : prev,
@@ -1348,20 +1271,16 @@ const ControlPage = () => {
       beforeText,
       afterText,
     })
-    setStatus({ kind: 'success', message: '字幕已分割' })
   }
 
   const handleDeleteLine = (event, index) => {
     event.stopPropagation()
-    if (!socketRef.current || !sessionId) return
-    if (!lines[index]) return
+    if (!socketRef.current || !sessionId || !lines[index]) return
 
     setLines((prev) => prev.filter((_, lineIndex) => lineIndex !== index))
     setCurrentIndex((prev) => {
       if (prev > index) return Math.max(prev - 1, 0)
-      if (prev === index) {
-        return Math.max(index - 1, 0)
-      }
+      if (prev === index) return Math.max(index - 1, 0)
       return prev
     })
     setEditingIndex((prev) => {
@@ -1380,21 +1299,9 @@ const ControlPage = () => {
     setStatus({ kind: 'info', message: '字幕已刪除' })
   }
 
-  const handleLineClick = (index) => {
-    if (editingIndex === index) return
-    if (index > 0) {
-      setAutoCenterEnabled(true)
-    }
-    handleJumpToLine(index)
-  }
-
-  const handleLineDoubleClick = (index) => {
-    setEditingIndex(index)
-  }
-
   const handleImportJson = async (event) => {
     const file = event.target.files?.[0]
-    if (!file) return
+    if (!file || !sessionId || !selectedCellId) return
 
     try {
       const content = await file.text()
@@ -1403,35 +1310,20 @@ const ControlPage = () => {
         throw new Error('檔案內容無有效字幕')
       }
 
-      const response = await fetch(`/api/session/${sessionId}/lines`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ lines: parsed }),
-      })
-
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}))
-        throw new Error(errorBody.error || '無法載入字幕檔')
-      }
-
-      const data = await response.json()
-      setLines(Array.isArray(data.lines) ? data.lines : [])
-      setPendingMusicRangeStartIndex(null)
-      setCurrentIndex(
-        Number.isInteger(data.currentIndex) ? data.currentIndex : 0,
+      await performSessionMutation(
+        () =>
+          fetch(`/api/session/${sessionId}/lines`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              cellId: selectedCellId,
+              lines: parsed,
+            }),
+          }),
+        { successMessage: '字幕 JSON 已載入' },
       )
-      setDisplayEnabled(
-        typeof data.displayEnabled === 'boolean'
-          ? data.displayEnabled
-          : true,
-      )
-      setTranscription(normalizeTranscriptionState(data.transcription))
-      setStatus({ kind: 'success', message: '字幕 JSON 已載入' })
       setAutoCenterEnabled(false)
     } catch (error) {
-      console.error(error)
       setStatus({
         kind: 'error',
         message: error.message || '載入字幕檔失敗',
@@ -1449,146 +1341,232 @@ const ControlPage = () => {
       return
     }
 
-    try {
-      const payload = JSON.stringify(lines, null, 2)
-      const blob = new Blob([payload], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      link.download = `subtitles-${timestamp}.json`
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      URL.revokeObjectURL(url)
-      setStatus({ kind: 'success', message: '字幕 JSON 已匯出' })
-    } catch (error) {
-      console.error(error)
-      setStatus({
-        kind: 'error',
-        message: '匯出字幕檔失敗',
-      })
-    }
+    const payload = JSON.stringify(lines, null, 2)
+    const blob = new Blob([payload], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${selectedCell?.name || 'subtitles'}.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    setStatus({ kind: 'success', message: '字幕 JSON 已匯出' })
   }
 
-  const handleParseScript = async (event) => {
+  const handleParsePrimaryScript = async (event) => {
     event.preventDefault()
-    if (!sessionId) {
-      setStatus({ kind: 'error', message: '尚未建立場次，無法解析劇本' })
-      return
-    }
+    if (!sessionId || !selectedCellId) return
     if (!apiKey) {
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
       return
     }
-    if (!scriptInput.trim()) {
-      setStatus({ kind: 'error', message: '請先貼上劇本文字' })
+    if (!primaryScriptInput.trim()) {
+      setStatus({ kind: 'error', message: '請先貼上第一語言劇本文字' })
       return
     }
 
     try {
-      setParsingScript(true)
-      setStatus({ kind: 'info', message: '正在解析劇本，請稍候…' })
-
-      const response = await fetch(
-        `/api/session/${sessionId}/script/parse`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            apiKey,
-            scriptText: scriptInput,
+      setParsingPrimary(true)
+      setStatus({ kind: 'info', message: '正在解析第一語言劇本…' })
+      const data = await performSessionMutation(
+        () =>
+          fetch(`/api/session/${sessionId}/script/parse`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              apiKey,
+              cellId: selectedCellId,
+              scriptText: primaryScriptInput,
+            }),
           }),
-        },
+        { successMessage: '第一語言字幕已更新', keepStatus: true },
       )
-
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}))
-        const message = errorBody.error || '解析劇本失敗'
-        const rawDetails = errorBody.details
-        const details =
-          typeof rawDetails === 'string'
-            ? rawDetails.length > 160
-              ? `${rawDetails.slice(0, 160)}…`
-              : rawDetails
-            : ''
-        const code = errorBody.code
-        const combined =
-          details && details !== message
-            ? `${message}：${details}`
-            : message
-        throw new Error(
-          code && code !== 'UNKNOWN' ? `${combined}（${code}）` : combined,
-        )
-      }
-
-      const data = await response.json()
-      setLines(Array.isArray(data.lines) ? data.lines : [])
-      setPendingMusicRangeStartIndex(null)
-      setCurrentIndex(
-        Number.isInteger(data.currentIndex) ? data.currentIndex : 0,
-      )
-      setDisplayEnabled(
-        typeof data.displayEnabled === 'boolean'
-          ? data.displayEnabled
-          : true,
-      )
-      setTranscription(normalizeTranscriptionState(data.transcription))
-      const nextStatus =
-        data.warning && data.warning.length > 0
-          ? { kind: 'info', message: data.warning }
-          : { kind: 'success', message: '劇本解析完成，可以開始播放' }
-      setStatus(nextStatus)
-      setAutoCenterEnabled(false)
-    } catch (error) {
-      console.error(error)
       setStatus({
-        kind: 'error',
-        message: error.message || '解析失敗，請重試',
+        kind: data?.warning ? 'info' : 'success',
+        message: data?.warning || '第一語言字幕已更新',
+      })
+      setAutoCenterEnabled(false)
+    } finally {
+      setParsingPrimary(false)
+    }
+  }
+
+  const handleParseLanguageScript = async (event, languageId) => {
+    event.preventDefault()
+    if (!sessionId || !selectedCellId || !languageId) return
+    if (!apiKey) {
+      setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
+      return
+    }
+
+    const scriptText = getDraftInputValue(selectedCellId, languageId)
+    if (!scriptText.trim()) {
+      setStatus({ kind: 'error', message: '請先貼上目標語言文字' })
+      return
+    }
+
+    try {
+      setParsingLanguageId(languageId)
+      setStatus({ kind: 'info', message: '正在對齊多語字幕…' })
+      const data = await performSessionMutation(
+        () =>
+          fetch(
+            `/api/session/${sessionId}/cells/${selectedCellId}/languages/${languageId}/parse`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                apiKey,
+                scriptText,
+              }),
+            },
+          ),
+        { successMessage: '多語字幕已對齊', keepStatus: true },
+      )
+      setStatus({
+        kind: data?.warning ? 'info' : 'success',
+        message: data?.warning || '多語字幕已對齊',
       })
     } finally {
-      setParsingScript(false)
+      setParsingLanguageId('')
     }
   }
 
   const handleCopyViewerLink = async () => {
     if (!viewerUrl) return
-
     try {
       await navigator.clipboard.writeText(viewerUrl)
       setStatus({ kind: 'success', message: '檢視端連結已複製' })
     } catch {
       setStatus({
         kind: 'error',
-        message: '無法複製，請手動選取文字複製',
+        message: '無法複製，請手動複製連結',
       })
     }
   }
 
-  if (!authenticated) {
-    return (
-      <div className="control-page locked">
-        <form className="access-panel" onSubmit={handleAccessSubmit}>
-          <h2>請輸入存取密碼</h2>
-          <input
-            type="password"
-            placeholder="Access Code"
-            value={accessInput}
-            onChange={(event) => {
-              setAccessInput(event.target.value)
-              if (accessError) setAccessError('')
-            }}
-          />
-          {accessError && <div className="status-error">{accessError}</div>}
-          <button type="submit">解鎖</button>
-        </form>
-      </div>
+  const handleDownloadQrCode = async () => {
+    if (!qrCodeUrl) return
+    try {
+      const response = await fetch(qrCodeUrl)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${sessionMeta?.title || 'viewer'}-qr.png`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      setStatus({ kind: 'success', message: 'QR code 已下載' })
+    } catch {
+      window.open(qrCodeUrl, '_blank', 'noopener,noreferrer')
+      setStatus({
+        kind: 'info',
+        message: '無法直接下載，已改為開啟 QR code 圖片',
+      })
+    }
+  }
+
+  const handleCreateCell = async () => {
+    if (!sessionId) return
+    const name = window.prompt('儲存格名稱', `儲存格 ${cells.length + 1}`)
+    if (name == null) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/cells`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }),
+      { successMessage: '已新增儲存格' },
     )
   }
 
+  const handleRenameCell = async (cell) => {
+    if (!sessionId || !cell) return
+    const name = window.prompt('重新命名儲存格', cell.name || '')
+    if (name == null) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/cells/${cell.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }),
+      { successMessage: '已更新儲存格名稱' },
+    )
+  }
+
+  const handleSelectCell = async (cellId) => {
+    if (!sessionId || !cellId) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/cells/${cellId}/select`, {
+          method: 'POST',
+        }),
+      { keepStatus: true },
+    )
+  }
+
+  const handleDeleteCell = async (cell) => {
+    if (!sessionId || !cell) return
+    const confirmed = window.confirm(`要刪除「${cell.name}」嗎？`)
+    if (!confirmed) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/cells/${cell.id}`, {
+          method: 'DELETE',
+        }),
+      { successMessage: '儲存格已刪除' },
+    )
+  }
+
+  const handleAddLanguage = async () => {
+    if (!sessionId) return
+    const name = window.prompt('新增語言名稱', '第二語言')
+    if (name == null) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/languages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }),
+      { successMessage: '已新增語言' },
+    )
+  }
+
+  const handleDeleteLanguage = async (language) => {
+    if (!sessionId || !language || language.id === 'primary') return
+    const confirmed = window.confirm(`要刪除「${language.name}」嗎？`)
+    if (!confirmed) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/languages/${language.id}`, {
+          method: 'DELETE',
+        }),
+      { successMessage: '語言已刪除' },
+    )
+  }
+
+  const handleEndSession = async () => {
+    if (!sessionId) return
+    const confirmed = window.confirm('結束場次後，檢視端亂碼網址會立即失效。要繼續嗎？')
+    if (!confirmed) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/end`, {
+          method: 'POST',
+        }),
+      { successMessage: '場次已結束，檢視端已失效' },
+    )
+  }
+
+  const currentLine = lines[currentIndex] || null
   lineRefs.current = []
+
   const transcriptionStatusLabelMap = {
     idle: '待命',
     connecting: '連線中',
@@ -1601,11 +1579,11 @@ const ControlPage = () => {
     transcription.active || transcription.status === 'connecting'
   const speakerRecognitionEnabled =
     transcription.speakerRecognitionEnabled === true
-  const currentLineMusicActive = isLineMarkedMusic(lines[currentIndex])
+  const currentLineMusicActive = isLineMarkedMusic(currentLine)
   const musicSelectionHint =
     pendingMusicRangeStartIndex != null
       ? `音樂範圍選取中：已選第 ${pendingMusicRangeStartIndex + 1} 行為起點，請再勾選結束行。`
-      : '勾選「此處有音樂」後，再勾選另一行可自動標記頭尾之間的整段音樂範圍。'
+      : '勾選音樂後，再勾選另一行可自動標記整段範圍。'
   const transcriptionPreview =
     transcription.text && transcription.text.trim().length > 0
       ? transcription.text
@@ -1613,228 +1591,413 @@ const ControlPage = () => {
         ? '請開始說話…'
         : '尚未啟動即時語音辨識'
 
+  if (!authReady) {
+    return (
+      <div className="page">
+        <div className="home-intro">載入控制端中…</div>
+      </div>
+    )
+  }
+
+  if (!user || !sessionId) {
+    return null
+  }
+
   return (
-    <div className="control-page">
-      <section className="control-sidebar">
-        <header className="control-header">
-          <h1>控制端</h1>
-          <div className="input-group">
-            <label htmlFor="openai-key">OpenAI API Key</label>
-            <input
-              id="openai-key"
-              type="password"
-              placeholder="sk-..."
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value.trim())}
-            />
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={rememberKey}
-                onChange={(event) => setRememberKey(event.target.checked)}
-              />
-              在此裝置記住 API Key
-            </label>
-          </div>
-
-          <div className="input-group">
-            <label>檢視端分享連結</label>
-            <div className="viewer-link">
-              <span>{viewerUrl || '尚未建立場次'}</span>
-              <button type="button" onClick={handleCopyViewerLink}>
-                複製
-              </button>
-            </div>
-          </div>
-        </header>
-
-        <form className="input-group" onSubmit={handleParseScript}>
-          <label htmlFor="script-text">
-            貼上劇本文字
-          </label>
-          <textarea
-            id="script-text"
-            rows={10}
-            placeholder={`請直接從 Google Docs、Pages 或其他文件複製全文後貼到這裡。
-
-系統會把貼上的文字送去拆解成字幕，不再需要先轉成 .txt。`}
-            value={scriptInput}
-            onChange={(event) => setScriptInput(event.target.value)}
-          />
-          <span className="input-note">
-            建議直接複製貼上原始劇本內容，可避免檔案編碼造成的亂碼問題。
-          </span>
-          <button type="submit" disabled={parsingScript}>
-            {parsingScript ? '解析中…' : '使用 OpenAI 拆解字幕'}
-          </button>
-        </form>
-
-        <div className="input-group">
-          <label>字幕 JSON 匯入 / 匯出</label>
-          <div className="json-actions">
-            <button type="button" onClick={() => jsonInputRef.current?.click()}>
-              匯入 JSON
-            </button>
-            <button type="button" onClick={handleExportJson}>
-              匯出 JSON
-            </button>
-            <input
-              ref={jsonInputRef}
-              type="file"
-              accept=".json,application/json"
-              style={{ display: 'none' }}
-              onChange={handleImportJson}
-            />
-          </div>
-        </div>
-
-        <div className="control-actions">
+    <div className={`control-page ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+      <aside className={`control-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+        <div className="sidebar-toggle-row">
           <button
             type="button"
-            className={`toggle-button ${displayEnabled ? 'active' : ''}`}
-            onClick={handleToggleDisplay}
+            className="subtle-button"
+            onClick={() => setSidebarCollapsed((prev) => !prev)}
           >
-            {displayEnabled ? '遮蔽檢視端字幕' : '重新顯示字幕'}
+            {sidebarCollapsed ? '展開控制端' : '收合控制端'}
           </button>
-          <span>
-            {lines.length > 0
-              ? `目前進度：${currentIndex + 1} / ${lines.length}`
-              : '尚未載入字幕'}
-          </span>
-        </div>
-
-        <div className="input-group transcription-panel">
-          <label>即時語音辨識（雲端）</label>
-          <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
-          <textarea
-            id="transcription-context"
-            rows={4}
-            maxLength={600}
-            placeholder={`例如：主題：半導體法說會
-關鍵詞：CoWoS、HBM、N3E、毛利率
-專有名詞：OpenAI、BlackHole、Realtime API`}
-            value={transcription.transcriptionContext}
-            disabled={transcriptionBusy}
-            onChange={(event) => {
-              setTranscription((prev) => ({
-                ...prev,
-                transcriptionContext: event.target.value,
-              }))
-            }}
-          />
-          <span className="input-note">
-            空白表示不提供額外主題提示，辨識流程會維持目前預設模式。
-          </span>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={speakerRecognitionEnabled}
-              disabled={transcriptionBusy}
-              onChange={(event) => {
-                const nextChecked = event.target.checked
-                setTranscription((prev) => ({
-                  ...prev,
-                  speakerRecognitionEnabled: nextChecked,
-                }))
-              }}
-            />
-            辨認講者
-          </label>
-          <div className="transcription-actions">
+          {!sidebarCollapsed && (
             <button
               type="button"
-              onClick={handleStartLiveTranscription}
-              disabled={transcriptionBusy}
+              className="subtle-button"
+              onClick={() => navigate('/')}
             >
-              {transcription.status === 'connecting'
-                ? '連線中…'
-                : transcription.active
-                  ? '辨識中'
-                  : '開始收音'}
+              返回場次列表
+            </button>
+          )}
+        </div>
+
+        {!sidebarCollapsed && (
+          <>
+            <header className="control-header">
+              <div className="session-title-row">
+                <div>
+                  <h1>{sessionMeta?.title || '控制端'}</h1>
+                  <p className="input-note">
+                    {sessionMeta?.status === 'ended'
+                      ? '已結束場次，檢視端亂碼網址已失效'
+                      : '進行中場次'}
+                  </p>
+                </div>
+                <span className={`session-state-badge ${sessionMeta?.status || 'active'}`}>
+                  {sessionMeta?.status === 'ended' ? '已結束' : '進行中'}
+                </span>
+              </div>
+
+              <div className="input-group">
+                <label htmlFor="openai-key">OpenAI API Key</label>
+                <input
+                  id="openai-key"
+                  type="password"
+                  placeholder="sk-..."
+                  value={apiKey}
+                  onChange={(event) => setApiKey(event.target.value.trim())}
+                />
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={rememberKey}
+                    onChange={(event) => setRememberKey(event.target.checked)}
+                  />
+                  在此裝置記住 API Key
+                </label>
+              </div>
+
+              <div className="input-group">
+                <label>檢視端亂碼網址</label>
+                <div className="viewer-link">
+                  <span>{viewerUrl || '尚未建立場次'}</span>
+                  <button type="button" onClick={handleCopyViewerLink}>
+                    複製
+                  </button>
+                </div>
+                {viewerUrl && (
+                  <div className="qr-preview-card">
+                    <img src={qrCodeUrl} alt="Viewer QR Code" />
+                    <button type="button" onClick={handleDownloadQrCode}>
+                      下載 QR code
+                    </button>
+                  </div>
+                )}
+              </div>
+            </header>
+
+            <div className="input-group">
+              <div className="section-header-inline">
+                <label>儲存格</label>
+                <button type="button" className="subtle-button" onClick={handleCreateCell}>
+                  新增儲存格
+                </button>
+              </div>
+              <div className="cell-list">
+                {cells.map((cell) => (
+                  <div
+                    key={cell.id}
+                    className={`cell-card ${cell.id === selectedCellId ? 'active' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="cell-main-button"
+                      onClick={() => handleSelectCell(cell.id)}
+                    >
+                      <strong>{cell.name}</strong>
+                      <span>{cell.lineCount || 0} 行字幕</span>
+                    </button>
+                    <div className="cell-card-actions">
+                      <button
+                        type="button"
+                        className="subtle-button"
+                        onClick={() => handleRenameCell(cell)}
+                      >
+                        重新命名
+                      </button>
+                      <button
+                        type="button"
+                        className="subtle-button danger-button"
+                        onClick={() => handleDeleteCell(cell)}
+                        disabled={cells.length <= 1}
+                      >
+                        刪除
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="input-group">
+              <div className="section-header-inline">
+                <label>語言</label>
+                <button type="button" className="subtle-button" onClick={handleAddLanguage}>
+                  新增語言
+                </button>
+              </div>
+              <div className="language-pill-list">
+                {languages.map((language) => (
+                  <div key={language.id} className="language-pill">
+                    <span>{language.name}</span>
+                    {language.id !== 'primary' && (
+                      <button
+                        type="button"
+                        className="language-pill-delete"
+                        onClick={() => handleDeleteLanguage(language)}
+                      >
+                        刪除
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <form className="input-group" onSubmit={handleParsePrimaryScript}>
+              <label htmlFor="script-text-primary">第一語言劇本文字</label>
+              <textarea
+                id="script-text-primary"
+                rows={8}
+                placeholder="貼上第一語言全文，系統會解析角色、分段並寫入目前儲存格。"
+                value={primaryScriptInput}
+                onChange={(event) =>
+                  setDraftInputValue(selectedCellId, 'primary', event.target.value)
+                }
+              />
+              <span className="input-note">
+                角色會被保留到字幕資料裡，檢視端可切換是否用顏色區分。
+              </span>
+              <button type="submit" disabled={parsingPrimary || !selectedCellId}>
+                {parsingPrimary ? '解析中…' : '解析第一語言'}
+              </button>
+            </form>
+
+            {extraLanguages.map((language) => (
+              <form
+                key={language.id}
+                className="input-group language-parse-card"
+                onSubmit={(event) => handleParseLanguageScript(event, language.id)}
+              >
+                <label htmlFor={`language-input-${language.id}`}>
+                  {language.name}
+                </label>
+                <textarea
+                  id={`language-input-${language.id}`}
+                  rows={5}
+                  placeholder={`貼上 ${language.name} 全文，系統會依第一語言分段對齊。`}
+                  value={getDraftInputValue(selectedCellId, language.id)}
+                  onChange={(event) =>
+                    setDraftInputValue(selectedCellId, language.id, event.target.value)
+                  }
+                />
+                <button
+                  type="submit"
+                  disabled={
+                    parsingLanguageId === language.id || !selectedCellId || !lines.length
+                  }
+                >
+                  {parsingLanguageId === language.id ? '對齊中…' : `解析 ${language.name}`}
+                </button>
+              </form>
+            ))}
+
+            <div className="input-group">
+              <label>字幕 JSON 匯入 / 匯出</label>
+              <div className="json-actions">
+                <button type="button" onClick={() => jsonInputRef.current?.click()}>
+                  匯入 JSON
+                </button>
+                <button type="button" onClick={handleExportJson}>
+                  匯出 JSON
+                </button>
+                <input
+                  ref={jsonInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={handleImportJson}
+                />
+              </div>
+            </div>
+
+            <div className="control-actions">
+              <button
+                type="button"
+                className={`toggle-button ${displayEnabled ? 'active' : ''}`}
+                onClick={handleToggleDisplay}
+              >
+                {displayEnabled ? '遮蔽檢視端字幕' : '重新顯示字幕'}
+              </button>
+              <button
+                type="button"
+                className="subtle-button"
+                onClick={handleUndo}
+                disabled={!historyState.canUndo}
+              >
+                上一步
+              </button>
+              <button
+                type="button"
+                className="subtle-button"
+                onClick={handleRedo}
+                disabled={!historyState.canRedo}
+              >
+                還原
+              </button>
+              <button
+                type="button"
+                className="subtle-button danger-button"
+                onClick={handleEndSession}
+                disabled={sessionMeta?.status === 'ended'}
+              >
+                結束場次
+              </button>
+            </div>
+
+            <div className="input-group transcription-panel">
+              <label>即時語音辨識（雲端）</label>
+              <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
+              <textarea
+                id="transcription-context"
+                rows={4}
+                maxLength={600}
+                placeholder="例如：主題、關鍵詞、專有名詞"
+                value={transcription.transcriptionContext}
+                disabled={transcriptionBusy}
+                onChange={(event) => {
+                  setTranscription((prev) => ({
+                    ...prev,
+                    transcriptionContext: event.target.value,
+                  }))
+                }}
+              />
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={speakerRecognitionEnabled}
+                  disabled={transcriptionBusy}
+                  onChange={(event) => {
+                    setTranscription((prev) => ({
+                      ...prev,
+                      speakerRecognitionEnabled: event.target.checked,
+                    }))
+                  }}
+                />
+                辨認講者
+              </label>
+              <div className="transcription-actions">
+                <button
+                  type="button"
+                  onClick={handleStartLiveTranscription}
+                  disabled={transcriptionBusy}
+                >
+                  {transcription.status === 'connecting'
+                    ? '連線中…'
+                    : transcription.active
+                      ? '辨識中'
+                      : '開始收音'}
+                </button>
+                <button
+                  type="button"
+                  className="subtle-button"
+                  onClick={handleStopLiveTranscription}
+                  disabled={!transcriptionBusy}
+                >
+                  停止收音
+                </button>
+              </div>
+              <div className="transcription-meta">
+                <span>狀態：{transcriptionStatusLabel}</span>
+                <span>輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}</span>
+                <span>講者：{speakerRecognitionEnabled ? '辨認中' : '關閉'}</span>
+              </div>
+              <div
+                className={`transcription-preview ${
+                  transcription.isFinal ? 'final' : 'partial'
+                }`}
+              >
+                {transcriptionPreview}
+              </div>
+            </div>
+
+            <div className="viewer-preview">
+              <div
+                className={`viewer-preview-box ${
+                  displayEnabled ? '' : 'viewer-muted'
+                } ${
+                  currentLine?.type === 'direction' ? 'viewer-direction' : ''
+                } ${
+                  currentLineMusicActive ? 'viewer-music-preview' : ''
+                }`}
+              >
+                {currentLine
+                  ? currentLine.type === 'direction'
+                    ? `【舞台指示】${currentLine.text || '—'}`
+                    : currentLine.text || '—'
+                  : '尚未載入字幕'}
+              </div>
+              {currentLine?.role && (
+                <div className="viewer-preview-role">角色：{currentLine.role}</div>
+              )}
+              {currentLineMusicActive && (
+                <div className="viewer-preview-music">此處有音樂</div>
+              )}
+              <div className="control-instructions">
+                • 上下方向鍵切換字幕
+                <br />
+                • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 還原
+                <br />
+                • 觀眾可在檢視端自己切換語言
+              </div>
+            </div>
+
+            <div
+              className={`status-bar ${
+                status.kind === 'success'
+                  ? 'status-success'
+                  : status.kind === 'error'
+                    ? 'status-error'
+                    : ''
+              }`}
+            >
+              {status.message}
+            </div>
+          </>
+        )}
+      </aside>
+
+      <section className="script-panel">
+        <header className="script-header">
+          <div>
+            <h2>{selectedCell?.name || '劇本字幕清單'}</h2>
+            <div className="script-header-meta">
+              <small>
+                {lines.length
+                  ? `目前進度：${currentIndex + 1} / ${lines.length}`
+                  : '尚未載入字幕'}
+              </small>
+              <small className="script-music-hint">{musicSelectionHint}</small>
+            </div>
+          </div>
+          <div className="script-toolbar">
+            <button
+              type="button"
+              className="subtle-button"
+              onClick={handleUndo}
+              disabled={!historyState.canUndo}
+            >
+              上一步
             </button>
             <button
               type="button"
               className="subtle-button"
-              onClick={handleStopLiveTranscription}
-              disabled={!transcriptionBusy}
+              onClick={handleRedo}
+              disabled={!historyState.canRedo}
             >
-              停止收音
+              還原
             </button>
-          </div>
-          <div className="transcription-meta">
-            <span>狀態：{transcriptionStatusLabel}</span>
-            <span>
-              輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}
-            </span>
-            <span>切段：語意 + 保底</span>
-            <span>雙通道：開啟</span>
-            <span>講者：{speakerRecognitionEnabled ? '辨認中' : '關閉'}</span>
-          </div>
-          <div
-            className={`transcription-preview ${
-              transcription.isFinal ? 'final' : 'partial'
-            }`}
-          >
-            {transcriptionPreview}
-          </div>
-        </div>
-
-        <div className="viewer-preview">
-          <div
-            className={`viewer-preview-box ${
-              displayEnabled ? '' : 'viewer-muted'
-            } ${
-              lines[currentIndex]?.type === 'direction' ? 'viewer-direction' : ''
-            } ${
-              currentLineMusicActive ? 'viewer-music-preview' : ''
-            }`}
-          >
-            {lines.length
-              ? lines[currentIndex]
-                ? lines[currentIndex].type === 'direction'
-                  ? `【舞台指示】${lines[currentIndex].text || '—'}`
-                  : lines[currentIndex].text || '—'
-                : '—'
-              : '尚未載入字幕'}
-          </div>
-          {currentLineMusicActive && (
-            <div className="viewer-preview-music">此處有音樂</div>
-          )}
-          <div className="control-instructions">
-            • Enter/點擊字幕可立即跳行
-            <br />
-            • 方向鍵 ↑ ↓ 切換字幕
-            <br />
-            • Command + F 搜尋台詞，點擊即可跳轉
-          </div>
-        </div>
-
-        <div
-          className={`status-bar ${
-            status.kind === 'success'
-              ? 'status-success'
-              : status.kind === 'error'
-                ? 'status-error'
-                : ''
-          }`}
-        >
-          {status.message}
-        </div>
-      </section>
-
-      <section className="script-panel">
-        <header className="script-header">
-          <h2>劇本字幕清單</h2>
-          <div className="script-header-meta">
-            <small>右側內容可直接編輯，雙擊或點擊即跳轉</small>
-            <small className="script-music-hint">{musicSelectionHint}</small>
           </div>
         </header>
 
         <div className="script-list">
           {lines.length === 0 && (
-            <p style={{ color: '#94a3b8', textAlign: 'center' }}>
-              尚未載入字幕，請先貼上劇本文字並解析，或手動輸入。
+            <p className="empty-hint">
+              尚未載入字幕，請先解析第一語言劇本，或匯入 JSON 到目前儲存格。
             </p>
           )}
           {lines.map((line, index) => {
@@ -1847,6 +2010,9 @@ const ControlPage = () => {
             const musicActive = isLineMarkedMusic(line)
             const previousMusicActive = isLineMarkedMusic(lines[index - 1])
             const nextMusicActive = isLineMarkedMusic(lines[index + 1])
+            const translatedCount = extraLanguages.filter(
+              (language) => line?.translations?.[language.id]?.trim(),
+            ).length
             const musicBoundaryLabel = musicActive
               ? !previousMusicActive && !nextMusicActive
                 ? '音樂'
@@ -1859,7 +2025,7 @@ const ControlPage = () => {
 
             return (
               <div
-                key={`${index}-${lineText.slice(0, 10)}`}
+                key={line.id || `${index}-${lineText.slice(0, 10)}`}
                 className={`script-line ${
                   currentIndex === index ? 'active' : ''
                 } ${lineType === 'direction' ? 'direction' : ''} ${
@@ -1867,79 +2033,98 @@ const ControlPage = () => {
                 } ${musicActive && !previousMusicActive ? 'music-start' : ''} ${
                   musicActive && !nextMusicActive ? 'music-end' : ''
                 }`}
-                onClick={() => handleLineClick(index)}
+                onClick={() => handleJumpToLine(index)}
               >
-                {typeof line === 'object' && (
-                  <div className="script-line-header">
-                    <div className="script-line-tags">
-                      <span
-                        className={`script-line-type ${
-                          lineType === 'direction'
-                            ? 'type-direction'
-                            : 'type-dialogue'
-                        }`}
-                      >
-                        {lineType === 'direction' ? '舞台指示' : '台詞'}
+                <div className="script-line-header">
+                  <div className="script-line-tags">
+                    <span
+                      className={`script-line-type ${
+                        lineType === 'direction'
+                          ? 'type-direction'
+                          : 'type-dialogue'
+                      }`}
+                    >
+                      {lineType === 'direction' ? '舞台' : '台詞'}
+                    </span>
+                    {line.role && (
+                      <span className="script-line-type type-role">
+                        {line.role}
                       </span>
-                      {musicBoundaryLabel && (
-                        <span className="script-line-type type-music">
-                          {musicBoundaryLabel}
-                        </span>
-                      )}
-                    </div>
-                    <div className="script-line-actions">
-                      <label
-                        className="line-music-toggle"
-                        onClick={(event) => event.stopPropagation()}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={musicActive}
-                          onChange={(event) =>
-                            handleToggleLineMusic(event, index)
-                          }
-                        />
-                        <span>此處有音樂</span>
-                      </label>
-                      <button
-                        type="button"
-                        className="line-action toggle"
-                        onClick={(event) => handleToggleLineType(event, index)}
-                      >
-                        {lineType === 'direction' ? '設為台詞' : '設為舞台指示'}
-                      </button>
-                      <button
-                        type="button"
-                        className="line-action delete"
-                        onClick={(event) => handleDeleteLine(event, index)}
-                      >
-                        刪除
-                      </button>
-                    </div>
+                    )}
+                    {translatedCount > 0 && (
+                      <span className="script-line-type type-language">
+                        {translatedCount} 語已對齊
+                      </span>
+                    )}
+                    {musicBoundaryLabel && (
+                      <span className="script-line-type type-music">
+                        {musicBoundaryLabel}
+                      </span>
+                    )}
                   </div>
-                )}
+
+                  <div className="script-line-actions">
+                    <label
+                      className="line-music-toggle"
+                      onClick={(lineEvent) => lineEvent.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={musicActive}
+                        onChange={(lineEvent) =>
+                          handleToggleLineMusic(lineEvent, index)
+                        }
+                      />
+                      音樂
+                    </label>
+                    <button
+                      type="button"
+                      className="line-action toggle"
+                      onClick={(lineEvent) =>
+                        handleToggleLineType(lineEvent, index)
+                      }
+                    >
+                      {lineType === 'direction' ? '改成台詞' : '改成舞台'}
+                    </button>
+                    <button
+                      type="button"
+                      className="line-action delete"
+                      onClick={(lineEvent) => handleDeleteLine(lineEvent, index)}
+                    >
+                      刪除
+                    </button>
+                  </div>
+                </div>
+
                 <div
                   ref={(node) => {
-                    if (node) {
-                      lineRefs.current[index] = node
-                    } else {
-                      delete lineRefs.current[index]
-                    }
+                    lineRefs.current[index] = node
                   }}
                   className={`script-line-text ${
                     editingIndex === index ? 'editing' : ''
                   }`}
                   contentEditable={editingIndex === index}
                   suppressContentEditableWarning
+                  spellCheck={false}
+                  tabIndex={0}
+                  onDoubleClick={() => setEditingIndex(index)}
                   onBlur={(event) => handleLineBlur(event, index)}
-                  onDoubleClick={(event) => {
-                    event.stopPropagation()
-                    handleLineDoubleClick(index)
-                  }}
                   onKeyDown={(event) => handleLineKeyDown(event, index)}
                 >
-                  {editingIndex === index ? lineText : lineText || '（空白）'}
+                  {lineText}
                 </div>
+
+                {translatedCount > 0 && (
+                  <div className="line-language-preview">
+                    {extraLanguages
+                      .filter((language) => line?.translations?.[language.id]?.trim())
+                      .map((language) => (
+                        <span key={language.id} className="line-language-chip">
+                          {language.name}
+                        </span>
+                      ))}
+                  </div>
+                )}
               </div>
             )
           })}

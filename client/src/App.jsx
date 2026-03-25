@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import './App.css'
+import AdminPage from './pages/AdminPage'
 import ControlPage from './pages/ControlPage'
 import HomePage from './pages/HomePage'
 import ViewerPage from './pages/ViewerPage'
@@ -8,7 +9,9 @@ function App() {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
+      <Route path="/admin" element={<AdminPage />} />
       <Route path="/control" element={<ControlPage />} />
+      <Route path="/viewer/:viewerToken" element={<ViewerPage />} />
       <Route path="/viewer" element={<ViewerPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -3,11 +3,21 @@ const cors = require('cors');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
+const {
+  createOpaqueToken,
+  createPasswordHash,
+  hashToken,
+  loadStore,
+  parseCookieHeader,
+  saveStore,
+  verifyPassword,
+} = require('./persistence');
 
 const PORT = process.env.PORT || 3000;
 
@@ -16,12 +26,13 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST', 'PUT'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
   },
 });
 
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '6mb' }));
+app.use(authMiddleware);
 
 app.get('/healthz', (_req, res) => {
   res.status(200).send('ok');
@@ -29,6 +40,28 @@ app.get('/healthz', (_req, res) => {
 
 const sessions = new Map();
 const transcriptionStreams = new Map();
+const users = new Map();
+const authSessions = new Map();
+const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
+const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
+const SESSION_HISTORY_LIMIT = 80;
+const USER_ROLES = {
+  ADMIN: 'admin',
+  OPERATOR: 'operator',
+  VIEWER: 'viewer',
+};
+const USER_ROLE_ORDER = [
+  USER_ROLES.ADMIN,
+  USER_ROLES.OPERATOR,
+  USER_ROLES.VIEWER,
+];
+const ADMIN_BOOTSTRAP_USERNAME = normalizeUsername(
+  process.env.ADMIN_BOOTSTRAP_USERNAME || '',
+);
+const ADMIN_BOOTSTRAP_PASSWORD = normalizePassword(
+  process.env.ADMIN_BOOTSTRAP_PASSWORD || '',
+);
 
 const defaultTranscriptionState = () => ({
   active: false,
@@ -333,6 +366,382 @@ function parseJsonArrayLoose(raw) {
   throw error;
 }
 
+function generateId(prefix) {
+  const core = createOpaqueToken(12);
+  return prefix ? `${prefix}_${core}` : core;
+}
+
+function normalizeUsername(rawUsername) {
+  if (typeof rawUsername !== 'string') return '';
+  return stripBom(rawUsername).trim().toLowerCase();
+}
+
+function normalizeDisplayName(rawUsername) {
+  if (typeof rawUsername !== 'string') return '';
+  return stripBom(rawUsername).trim().slice(0, 48);
+}
+
+function normalizePassword(rawPassword) {
+  if (typeof rawPassword !== 'string') return '';
+  return rawPassword.trim();
+}
+
+function normalizeResetCode(rawCode) {
+  if (typeof rawCode !== 'string') return '';
+  return rawCode.trim().toUpperCase();
+}
+
+function normalizeUserRole(rawRole, fallbackRole = USER_ROLES.VIEWER) {
+  if (typeof rawRole !== 'string') return fallbackRole;
+  const normalizedRole = rawRole.trim().toLowerCase();
+  return USER_ROLE_ORDER.includes(normalizedRole) ? normalizedRole : fallbackRole;
+}
+
+function isUserDisabled(user) {
+  return Boolean(
+    user &&
+      Number.isFinite(user.disabledAt) &&
+      user.disabledAt > 0,
+  );
+}
+
+function canManageSessions(user) {
+  if (!user || isUserDisabled(user)) return false;
+  return (
+    user.role === USER_ROLES.ADMIN || user.role === USER_ROLES.OPERATOR
+  );
+}
+
+function isAdminUser(user) {
+  return Boolean(user && user.role === USER_ROLES.ADMIN && !isUserDisabled(user));
+}
+
+function getPublicResetState(user) {
+  const reset = user?.passwordReset;
+  if (
+    !reset ||
+    typeof reset !== 'object' ||
+    !Number.isFinite(reset.expiresAt) ||
+    reset.expiresAt <= Date.now()
+  ) {
+    return null;
+  }
+
+  return {
+    requestedAt:
+      Number.isFinite(reset.createdAt) && reset.createdAt > 0
+        ? reset.createdAt
+        : null,
+    expiresAt: reset.expiresAt,
+  };
+}
+
+function serializeUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    role: normalizeUserRole(user.role, USER_ROLES.VIEWER),
+    disabled: isUserDisabled(user),
+    disabledAt: isUserDisabled(user) ? user.disabledAt : null,
+    canManageSessions: canManageSessions(user),
+    passwordReset: getPublicResetState(user),
+    createdAt: user.createdAt,
+  };
+}
+
+function createAuthTokenRecord(userId) {
+  const token = createOpaqueToken(24);
+  const now = Date.now();
+  return {
+    token,
+    record: {
+      id: generateId('auth'),
+      tokenHash: hashToken(token),
+      userId,
+      createdAt: now,
+      expiresAt: now + AUTH_TOKEN_TTL_MS,
+    },
+  };
+}
+
+function cleanupExpiredAuthSessions() {
+  const now = Date.now();
+  Array.from(authSessions.entries()).forEach(([tokenHash, record]) => {
+    if (!record || !Number.isFinite(record.expiresAt) || record.expiresAt <= now) {
+      authSessions.delete(tokenHash);
+    }
+  });
+}
+
+function cleanupExpiredPasswordResetTokens() {
+  const now = Date.now();
+  users.forEach((user) => {
+    const reset = user?.passwordReset;
+    if (
+      reset &&
+      (!Number.isFinite(reset.expiresAt) || reset.expiresAt <= now)
+    ) {
+      user.passwordReset = null;
+    }
+  });
+}
+
+function revokeUserAuthSessions(userId) {
+  Array.from(authSessions.entries()).forEach(([tokenHash, record]) => {
+    if (record?.userId === userId) {
+      authSessions.delete(tokenHash);
+    }
+  });
+}
+
+function countAdminUsers() {
+  return Array.from(users.values()).filter((user) => isAdminUser(user)).length;
+}
+
+function persistApplicationStore() {
+  cleanupExpiredAuthSessions();
+  cleanupExpiredPasswordResetTokens();
+  saveStore({
+    users: Array.from(users.values()).map((user) => ({
+      id: user.id,
+      username: user.username,
+      usernameNormalized: user.usernameNormalized,
+      role: normalizeUserRole(user.role, USER_ROLES.VIEWER),
+      disabledAt: isUserDisabled(user) ? user.disabledAt : null,
+      passwordReset:
+        user.passwordReset && typeof user.passwordReset === 'object'
+          ? user.passwordReset
+          : null,
+      passwordHash: user.passwordHash,
+      createdAt: user.createdAt,
+    })),
+    authSessions: Array.from(authSessions.values()).map((record) => ({
+      id: record.id,
+      tokenHash: record.tokenHash,
+      userId: record.userId,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+    })),
+    sessions: Array.from(sessions.values()).map((session) =>
+      serializeSessionForStorage(session),
+    ),
+  });
+}
+
+function findUserByNormalizedUsername(usernameNormalized) {
+  return Array.from(users.values()).find(
+    (user) => user.usernameNormalized === usernameNormalized,
+  );
+}
+
+function resolveAuthFromCookieHeader(headerValue) {
+  cleanupExpiredAuthSessions();
+  cleanupExpiredPasswordResetTokens();
+  const cookies = parseCookieHeader(headerValue);
+  const token = cookies[AUTH_COOKIE_NAME];
+  if (!token) {
+    return { user: null, authSession: null };
+  }
+
+  const authSession = authSessions.get(hashToken(token));
+  if (!authSession) {
+    return { user: null, authSession: null };
+  }
+
+  const user = users.get(authSession.userId) || null;
+  if (!user) {
+    authSessions.delete(authSession.tokenHash);
+    return { user: null, authSession: null };
+  }
+
+  if (isUserDisabled(user)) {
+    authSessions.delete(authSession.tokenHash);
+    return { user: null, authSession: null };
+  }
+
+  return { user, authSession };
+}
+
+function authMiddleware(req, res, next) {
+  const { user, authSession } = resolveAuthFromCookieHeader(req.headers.cookie);
+  req.authUser = user;
+  req.authSession = authSession;
+  if (!user && authSession?.tokenHash) {
+    clearAuthCookie(res);
+  }
+  next();
+}
+
+function requireAuth(req, res, next) {
+  if (!req.authUser) {
+    return res.status(401).json({ error: '請先登入' });
+  }
+  return next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.authUser) {
+    return res.status(401).json({ error: '請先登入' });
+  }
+  if (!isAdminUser(req.authUser)) {
+    return res.status(403).json({ error: '需要管理員權限' });
+  }
+  return next();
+}
+
+function requireSessionManager(req, res, next) {
+  if (!req.authUser) {
+    return res.status(401).json({ error: '請先登入' });
+  }
+  if (!canManageSessions(req.authUser)) {
+    return res.status(403).json({ error: '目前權限無法管理控制端場次' });
+  }
+  return next();
+}
+
+function setAuthCookie(res, token) {
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: false,
+    path: '/',
+    maxAge: AUTH_TOKEN_TTL_MS,
+  });
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie(AUTH_COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: false,
+    path: '/',
+  });
+}
+
+function generatePasswordResetCode() {
+  return createOpaqueToken(6).slice(0, 10).toUpperCase();
+}
+
+function issuePasswordResetCode(user) {
+  const code = generatePasswordResetCode();
+  user.passwordReset = {
+    codeHash: hashToken(code),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
+  };
+  return code;
+}
+
+function clearPasswordResetCode(user) {
+  if (!user) return;
+  user.passwordReset = null;
+}
+
+function verifyPasswordResetCode(user, code) {
+  const reset = user?.passwordReset;
+  if (
+    !reset ||
+    typeof reset !== 'object' ||
+    typeof reset.codeHash !== 'string' ||
+    !Number.isFinite(reset.expiresAt) ||
+    reset.expiresAt <= Date.now()
+  ) {
+    return false;
+  }
+
+  return hashToken(code) === reset.codeHash;
+}
+
+function createUserRecord({
+  username,
+  usernameNormalized,
+  password,
+  role = USER_ROLES.OPERATOR,
+}) {
+  return {
+    id: generateId('user'),
+    username,
+    usernameNormalized,
+    role: normalizeUserRole(role, USER_ROLES.VIEWER),
+    disabledAt: null,
+    passwordReset: null,
+    passwordHash: createPasswordHash(password),
+    createdAt: Date.now(),
+  };
+}
+
+function ensureAdminBootstrapUser() {
+  if (ADMIN_BOOTSTRAP_USERNAME && ADMIN_BOOTSTRAP_PASSWORD) {
+    const existing = findUserByNormalizedUsername(ADMIN_BOOTSTRAP_USERNAME);
+    if (!existing) {
+      const bootstrapUser = createUserRecord({
+        username: ADMIN_BOOTSTRAP_USERNAME,
+        usernameNormalized: ADMIN_BOOTSTRAP_USERNAME,
+        password: ADMIN_BOOTSTRAP_PASSWORD,
+        role: USER_ROLES.ADMIN,
+      });
+      users.set(bootstrapUser.id, bootstrapUser);
+    } else {
+      existing.role = USER_ROLES.ADMIN;
+      existing.disabledAt = null;
+    }
+  }
+
+  if (countAdminUsers() === 0 && users.size > 0) {
+    const oldestUser = Array.from(users.values()).sort(
+      (left, right) => (left.createdAt || 0) - (right.createdAt || 0),
+    )[0];
+    if (oldestUser) {
+      oldestUser.role = USER_ROLES.ADMIN;
+      oldestUser.disabledAt = null;
+    }
+  }
+}
+
+function getAdminUserPayload(user) {
+  const sessionCount = Array.from(sessions.values()).filter(
+    (session) => session.ownerUserId === user.id,
+  ).length;
+
+  return {
+    ...serializeUser(user),
+    sessionCount,
+  };
+}
+
+function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
+  const ownedSessionIds = Array.from(sessions.values())
+    .filter((session) => session.ownerUserId === userId)
+    .map((session) => session.id);
+
+  ownedSessionIds.forEach((sessionId) => {
+    stopTranscriptionStream(sessionId, {
+      keepText: false,
+      reason,
+    });
+    io.to(`viewer:${sessionId}`).emit('viewer:expired', {
+      message: '本場次已失效',
+    });
+    sessions.delete(sessionId);
+  });
+
+  return ownedSessionIds.length;
+}
+
+function ensureUserCanTransitionFromAdmin(user, nextRole, nextDisabled) {
+  const removingAdminPrivileges =
+    isAdminUser(user) &&
+    (normalizeUserRole(nextRole, user.role) !== USER_ROLES.ADMIN ||
+      nextDisabled === true);
+
+  if (removingAdminPrivileges && countAdminUsers() <= 1) {
+    return '至少要保留一個啟用中的管理員帳號';
+  }
+
+  return '';
+}
+
 function normalizePunctuation(text) {
   if (typeof text !== 'string') return '';
   return text.replace(/[.,，。、]/g, ' ');
@@ -536,31 +945,156 @@ function isLikelyDirection(text) {
   return false;
 }
 
-function normalizeLineEntry(entry, keepEmpty = false) {
+function normalizeRoleName(rawRole) {
+  const role = sanitizeLineText(rawRole).replace(/[：:]$/u, '').trim();
+  if (!role) return null;
+  return role.slice(0, 48);
+}
+
+function extractRoleFromDialogueText(text) {
+  const sanitized = sanitizeLineText(text);
+  if (!sanitized) {
+    return { text: '', role: null };
+  }
+
+  const colonIndex = Math.max(sanitized.indexOf('：'), sanitized.indexOf(':'));
+  if (colonIndex < 1 || colonIndex > 12) {
+    return { text: sanitized, role: null };
+  }
+
+  const rawRole = sanitized.slice(0, colonIndex).trim();
+  const remainder = sanitized.slice(colonIndex + 1).trim();
+  if (!remainder) {
+    return { text: sanitized, role: null };
+  }
+
+  if (
+    /[，。！？!?「」『』（）()]/u.test(rawRole) ||
+    /\s{2,}/u.test(rawRole) ||
+    isLikelyDirection(rawRole)
+  ) {
+    return { text: sanitized, role: null };
+  }
+
+  const role = normalizeRoleName(rawRole);
+  if (!role) {
+    return { text: sanitized, role: null };
+  }
+
+  return {
+    text: remainder,
+    role,
+  };
+}
+
+function normalizeTranslationsMap(
+  rawTranslations,
+  primaryLanguageId = 'primary',
+  fallbackText = '',
+) {
+  const translations = {};
+
+  if (rawTranslations && typeof rawTranslations === 'object') {
+    Object.entries(rawTranslations).forEach(([languageId, value]) => {
+      const normalizedLanguageId = sanitizeLineText(languageId);
+      if (!normalizedLanguageId) return;
+      const text = sanitizeLineText(value);
+      if (!text && text !== '') return;
+      translations[normalizedLanguageId] = text;
+    });
+  }
+
+  const primaryText = sanitizeLineText(
+    translations[primaryLanguageId] ?? fallbackText,
+  );
+  translations[primaryLanguageId] = primaryText;
+  return translations;
+}
+
+function createLineRecord(entry, primaryLanguageId = 'primary') {
+  const rawType = clampLineType(entry?.type) || LINE_TYPES.DIALOGUE;
+  const rawText = sanitizeLineText(entry?.text ?? '');
+  const extracted =
+    rawType === LINE_TYPES.DIALOGUE
+      ? extractRoleFromDialogueText(rawText)
+      : { text: rawText, role: null };
+  const text = extracted.text;
+  const role = normalizeRoleName(entry?.role ?? extracted.role);
+  const translations = normalizeTranslationsMap(
+    entry?.translations,
+    primaryLanguageId,
+    text,
+  );
+  translations[primaryLanguageId] = text;
+
+  return {
+    id:
+      typeof entry?.id === 'string' && entry.id.trim().length > 0
+        ? entry.id.trim()
+        : generateId('line'),
+    text,
+    type: rawType,
+    music: normalizeLineMusic(entry?.music),
+    role: rawType === LINE_TYPES.DIALOGUE ? role : null,
+    translations,
+  };
+}
+
+function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
+  const primaryLanguageId =
+    typeof options.primaryLanguageId === 'string' && options.primaryLanguageId
+      ? options.primaryLanguageId
+      : 'primary';
   if (entry == null) return null;
 
   if (typeof entry === 'string') {
     const text = sanitizeLineText(entry);
     if (!text) {
       if (keepEmpty) {
-        return {
-          text: '',
-          type: LINE_TYPES.DIALOGUE,
-          music: false,
-        };
+        return createLineRecord(
+          {
+            text: '',
+            type: LINE_TYPES.DIALOGUE,
+            music: false,
+            role: null,
+            translations: { [primaryLanguageId]: '' },
+          },
+          primaryLanguageId,
+        );
       }
       return null;
     }
-    return {
-      text,
-      type: isLikelyDirection(text) ? LINE_TYPES.DIRECTION : LINE_TYPES.DIALOGUE,
-      music: false,
-    };
+    return createLineRecord(
+      {
+        text,
+        type: isLikelyDirection(text)
+          ? LINE_TYPES.DIRECTION
+          : LINE_TYPES.DIALOGUE,
+        music: false,
+        role: null,
+        translations: { [primaryLanguageId]: text },
+      },
+      primaryLanguageId,
+    );
   }
 
   if (typeof entry === 'object') {
+    const rawTranslations =
+      entry.translations && typeof entry.translations === 'object'
+        ? entry.translations
+        : null;
+    const inferredText =
+      (rawTranslations &&
+        sanitizeLineText(
+          rawTranslations[primaryLanguageId] ||
+            Object.values(rawTranslations).find(
+              (value) => typeof value === 'string' && sanitizeLineText(value),
+            ) ||
+            '',
+        )) ||
+      '';
     const text = sanitizeLineText(
-      entry.text ?? entry.line ?? entry.caption ?? '',
+      entry.text ?? entry.line ?? entry.caption ?? inferredText,
     );
     if (!text && !keepEmpty) return null;
     const rawType = clampLineType(
@@ -576,13 +1110,19 @@ function normalizeLineEntry(entry, keepEmpty = false) {
         : LINE_TYPES.DIALOGUE;
     }
 
-    return {
-      text,
-      type,
-      music: normalizeLineMusic(
-        entry.music ?? entry.hasMusic ?? entry.isMusic,
-      ),
-    };
+    return createLineRecord(
+      {
+        id: entry.id,
+        text,
+        type,
+        music: normalizeLineMusic(
+          entry.music ?? entry.hasMusic ?? entry.isMusic,
+        ),
+        role: entry.role ?? entry.speaker ?? entry.character ?? null,
+        translations: rawTranslations || { [primaryLanguageId]: text },
+      },
+      primaryLanguageId,
+    );
   }
 
   return null;
@@ -590,6 +1130,10 @@ function normalizeLineEntry(entry, keepEmpty = false) {
 
 function normalizeScriptLines(entries, options = {}) {
   const keepEmpty = Boolean(options.keepEmpty);
+  const primaryLanguageId =
+    typeof options.primaryLanguageId === 'string' && options.primaryLanguageId
+      ? options.primaryLanguageId
+      : 'primary';
   if (!Array.isArray(entries)) {
     return [];
   }
@@ -597,19 +1141,27 @@ function normalizeScriptLines(entries, options = {}) {
   const normalized = [];
 
   entries.forEach((entry) => {
-    const base = normalizeLineEntry(entry, keepEmpty);
+    const base = normalizeLineEntry(entry, keepEmpty, {
+      primaryLanguageId,
+    });
     if (!base) return;
 
     if (!base.text) {
       if (keepEmpty) {
-        normalized.push({
-          text: '',
-          type:
-            base.type === LINE_TYPES.DIRECTION
-              ? LINE_TYPES.DIRECTION
-              : LINE_TYPES.DIALOGUE,
-          music: base.music === true,
-        });
+        normalized.push(
+          createLineRecord(
+            {
+              ...base,
+              text: '',
+              type:
+                base.type === LINE_TYPES.DIRECTION
+                  ? LINE_TYPES.DIRECTION
+                  : LINE_TYPES.DIALOGUE,
+              music: base.music === true,
+            },
+            primaryLanguageId,
+          ),
+        );
       }
       return;
     }
@@ -619,14 +1171,20 @@ function normalizeScriptLines(entries, options = {}) {
       const text = sanitizeLineText(item.text);
       if (!text) {
         if (keepEmpty) {
-          normalized.push({
-            text: '',
-            type:
-              item.type === LINE_TYPES.DIRECTION
-                ? LINE_TYPES.DIRECTION
-                : LINE_TYPES.DIALOGUE,
-            music: item.music === true,
-          });
+          normalized.push(
+            createLineRecord(
+              {
+                ...item,
+                text: '',
+                type:
+                  item.type === LINE_TYPES.DIRECTION
+                    ? LINE_TYPES.DIRECTION
+                    : LINE_TYPES.DIALOGUE,
+                music: item.music === true,
+              },
+              primaryLanguageId,
+            ),
+          );
         }
         return;
       }
@@ -640,14 +1198,20 @@ function normalizeScriptLines(entries, options = {}) {
           return;
         }
       }
-      normalized.push({
-        text: cleanedText,
-        type:
-          item.type === LINE_TYPES.DIRECTION
-            ? LINE_TYPES.DIRECTION
-            : LINE_TYPES.DIALOGUE,
-        music: item.music === true,
-      });
+      normalized.push(
+        createLineRecord(
+          {
+            ...item,
+            text: cleanedText,
+            type:
+              item.type === LINE_TYPES.DIRECTION
+                ? LINE_TYPES.DIRECTION
+                : LINE_TYPES.DIALOGUE,
+            music: item.music === true,
+          },
+          primaryLanguageId,
+        ),
+      );
     });
   });
 
@@ -661,6 +1225,10 @@ function normalizeScriptLines(entries, options = {}) {
 function expandStageDirectionSegments(entry) {
   if (!entry || !entry.text) return [];
   if (entry.type === LINE_TYPES.DIRECTION) {
+    return [entry];
+  }
+  const translationKeys = Object.keys(entry.translations || {}).filter(Boolean);
+  if (translationKeys.length > 1) {
     return [entry];
   }
 
@@ -689,9 +1257,15 @@ function expandStageDirectionSegments(entry) {
       previous.text = `${previous.text}${needsLeadingSpace}${sanitized}`.trim();
     } else {
       segments.push({
+        id: generateId('line'),
         text: sanitized,
         type,
         music: entry.music === true,
+        role: type === LINE_TYPES.DIALOGUE ? entry.role || null : null,
+        translations:
+          entry.translations && typeof entry.translations === 'object'
+            ? { ...entry.translations }
+            : undefined,
       });
     }
   };
@@ -735,11 +1309,19 @@ function enforceLineLengths(entries, limit = MAX_LINE_LENGTH) {
     chunks.forEach((chunk) => {
       const text = sanitizeLineText(chunk);
       if (!text) return;
-      result.push({
-        text,
-        type: LINE_TYPES.DIALOGUE,
-        music: entry.music === true,
-      });
+      result.push(
+        createLineRecord(
+          {
+            id: generateId('line'),
+            text,
+            type: LINE_TYPES.DIALOGUE,
+            music: entry.music === true,
+            role: entry.role || null,
+            translations: { primary: text },
+          },
+          'primary',
+        ),
+      );
     });
   });
 
@@ -798,12 +1380,381 @@ function findBreakPosition(text, limit) {
 
 function ensureSessionLines(session) {
   if (!session) return [];
+  const primaryLanguageId = getPrimaryLanguageId(session);
   const normalized = normalizeScriptLines(session.lines || [], {
     keepEmpty: true,
+    primaryLanguageId,
   });
   session.lines = normalized;
   return session.lines;
 }
+
+function createLanguageDefinition(rawLanguage = {}, index = 0) {
+  const fallbackIsPrimary = index === 0;
+  const providedId =
+    typeof rawLanguage.id === 'string' && rawLanguage.id.trim()
+      ? rawLanguage.id.trim()
+      : '';
+  const id = fallbackIsPrimary ? 'primary' : providedId || generateId('lang');
+  const name = sanitizeLineText(
+    rawLanguage.name || (fallbackIsPrimary ? '第一語言' : `語言 ${index + 1}`),
+  ).slice(0, 40);
+  const code = sanitizeLineText(
+    rawLanguage.code || `lang-${index + 1}`,
+  ).slice(0, 20);
+
+  return {
+    id,
+    name: name || (fallbackIsPrimary ? '第一語言' : `語言 ${index + 1}`),
+    code: code || `lang-${index + 1}`,
+    isPrimary: fallbackIsPrimary,
+  };
+}
+
+function getPrimaryLanguageId(session) {
+  const primaryLanguage = Array.isArray(session?.languages)
+    ? session.languages[0]
+    : null;
+  return primaryLanguage?.id || 'primary';
+}
+
+function buildBlankTranslationsForSession(session) {
+  const translations = {};
+  const languages = Array.isArray(session?.languages) ? session.languages : [];
+  languages.forEach((language, index) => {
+    const languageId =
+      typeof language?.id === 'string' && language.id.trim()
+        ? language.id.trim()
+        : index === 0
+          ? 'primary'
+          : generateId('lang');
+    translations[languageId] = '';
+  });
+  if (!Object.prototype.hasOwnProperty.call(translations, 'primary')) {
+    translations.primary = '';
+  }
+  return translations;
+}
+
+function ensureSessionLanguages(session) {
+  const uniqueIds = new Set();
+  const inputLanguages = Array.isArray(session?.languages) ? session.languages : [];
+  const normalized = inputLanguages.map((language, index) => {
+    const next = createLanguageDefinition(language, index);
+    if (uniqueIds.has(next.id)) {
+      next.id = index === 0 ? 'primary' : generateId('lang');
+    }
+    next.isPrimary = index === 0;
+    uniqueIds.add(next.id);
+    return next;
+  });
+
+  if (normalized.length === 0) {
+    normalized.push(createLanguageDefinition({}, 0));
+  }
+
+  if (normalized[0].id !== 'primary') {
+    normalized.unshift(createLanguageDefinition({}, 0));
+  } else {
+    normalized[0] = createLanguageDefinition(normalized[0], 0);
+  }
+
+  session.languages = normalized.map((language, index) =>
+    createLanguageDefinition(language, index),
+  );
+  return session.languages;
+}
+
+function createCellDefinition(rawCell = {}, index = 0, primaryLanguageId = 'primary') {
+  const name = sanitizeLineText(rawCell.name || `儲存格 ${index + 1}`).slice(0, 48);
+  const rawLines = Array.isArray(rawCell.lines) ? rawCell.lines : [];
+
+  return {
+    id:
+      typeof rawCell.id === 'string' && rawCell.id.trim()
+        ? rawCell.id.trim()
+        : generateId('cell'),
+    name: name || `儲存格 ${index + 1}`,
+    lines: normalizeScriptLines(rawLines, {
+      keepEmpty: true,
+      primaryLanguageId,
+    }),
+  };
+}
+
+function getSelectedCell(session) {
+  if (!session || !Array.isArray(session.cells) || session.cells.length === 0) {
+    return null;
+  }
+
+  const selected =
+    typeof session.selectedCellId === 'string'
+      ? session.cells.find((cell) => cell.id === session.selectedCellId)
+      : null;
+  return selected || session.cells[0] || null;
+}
+
+function syncSelectedCellLines(session) {
+  if (!session) return [];
+  const cell = getSelectedCell(session);
+  if (!cell) {
+    session.lines = [];
+    return session.lines;
+  }
+
+  session.selectedCellId = cell.id;
+  session.lines = cell.lines;
+  ensureSessionLines(session);
+  cell.lines = session.lines;
+
+  if (session.currentIndex >= session.lines.length) {
+    session.currentIndex = Math.max(session.lines.length - 1, 0);
+  }
+
+  return session.lines;
+}
+
+function ensureSessionHistory(session) {
+  if (!session.history || typeof session.history !== 'object') {
+    session.history = { past: [], future: [] };
+  }
+  if (!Array.isArray(session.history.past)) {
+    session.history.past = [];
+  }
+  if (!Array.isArray(session.history.future)) {
+    session.history.future = [];
+  }
+  return session.history;
+}
+
+function captureSessionSnapshot(session) {
+  return JSON.parse(
+    JSON.stringify({
+      languages: session.languages,
+      cells: session.cells,
+      selectedCellId: session.selectedCellId,
+      currentIndex: session.currentIndex,
+      displayEnabled: session.displayEnabled,
+      status: session.status,
+      endedAt: session.endedAt || null,
+    }),
+  );
+}
+
+function pushSessionHistory(session) {
+  const history = ensureSessionHistory(session);
+  history.past.push(captureSessionSnapshot(session));
+  if (history.past.length > SESSION_HISTORY_LIMIT) {
+    history.past.splice(0, history.past.length - SESSION_HISTORY_LIMIT);
+  }
+  history.future = [];
+}
+
+function restoreSessionSnapshot(session, snapshot) {
+  if (!session || !snapshot) return;
+  session.languages = Array.isArray(snapshot.languages)
+    ? snapshot.languages
+    : session.languages;
+  session.cells = Array.isArray(snapshot.cells) ? snapshot.cells : session.cells;
+  session.selectedCellId =
+    typeof snapshot.selectedCellId === 'string'
+      ? snapshot.selectedCellId
+      : session.selectedCellId;
+  session.currentIndex = Number.isInteger(snapshot.currentIndex)
+    ? snapshot.currentIndex
+    : 0;
+  session.displayEnabled = snapshot.displayEnabled !== false;
+  session.status = snapshot.status === 'ended' ? 'ended' : 'active';
+  session.endedAt =
+    Number.isFinite(snapshot.endedAt) && snapshot.endedAt > 0
+      ? snapshot.endedAt
+      : null;
+  ensureSessionStructure(session);
+}
+
+function canUndoSession(session) {
+  return ensureSessionHistory(session).past.length > 0;
+}
+
+function canRedoSession(session) {
+  return ensureSessionHistory(session).future.length > 0;
+}
+
+function undoSessionHistory(session) {
+  const history = ensureSessionHistory(session);
+  if (history.past.length === 0) return false;
+  history.future.push(captureSessionSnapshot(session));
+  const snapshot = history.past.pop();
+  restoreSessionSnapshot(session, snapshot);
+  return true;
+}
+
+function redoSessionHistory(session) {
+  const history = ensureSessionHistory(session);
+  if (history.future.length === 0) return false;
+  history.past.push(captureSessionSnapshot(session));
+  const snapshot = history.future.pop();
+  restoreSessionSnapshot(session, snapshot);
+  return true;
+}
+
+function ensureSessionStructure(session) {
+  if (!session || typeof session !== 'object') return null;
+  const createdAt =
+    Number.isFinite(session.createdAt) && session.createdAt > 0
+      ? session.createdAt
+      : Date.now();
+
+  session.id =
+    typeof session.id === 'string' && session.id.trim()
+      ? session.id.trim()
+      : generateId('session');
+  session.ownerUserId =
+    typeof session.ownerUserId === 'string' && session.ownerUserId.trim()
+      ? session.ownerUserId.trim()
+      : session.ownerUserId || '';
+  session.title =
+    sanitizeLineText(session.title || '') ||
+    `場次 ${new Date(createdAt).toLocaleString('zh-TW', {
+      hour12: false,
+    })}`;
+  session.viewerToken =
+    typeof session.viewerToken === 'string' && session.viewerToken.trim()
+      ? session.viewerToken.trim()
+      : createOpaqueToken(18);
+  session.createdAt = createdAt;
+  session.updatedAt =
+    Number.isFinite(session.updatedAt) && session.updatedAt > 0
+      ? session.updatedAt
+      : createdAt;
+  session.status = session.status === 'ended' ? 'ended' : 'active';
+  session.endedAt =
+    Number.isFinite(session.endedAt) && session.endedAt > 0
+      ? session.endedAt
+      : null;
+  session.displayEnabled = session.displayEnabled !== false;
+
+  ensureSessionLanguages(session);
+  const primaryLanguageId = getPrimaryLanguageId(session);
+
+  const rawCells =
+    Array.isArray(session.cells) && session.cells.length > 0
+      ? session.cells
+      : [
+          {
+            id: generateId('cell'),
+            name: '儲存格 1',
+            lines: Array.isArray(session.lines) ? session.lines : [],
+          },
+        ];
+
+  session.cells = rawCells.map((cell, index) =>
+    createCellDefinition(cell, index, primaryLanguageId),
+  );
+
+  const selectedCell = getSelectedCell(session);
+  session.selectedCellId = selectedCell?.id || session.cells[0].id;
+  session.currentIndex = Number.isInteger(session.currentIndex)
+    ? Math.max(session.currentIndex, 0)
+    : 0;
+  session.transcription = ensureTranscriptionState(session);
+  ensureSessionHistory(session);
+  syncSelectedCellLines(session);
+
+  return session;
+}
+
+function createSessionRecord(ownerUserId) {
+  const now = Date.now();
+  return ensureSessionStructure({
+    id: generateId('session'),
+    ownerUserId,
+    viewerToken: createOpaqueToken(18),
+    title: '',
+    createdAt: now,
+    updatedAt: now,
+    status: 'active',
+    displayEnabled: true,
+    languages: [createLanguageDefinition({}, 0)],
+    selectedCellId: null,
+    currentIndex: 0,
+    cells: [createCellDefinition({}, 0, 'primary')],
+  });
+}
+
+function serializeSessionForStorage(session) {
+  const normalized = ensureSessionStructure({ ...session });
+  return {
+    id: normalized.id,
+    ownerUserId: normalized.ownerUserId,
+    title: normalized.title,
+    viewerToken: normalized.viewerToken,
+    status: normalized.status,
+    createdAt: normalized.createdAt,
+    updatedAt: normalized.updatedAt,
+    endedAt: normalized.endedAt,
+    displayEnabled: normalized.displayEnabled,
+    selectedCellId: normalized.selectedCellId,
+    currentIndex: normalized.currentIndex,
+    languages: normalized.languages.map((language) => ({
+      id: language.id,
+      name: language.name,
+      code: language.code,
+      isPrimary: language.isPrimary === true,
+    })),
+    cells: normalized.cells.map((cell) => ({
+      id: cell.id,
+      name: cell.name,
+      lines: cell.lines,
+    })),
+  };
+}
+
+const persistedStore = loadStore();
+persistedStore.users.forEach((user) => {
+  if (!user || typeof user !== 'object') return;
+  if (typeof user.id !== 'string' || !user.id.trim()) return;
+  users.set(user.id, {
+    id: user.id,
+    username: normalizeDisplayName(user.username),
+    usernameNormalized: normalizeUsername(
+      user.usernameNormalized || user.username,
+    ),
+    role: normalizeUserRole(
+      user.role,
+      USER_ROLES.VIEWER,
+    ),
+    disabledAt:
+      Number.isFinite(user.disabledAt) && user.disabledAt > 0
+        ? user.disabledAt
+        : null,
+    passwordReset:
+      user.passwordReset && typeof user.passwordReset === 'object'
+        ? user.passwordReset
+        : null,
+    passwordHash:
+      typeof user.passwordHash === 'string' ? user.passwordHash : '',
+    createdAt:
+      Number.isFinite(user.createdAt) && user.createdAt > 0
+        ? user.createdAt
+        : Date.now(),
+  });
+});
+persistedStore.authSessions.forEach((authSession) => {
+  if (!authSession || typeof authSession !== 'object') return;
+  if (typeof authSession.tokenHash !== 'string' || !authSession.tokenHash) {
+    return;
+  }
+  authSessions.set(authSession.tokenHash, authSession);
+});
+persistedStore.sessions.forEach((rawSession) => {
+  const normalized = ensureSessionStructure(rawSession);
+  if (!normalized || !normalized.id) return;
+  sessions.set(normalized.id, normalized);
+});
+cleanupExpiredAuthSessions();
+ensureAdminBootstrapUser();
+persistApplicationStore();
 
 function normalizeForComparison(text) {
   return text
@@ -928,9 +1879,11 @@ async function parseChunk({
       role: 'user',
       content: `
 你正在拆解第 ${chunkIndex + 1} 段（共 ${totalChunks} 段）的劇本內容，請輸出 JSON array，元素格式為：
-{ "type": "dialogue" | "direction", "text": "原文內容" }
+{ "type": "dialogue" | "direction", "text": "原文內容", "role": "角色名稱或 null" }
 
 請保持原始順序與文字，不新增或刪除任何內容，也不要重複前面處理過的段落。
+如果能明確辨識台詞說話角色，請填入 role；若無法確定就填 null。
+若原文是「角色：台詞」，請把角色放進 role，text 只保留實際台詞。
 若文字過長，請以保留語意為優先，盡量在空格處切開，確保每段不超過 20 個中文字。
 內容如下：
 ${chunkText}
@@ -2816,16 +3769,77 @@ function flushQueuedRealtimeAudio(stream) {
   });
 }
 
+function toPublicLine(line) {
+  if (!line || typeof line !== 'object') return null;
+  const text = sanitizeLineText(line.text || '');
+  return {
+    id:
+      typeof line.id === 'string' && line.id.trim()
+        ? line.id.trim()
+        : generateId('line'),
+    text,
+    type:
+      line.type === LINE_TYPES.DIRECTION
+        ? LINE_TYPES.DIRECTION
+        : LINE_TYPES.DIALOGUE,
+    music: line.music === true,
+    role: normalizeRoleName(line.role) || null,
+    translations: normalizeTranslationsMap(
+      line.translations,
+      'primary',
+      text,
+    ),
+  };
+}
+
+function getSessionSummary(session) {
+  const normalized = ensureSessionStructure(session);
+  return {
+    id: normalized.id,
+    title: normalized.title,
+    viewerToken: normalized.viewerToken,
+    status: normalized.status,
+    createdAt: normalized.createdAt,
+    updatedAt: normalized.updatedAt,
+    endedAt: normalized.endedAt,
+    selectedCellId: normalized.selectedCellId,
+    cells: normalized.cells.map((cell) => ({
+      id: cell.id,
+      name: cell.name,
+      lineCount: Array.isArray(cell.lines) ? cell.lines.length : 0,
+    })),
+    languages: normalized.languages,
+  };
+}
+
+function getControlPayload(session) {
+  const normalized = ensureSessionStructure(session);
+  const lines = ensureSessionLines(normalized).map((line) => toPublicLine(line));
+  return {
+    sessionId: normalized.id,
+    session: getSessionSummary(normalized),
+    lines,
+    currentIndex: normalized.currentIndex,
+    displayEnabled: normalized.displayEnabled,
+    transcription: getPublicTranscriptionState(normalized),
+    history: {
+      canUndo: canUndoSession(normalized),
+      canRedo: canRedoSession(normalized),
+    },
+  };
+}
+
 function getViewerPayload(session) {
-  const lines = ensureSessionLines(session);
-  if (session.currentIndex >= lines.length) {
-    session.currentIndex = Math.max(lines.length - 1, 0);
+  const normalized = ensureSessionStructure(session);
+  const lines = ensureSessionLines(normalized);
+  if (normalized.currentIndex >= lines.length) {
+    normalized.currentIndex = Math.max(lines.length - 1, 0);
   }
 
-  const transcription = ensureTranscriptionState(session);
+  const transcription = ensureTranscriptionState(normalized);
   const liveText = sanitizeTranscriptionMultilineText(transcription.text);
   const hasLiveText = transcription.active && liveText.length > 0;
-  const activeStream = transcriptionStreams.get(session.id);
+  const activeStream = transcriptionStreams.get(normalized.id);
   const liveEntries = hasLiveText
     ? buildTranscriptionDisplayEntries(activeStream)
         .map((entry) => ({
@@ -2844,12 +3858,16 @@ function getViewerPayload(session) {
             .filter(Boolean))
     : [];
   const activeScriptLine =
-    lines.length > 0 ? lines[session.currentIndex] || null : null;
+    lines.length > 0 ? lines[normalized.currentIndex] || null : null;
   const musicActive = isLineMarkedMusic(activeScriptLine);
   const musicText = musicActive ? '此處有音樂' : '';
 
-  if (!session.displayEnabled) {
+  if (!normalized.displayEnabled) {
     return {
+      sessionId: normalized.id,
+      viewerToken: normalized.viewerToken,
+      status: normalized.status,
+      languages: normalized.languages,
       line: null,
       text: '',
       liveEntries: [],
@@ -2858,12 +3876,16 @@ function getViewerPayload(session) {
       musicText: '',
       displayEnabled: false,
       source: 'hidden',
-      transcription: getPublicTranscriptionState(session),
+      transcription: getPublicTranscriptionState(normalized),
     };
   }
 
   if (hasLiveText) {
     return {
+      sessionId: normalized.id,
+      viewerToken: normalized.viewerToken,
+      status: normalized.status,
+      languages: normalized.languages,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
         type: LINE_TYPES.DIALOGUE,
@@ -2875,12 +3897,16 @@ function getViewerPayload(session) {
       musicText,
       displayEnabled: true,
       source: 'transcription',
-      transcription: getPublicTranscriptionState(session),
+      transcription: getPublicTranscriptionState(normalized),
     };
   }
 
   return {
-    line: activeScriptLine,
+    sessionId: normalized.id,
+    viewerToken: normalized.viewerToken,
+    status: normalized.status,
+    languages: normalized.languages,
+    line: toPublicLine(activeScriptLine),
     text:
       activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
         ? ''
@@ -2891,50 +3917,62 @@ function getViewerPayload(session) {
     musicText,
     displayEnabled: true,
     source: 'script',
-    transcription: getPublicTranscriptionState(session),
+    transcription: getPublicTranscriptionState(normalized),
   };
 }
 
 /**
  * Returns or creates a session state bucket.
  */
-function ensureSession(sessionId) {
+function ensureSession(sessionId, ownerUserId = '') {
   if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, {
-      id: sessionId,
-      lines: [],
-      currentIndex: 0,
-      displayEnabled: true,
-      transcription: defaultTranscriptionState(),
-      createdAt: Date.now(),
-    });
+    const session = createSessionRecord(ownerUserId);
+    session.id = sessionId;
+    session.ownerUserId = ownerUserId || session.ownerUserId;
+    sessions.set(sessionId, session);
   }
 
   const session = sessions.get(sessionId);
-  ensureTranscriptionState(session);
-  return session;
+  return ensureSessionStructure(session);
 }
 
 function getSession(sessionId) {
-  return sessions.get(sessionId);
+  const session = sessions.get(sessionId);
+  return session ? ensureSessionStructure(session) : null;
+}
+
+function getSessionByViewerToken(viewerToken) {
+  if (typeof viewerToken !== 'string' || !viewerToken.trim()) return null;
+  return (
+    Array.from(sessions.values()).find(
+      (session) => session.viewerToken === viewerToken.trim(),
+    ) || null
+  );
+}
+
+function getOwnedSession(sessionId, userId) {
+  const session = getSession(sessionId);
+  if (!session) return null;
+  if (!userId || session.ownerUserId !== userId) return null;
+  return session;
+}
+
+function touchSession(session) {
+  if (!session) return;
+  session.updatedAt = Date.now();
+}
+
+function persistSession(session) {
+  if (!session) return;
+  touchSession(session);
+  sessions.set(session.id, session);
+  persistApplicationStore();
 }
 
 function broadcastControlState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
-
-  const lines = ensureSessionLines(session);
-  const transcription = getPublicTranscriptionState(session);
-  if (session.currentIndex >= lines.length) {
-    session.currentIndex = Math.max(lines.length - 1, 0);
-  }
-
-  io.to(`control:${sessionId}`).emit('control:update', {
-    lines,
-    currentIndex: session.currentIndex,
-    displayEnabled: session.displayEnabled,
-    transcription,
-  });
+  io.to(`control:${sessionId}`).emit('control:update', getControlPayload(session));
 }
 
 function broadcastTranscriptionState(sessionId) {
@@ -2996,118 +4034,741 @@ async function parseScriptWithOpenAI(rawText, apiKey) {
   return enforceLineLengths(combined);
 }
 
-app.post('/api/session', (_req, res) => {
-  const sessionId = DEFAULT_SESSION_ID;
-  ensureSession(sessionId);
-  res.json({
-    sessionId,
-    viewerPath: `/viewer`,
-    controlPath: `/control`,
+function buildFallbackAlignedTranslations(rawText, targetCount) {
+  if (!Number.isInteger(targetCount) || targetCount <= 0) {
+    return [];
+  }
+
+  const units = fallbackSegmentScript(rawText)
+    .map((entry) => sanitizeLineText(entry?.text || ''))
+    .filter(Boolean);
+
+  if (units.length === 0) {
+    return Array.from({ length: targetCount }, () => '');
+  }
+
+  if (targetCount === 1) {
+    return [units.join(' ')];
+  }
+
+  return Array.from({ length: targetCount }, (_value, index) => {
+    const start = Math.floor((index * units.length) / targetCount);
+    const end = Math.floor(((index + 1) * units.length) / targetCount);
+    if (end <= start) {
+      return '';
+    }
+    return units.slice(start, end).join(' ').trim();
+  });
+}
+
+async function alignSecondaryLanguageWithOpenAI({
+  rawText,
+  apiKey,
+  baseLines,
+  languageName,
+}) {
+  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
+  if (targetCount === 0) {
+    return [];
+  }
+
+  const client = new OpenAI({ apiKey });
+  const prompt = [
+    {
+      role: 'system',
+      content:
+        'You align a translated theater script to an existing subtitle segmentation and preserve the target language order.',
+    },
+    {
+      role: 'user',
+      content: `
+請把以下目標語言劇本文字，對齊到既有字幕分段。
+
+規則：
+1. 一定要輸出 JSON array。
+2. array 長度一定要和既有字幕數量完全一致，共 ${targetCount} 筆。
+3. 每筆格式為 { "text": "..." }。
+4. 必須依照目標語言原本順序往下分配，不可重排，不可跳號，不可改寫意思。
+5. 可以依據既有字幕的節奏切段，但不要把同一句目標語言打亂順序。
+6. 若某一筆沒有合適內容可對應，可輸出空字串。
+
+既有字幕分段如下：
+${baseLines
+  .map((line, index) => `${index + 1}. ${sanitizeLineText(line?.text || '')}`)
+  .join('\n')}
+
+目標語言名稱：${sanitizeLineText(languageName || '第二語言')}
+
+目標語言全文如下：
+${rawText}
+      `.trim(),
+    },
+  ];
+
+  const response = await client.responses.create({
+    model: 'gpt-4o-mini',
+    input: prompt,
+    temperature: 0.1,
+    max_output_tokens: 5000,
+  });
+
+  const output = response.output_text?.trim();
+  if (!output) {
+    throw new Error('未能取得對齊結果');
+  }
+
+  const sanitized = output
+    .replace(/^```json/i, '')
+    .replace(/^```/i, '')
+    .replace(/```$/i, '')
+    .trim();
+  const parsed = parseJsonArrayLoose(sanitized);
+  if (!Array.isArray(parsed)) {
+    throw new Error('對齊結果格式錯誤');
+  }
+
+  const aligned = parsed.map((entry) => sanitizeLineText(entry?.text || ''));
+  if (aligned.length !== targetCount) {
+    throw new Error('對齊筆數與主字幕不一致');
+  }
+
+  return aligned;
+}
+
+function applyAlignedLanguageToLines(lines, languageId, alignedTexts) {
+  if (!Array.isArray(lines)) {
+    return [];
+  }
+
+  return lines.map((line, index) => {
+    if (!line || typeof line !== 'object') return line;
+    const translations = normalizeTranslationsMap(
+      line.translations,
+      'primary',
+      line.text || '',
+    );
+    translations[languageId] = sanitizeLineText(alignedTexts[index] || '');
+    return {
+      ...line,
+      translations,
+    };
+  });
+}
+
+function getOwnedSessionFromRequest(req, res) {
+  if (!canManageSessions(req.authUser)) {
+    res.status(403).json({ error: '目前權限無法管理控制端場次' });
+    return null;
+  }
+  const { sessionId } = req.params;
+  const userId = req.authUser?.id;
+  const session = getOwnedSession(sessionId, userId);
+  if (!session) {
+    res.status(404).json({ error: '找不到場次' });
+    return null;
+  }
+  return session;
+}
+
+app.post('/api/auth/register', (req, res) => {
+  const username = normalizeDisplayName(req.body?.username);
+  const usernameNormalized = normalizeUsername(req.body?.username);
+  const password = normalizePassword(req.body?.password);
+
+  if (username.length < 3) {
+    return res.status(400).json({ error: '帳號至少需要 3 個字' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密碼至少需要 6 個字' });
+  }
+  if (findUserByNormalizedUsername(usernameNormalized)) {
+    return res.status(409).json({ error: '此帳號已存在' });
+  }
+
+  const role = countAdminUsers() === 0 ? USER_ROLES.ADMIN : USER_ROLES.OPERATOR;
+  const user = createUserRecord({
+    username,
+    usernameNormalized,
+    password,
+    role,
+  });
+  users.set(user.id, user);
+
+  const { token, record } = createAuthTokenRecord(user.id);
+  authSessions.set(record.tokenHash, record);
+  persistApplicationStore();
+  setAuthCookie(res, token);
+  res.json({ user: serializeUser(user) });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const usernameNormalized = normalizeUsername(req.body?.username);
+  const password = normalizePassword(req.body?.password);
+  const user = findUserByNormalizedUsername(usernameNormalized);
+
+  if (!user || !verifyPassword(password, user.passwordHash)) {
+    return res.status(401).json({ error: '帳號或密碼錯誤' });
+  }
+  if (isUserDisabled(user)) {
+    return res.status(403).json({ error: '此帳號已停用' });
+  }
+
+  const { token, record } = createAuthTokenRecord(user.id);
+  authSessions.set(record.tokenHash, record);
+  persistApplicationStore();
+  setAuthCookie(res, token);
+  res.json({ user: serializeUser(user) });
+});
+
+app.post('/api/auth/change-password', requireAuth, (req, res) => {
+  const currentPassword = normalizePassword(req.body?.currentPassword);
+  const nextPassword = normalizePassword(req.body?.newPassword);
+
+  if (!verifyPassword(currentPassword, req.authUser.passwordHash)) {
+    return res.status(401).json({ error: '目前密碼錯誤' });
+  }
+  if (nextPassword.length < 6) {
+    return res.status(400).json({ error: '新密碼至少需要 6 個字' });
+  }
+
+  req.authUser.passwordHash = createPasswordHash(nextPassword);
+  clearPasswordResetCode(req.authUser);
+  revokeUserAuthSessions(req.authUser.id);
+
+  const { token, record } = createAuthTokenRecord(req.authUser.id);
+  authSessions.set(record.tokenHash, record);
+  persistApplicationStore();
+  setAuthCookie(res, token);
+  res.json({ user: serializeUser(req.authUser) });
+});
+
+app.post('/api/auth/forgot-password/request', (req, res) => {
+  const usernameNormalized = normalizeUsername(req.body?.username);
+  const user = findUserByNormalizedUsername(usernameNormalized);
+
+  if (!user || isUserDisabled(user)) {
+    return res.json({
+      ok: true,
+      message: '如果帳號存在，系統已產生重設資訊',
+    });
+  }
+
+  const resetCode = issuePasswordResetCode(user);
+  persistApplicationStore();
+  return res.json({
+    ok: true,
+    message: '已產生重設碼，請在有效時間內完成重設',
+    resetCode,
+    expiresAt: user.passwordReset?.expiresAt || null,
   });
 });
 
-app.get('/api/session/:sessionId', (req, res) => {
-  const { sessionId } = req.params;
-  const session = getSession(sessionId);
+app.post('/api/auth/forgot-password/reset', (req, res) => {
+  const usernameNormalized = normalizeUsername(req.body?.username);
+  const code = normalizeResetCode(req.body?.code);
+  const nextPassword = normalizePassword(req.body?.newPassword);
+  const user = findUserByNormalizedUsername(usernameNormalized);
 
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
+  if (!user || isUserDisabled(user)) {
+    return res.status(400).json({ error: '重設碼無效或已失效' });
+  }
+  if (nextPassword.length < 6) {
+    return res.status(400).json({ error: '新密碼至少需要 6 個字' });
+  }
+  if (!verifyPasswordResetCode(user, code)) {
+    return res.status(400).json({ error: '重設碼無效或已失效' });
   }
 
-  const lines = ensureSessionLines(session);
+  user.passwordHash = createPasswordHash(nextPassword);
+  clearPasswordResetCode(user);
+  revokeUserAuthSessions(user.id);
+
+  const { token, record } = createAuthTokenRecord(user.id);
+  authSessions.set(record.tokenHash, record);
+  persistApplicationStore();
+  setAuthCookie(res, token);
   res.json({
-    sessionId,
-    lines,
-    currentIndex: session.currentIndex,
-    displayEnabled: session.displayEnabled,
-    transcription: getPublicTranscriptionState(session),
+    ok: true,
+    message: '密碼已重設並登入',
+    user: serializeUser(user),
   });
 });
 
-app.get('/api/session/:sessionId/viewer', (req, res) => {
-  const { sessionId } = req.params;
-  const session = getSession(sessionId);
+app.post('/api/auth/logout', (req, res) => {
+  if (req.authSession?.tokenHash) {
+    authSessions.delete(req.authSession.tokenHash);
+    persistApplicationStore();
+  }
+  clearAuthCookie(res);
+  res.json({ ok: true });
+});
 
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
+app.get('/api/auth/me', (req, res) => {
+  res.json({ user: serializeUser(req.authUser) });
+});
+
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  const adminUsers = Array.from(users.values())
+    .map((user) => getAdminUserPayload(user))
+    .sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+
+  res.json({ users: adminUsers });
+});
+
+app.patch('/api/admin/users/:userId', requireAdmin, (req, res) => {
+  const targetUser = users.get(req.params.userId);
+  if (!targetUser) {
+    return res.status(404).json({ error: '找不到帳號' });
   }
 
-  const payload = getViewerPayload(session);
-  res.json(payload);
+  const hasRoleChange = Object.prototype.hasOwnProperty.call(req.body || {}, 'role');
+  const hasDisableChange = Object.prototype.hasOwnProperty.call(
+    req.body || {},
+    'disabled',
+  );
+  const hasPasswordChange = Object.prototype.hasOwnProperty.call(
+    req.body || {},
+    'newPassword',
+  );
+  const requestedRole = normalizeUserRole(req.body?.role, targetUser.role);
+  const requestedDisabled =
+    typeof req.body?.disabled === 'boolean'
+      ? req.body.disabled
+      : isUserDisabled(targetUser);
+  const nextPassword = normalizePassword(req.body?.newPassword);
+
+  if (
+    req.authUser.id === targetUser.id &&
+    ((hasRoleChange && requestedRole !== targetUser.role) ||
+      (hasDisableChange && requestedDisabled))
+  ) {
+    return res.status(400).json({ error: '不能在管理後台停用自己或變更自己的權限' });
+  }
+  if (req.authUser.id === targetUser.id && hasPasswordChange) {
+    return res.status(400).json({ error: '請到首頁的帳號設定修改自己的密碼' });
+  }
+
+  const adminTransitionError = ensureUserCanTransitionFromAdmin(
+    targetUser,
+    requestedRole,
+    requestedDisabled,
+  );
+  if (adminTransitionError) {
+    return res.status(400).json({ error: adminTransitionError });
+  }
+
+  if (hasRoleChange) {
+    targetUser.role = requestedRole;
+  }
+  if (hasDisableChange) {
+    targetUser.disabledAt = requestedDisabled ? Date.now() : null;
+    if (requestedDisabled) {
+      revokeUserAuthSessions(targetUser.id);
+    }
+  }
+  if (hasPasswordChange) {
+    if (nextPassword.length < 6) {
+      return res.status(400).json({ error: '新密碼至少需要 6 個字' });
+    }
+    targetUser.passwordHash = createPasswordHash(nextPassword);
+    clearPasswordResetCode(targetUser);
+    revokeUserAuthSessions(targetUser.id);
+  }
+
+  persistApplicationStore();
+  res.json({ user: getAdminUserPayload(targetUser) });
+});
+
+app.delete('/api/admin/users/:userId', requireAdmin, (req, res) => {
+  const targetUser = users.get(req.params.userId);
+  if (!targetUser) {
+    return res.status(404).json({ error: '找不到帳號' });
+  }
+  if (req.authUser.id === targetUser.id) {
+    return res.status(400).json({ error: '不能刪除目前登入中的管理員帳號' });
+  }
+
+  const adminTransitionError = ensureUserCanTransitionFromAdmin(
+    targetUser,
+    USER_ROLES.VIEWER,
+    true,
+  );
+  if (adminTransitionError) {
+    return res.status(400).json({ error: adminTransitionError });
+  }
+
+  revokeUserAuthSessions(targetUser.id);
+  clearPasswordResetCode(targetUser);
+  const removedSessionCount = deleteOwnedSessionsForUser(
+    targetUser.id,
+    'owner account deleted',
+  );
+  users.delete(targetUser.id);
+  persistApplicationStore();
+
+  res.json({
+    ok: true,
+    removedSessionCount,
+  });
+});
+
+app.get('/api/sessions', requireAuth, (req, res) => {
+  const ownedSessions = Array.from(sessions.values())
+    .filter((session) => session.ownerUserId === req.authUser.id)
+    .map((session) => getSessionSummary(session))
+    .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
+
+  res.json({ sessions: ownedSessions });
+});
+
+app.post('/api/session', requireSessionManager, (req, res) => {
+  const session = createSessionRecord(req.authUser.id);
+  const requestedTitle = sanitizeLineText(req.body?.title || '');
+  if (requestedTitle) {
+    session.title = requestedTitle.slice(0, 60);
+  }
+  sessions.set(session.id, session);
+  persistSession(session);
+  res.json(getControlPayload(session));
+});
+
+app.get('/api/session/:sessionId', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  res.json(getControlPayload(session));
+});
+
+app.get('/api/session/:sessionId/viewer', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  res.json(getViewerPayload(session));
+});
+
+app.get('/api/viewer/:viewerToken', (req, res) => {
+  const session = getSessionByViewerToken(req.params.viewerToken);
+  if (!session || session.status === 'ended') {
+    return res.status(410).json({ error: '場次不存在或已結束' });
+  }
+  res.json(getViewerPayload(session));
+});
+
+app.post('/api/session/:sessionId/end', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  session.status = 'ended';
+  session.endedAt = Date.now();
+  session.displayEnabled = false;
+  persistSession(session);
+
+  stopTranscriptionStream(session.id, {
+    keepText: false,
+    reason: 'session ended',
+  });
+  broadcastControlState(session.id);
+  io.to(`viewer:${session.id}`).emit('viewer:expired', {
+    message: '本場次已結束，檢視端已失效',
+  });
+
+  res.json(getControlPayload(session));
+});
+
+app.post('/api/session/:sessionId/undo', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  if (!undoSessionHistory(session)) {
+    return res.status(400).json({ error: '目前沒有可復原的操作' });
+  }
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.post('/api/session/:sessionId/redo', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  if (!redoSessionHistory(session)) {
+    return res.status(400).json({ error: '目前沒有可還原的操作' });
+  }
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.post('/api/session/:sessionId/cells', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  pushSessionHistory(session);
+  const cell = createCellDefinition(
+    { name: req.body?.name || `儲存格 ${session.cells.length + 1}` },
+    session.cells.length,
+    getPrimaryLanguageId(session),
+  );
+  session.cells.push(cell);
+  session.selectedCellId = cell.id;
+  session.currentIndex = 0;
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.put('/api/session/:sessionId/cells/:cellId', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  const cell = session.cells.find((entry) => entry.id === req.params.cellId);
+  if (!cell) {
+    return res.status(404).json({ error: '找不到儲存格' });
+  }
+  const nextName = sanitizeLineText(req.body?.name || '').slice(0, 48);
+  if (!nextName) {
+    return res.status(400).json({ error: '請輸入儲存格名稱' });
+  }
+  pushSessionHistory(session);
+  cell.name = nextName;
+  persistSession(session);
+  broadcastControlState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.post('/api/session/:sessionId/cells/:cellId/select', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  const cell = session.cells.find((entry) => entry.id === req.params.cellId);
+  if (!cell) {
+    return res.status(404).json({ error: '找不到儲存格' });
+  }
+  session.selectedCellId = cell.id;
+  session.currentIndex = Math.min(session.currentIndex, Math.max(cell.lines.length - 1, 0));
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.delete('/api/session/:sessionId/cells/:cellId', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  if (session.cells.length <= 1) {
+    return res.status(400).json({ error: '至少要保留一個儲存格' });
+  }
+  const targetIndex = session.cells.findIndex((entry) => entry.id === req.params.cellId);
+  if (targetIndex === -1) {
+    return res.status(404).json({ error: '找不到儲存格' });
+  }
+  pushSessionHistory(session);
+  session.cells.splice(targetIndex, 1);
+  if (session.selectedCellId === req.params.cellId) {
+    session.selectedCellId = session.cells[Math.max(targetIndex - 1, 0)].id;
+    session.currentIndex = 0;
+  }
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.post('/api/session/:sessionId/languages', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  const name = sanitizeLineText(req.body?.name || '').slice(0, 40);
+  if (!name) {
+    return res.status(400).json({ error: '請輸入語言名稱' });
+  }
+  pushSessionHistory(session);
+  session.languages.push(
+    createLanguageDefinition(
+      {
+        id: generateId('lang'),
+        name,
+        code: sanitizeLineText(req.body?.code || '') || `lang-${session.languages.length + 1}`,
+      },
+      session.languages.length,
+    ),
+  );
+  ensureSessionLanguages(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.delete('/api/session/:sessionId/languages/:languageId', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  const { languageId } = req.params;
+  if (languageId === 'primary') {
+    return res.status(400).json({ error: '第一語言不可刪除' });
+  }
+  const languageIndex = session.languages.findIndex((entry) => entry.id === languageId);
+  if (languageIndex === -1) {
+    return res.status(404).json({ error: '找不到語言' });
+  }
+  pushSessionHistory(session);
+  session.languages.splice(languageIndex, 1);
+  session.cells = session.cells.map((cell) => ({
+    ...cell,
+    lines: cell.lines.map((line) => {
+      const translations = { ...(line.translations || {}) };
+      delete translations[languageId];
+      return { ...line, translations };
+    }),
+  }));
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
 });
 
 app.post(
-  '/api/session/:sessionId/script/parse',
+  '/api/session/:sessionId/cells/:cellId/languages/:languageId/parse',
+  requireAuth,
   async (req, res) => {
-    const { sessionId } = req.params;
-    const apiKey = req.body.apiKey?.trim();
+    const session = getOwnedSessionFromRequest(req, res);
+    if (!session) return;
+
+    const cell = session.cells.find((entry) => entry.id === req.params.cellId);
+    if (!cell) {
+      return res.status(404).json({ error: '找不到儲存格' });
+    }
+
+    const language = session.languages.find(
+      (entry) => entry.id === req.params.languageId,
+    );
+    if (!language) {
+      return res.status(404).json({ error: '找不到語言' });
+    }
+
+    if (!cell.lines.length) {
+      return res.status(400).json({ error: '請先建立第一語言字幕' });
+    }
+
+    const apiKey = sanitizeLineText(req.body?.apiKey || '');
     const rawScriptText =
-      typeof req.body.scriptText === 'string' ? req.body.scriptText : '';
+      typeof req.body?.scriptText === 'string' ? req.body.scriptText : '';
 
     if (!apiKey) {
       return res.status(400).json({ error: '缺少 OpenAI API Key' });
     }
+    if (!rawScriptText.trim()) {
+      return res.status(400).json({ error: '缺少目標語言文字內容' });
+    }
 
+    const normalizedRawText = normalizePunctuation(stripBom(rawScriptText));
+
+    try {
+      let alignedTexts;
+      let warning = '';
+      try {
+        alignedTexts = await alignSecondaryLanguageWithOpenAI({
+          rawText: normalizedRawText,
+          apiKey,
+          baseLines: cell.lines,
+          languageName: language.name,
+        });
+      } catch (error) {
+        alignedTexts = buildFallbackAlignedTranslations(
+          normalizedRawText,
+          cell.lines.length,
+        );
+        warning = `多語對齊已改用保底分配：${error.message || 'OpenAI 對齊失敗'}`;
+      }
+
+      pushSessionHistory(session);
+      cell.lines = applyAlignedLanguageToLines(
+        cell.lines,
+        language.id,
+        alignedTexts,
+      );
+      session.selectedCellId = cell.id;
+      syncSelectedCellLines(session);
+      persistSession(session);
+      broadcastControlState(session.id);
+      broadcastViewerState(session.id);
+
+      res.json({
+        ...getControlPayload(session),
+        ...(warning ? { warning } : {}),
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: '解析多語字幕失敗',
+        details: error.message,
+      });
+    }
+  },
+);
+
+app.post(
+  '/api/session/:sessionId/script/parse',
+  requireAuth,
+  async (req, res) => {
+    const session = getOwnedSessionFromRequest(req, res);
+    if (!session) return;
+
+    const apiKey = sanitizeLineText(req.body?.apiKey || '');
+    const rawScriptText =
+      typeof req.body?.scriptText === 'string' ? req.body.scriptText : '';
+    const cellId =
+      typeof req.body?.cellId === 'string' ? req.body.cellId : session.selectedCellId;
+
+    if (!apiKey) {
+      return res.status(400).json({ error: '缺少 OpenAI API Key' });
+    }
     if (!rawScriptText.trim()) {
       return res.status(400).json({ error: '缺少劇本文字內容' });
     }
 
-    const session = ensureSession(sessionId);
+    const cell = session.cells.find((entry) => entry.id === cellId);
+    if (!cell) {
+      return res.status(404).json({ error: '找不到儲存格' });
+    }
+
     const rawText = normalizePunctuation(stripBom(rawScriptText));
 
     try {
-      const lines = await parseScriptWithOpenAI(rawText, apiKey);
+      let lines;
+      let warning = '';
+      try {
+        lines = await parseScriptWithOpenAI(rawText, apiKey);
+      } catch (error) {
+        console.error('Failed to parse script:', error);
+        if (!fallbackCodes.has(error?.code)) {
+          throw error;
+        }
 
-      session.lines = lines;
-      session.currentIndex = 0;
-      session.displayEnabled = true;
-
-      broadcastControlState(sessionId);
-      broadcastViewerState(sessionId);
-
-      const normalizedLines = ensureSessionLines(session);
-      res.json({
-        lines: normalizedLines,
-        currentIndex: session.currentIndex,
-        displayEnabled: session.displayEnabled,
-        transcription: getPublicTranscriptionState(session),
-      });
-    } catch (error) {
-      console.error('Failed to parse script:', error);
-
-      const shouldFallback = fallbackCodes.has(error?.code);
-
-      if (shouldFallback) {
         const fallbackNormalized = normalizeScriptLines(
           fallbackSegmentScript(rawText),
         );
-        const fallbackLines = enforceLineLengths(fallbackNormalized);
-        if (fallbackLines.length > 0) {
-          console.warn(
-            'Falling back to basic script segmentation due to invalid or missing model output.',
-          );
-          session.lines = fallbackLines;
-          session.currentIndex = 0;
-          session.displayEnabled = true;
-
-          broadcastControlState(sessionId);
-          broadcastViewerState(sessionId);
-
-          const normalizedLines = ensureSessionLines(session);
-          const warningMessage = error?.message
-            ? `OpenAI 拆解失敗（${error.message}），已改用原稿分段結果`
-            : 'OpenAI 拆解失敗，已改用原稿分段結果';
-
-          return res.json({
-            lines: normalizedLines,
-            currentIndex: session.currentIndex,
-            displayEnabled: session.displayEnabled,
-            transcription: getPublicTranscriptionState(session),
-            warning: warningMessage,
-          });
-        }
+        lines = enforceLineLengths(fallbackNormalized);
+        warning = error?.message
+          ? `OpenAI 拆解失敗（${error.message}），已改用原稿分段結果`
+          : 'OpenAI 拆解失敗，已改用原稿分段結果';
       }
 
+      pushSessionHistory(session);
+      cell.lines = normalizeScriptLines(lines, {
+        keepEmpty: true,
+        primaryLanguageId: 'primary',
+      });
+      session.selectedCellId = cell.id;
+      session.currentIndex = 0;
+      session.displayEnabled = true;
+      syncSelectedCellLines(session);
+      persistSession(session);
+      broadcastControlState(session.id);
+      broadcastViewerState(session.id);
+
+      res.json({
+        ...getControlPayload(session),
+        ...(warning ? { warning } : {}),
+      });
+    } catch (error) {
       res.status(500).json({
         error: '解析劇本失敗，請確認貼上的內容或稍後再試',
         details: error.message,
@@ -3117,47 +4778,41 @@ app.post(
   },
 );
 
-app.put('/api/session/:sessionId/lines', (req, res) => {
-  const { sessionId } = req.params;
-  const { lines } = req.body;
+app.put('/api/session/:sessionId/lines', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
 
+  const { lines } = req.body;
+  const cellId =
+    typeof req.body?.cellId === 'string' ? req.body.cellId : session.selectedCellId;
   if (!Array.isArray(lines)) {
     return res.status(400).json({ error: 'lines 必須是陣列' });
   }
 
-  const session = getSession(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
+  const cell = session.cells.find((entry) => entry.id === cellId);
+  if (!cell) {
+    return res.status(404).json({ error: '找不到儲存格' });
   }
 
-  session.lines = normalizeScriptLines(lines, { keepEmpty: true });
-
-  if (session.currentIndex >= session.lines.length) {
-    session.currentIndex = Math.max(session.lines.length - 1, 0);
-  }
-
-  broadcastControlState(sessionId);
-  broadcastViewerState(sessionId);
-
-  res.json({
-    lines: session.lines,
-    currentIndex: session.currentIndex,
-    displayEnabled: session.displayEnabled,
-    transcription: getPublicTranscriptionState(session),
+  pushSessionHistory(session);
+  cell.lines = normalizeScriptLines(lines, {
+    keepEmpty: true,
+    primaryLanguageId: 'primary',
   });
+  session.selectedCellId = cell.id;
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
 });
 
-app.post('/api/session/:sessionId/current', (req, res) => {
-  const { sessionId } = req.params;
-  const { index } = req.body;
+app.post('/api/session/:sessionId/current', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
 
-  const session = getSession(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
-  }
-
-  const nextIndex = Number.isInteger(index)
-    ? index
+  const nextIndex = Number.isInteger(req.body?.index)
+    ? req.body.index
     : session.currentIndex;
 
   if (nextIndex < 0 || nextIndex >= session.lines.length) {
@@ -3165,34 +4820,20 @@ app.post('/api/session/:sessionId/current', (req, res) => {
   }
 
   session.currentIndex = nextIndex;
-
-  broadcastControlState(sessionId);
-  broadcastViewerState(sessionId);
-
-  res.json({
-    currentIndex: session.currentIndex,
-    transcription: getPublicTranscriptionState(session),
-  });
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
 });
 
-app.post('/api/session/:sessionId/display', (req, res) => {
-  const { sessionId } = req.params;
-  const { displayEnabled } = req.body;
-
-  const session = getSession(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
-  }
-
-  session.displayEnabled = Boolean(displayEnabled);
-
-  broadcastControlState(sessionId);
-  broadcastViewerState(sessionId);
-
-  res.json({
-    displayEnabled: session.displayEnabled,
-    transcription: getPublicTranscriptionState(session),
-  });
+app.post('/api/session/:sessionId/display', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  session.displayEnabled = Boolean(req.body?.displayEnabled);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
 });
 
 function startRealtimeTranscription({
@@ -3537,19 +5178,41 @@ function startRealtimeTranscription({
 }
 
 io.on('connection', (socket) => {
-  socket.on('join', ({ sessionId, role }) => {
-    if (!sessionId) return;
+  const socketAuth = resolveAuthFromCookieHeader(socket.handshake.headers.cookie);
+  const socketUser = socketAuth.user;
 
-    ensureSession(sessionId);
-    socket.join(sessionId);
+  const getOwnedSocketSession = (sessionId) => {
+    if (!socketUser || !canManageSessions(socketUser)) return null;
+    return getOwnedSession(sessionId, socketUser.id);
+  };
 
+  socket.on('join', ({ sessionId, role, viewerToken }) => {
     if (role === 'viewer') {
-      socket.join(`viewer:${sessionId}`);
-      broadcastViewerState(sessionId);
-    } else {
-      socket.join(`control:${sessionId}`);
-      broadcastControlState(sessionId);
+      const viewerSession = viewerToken
+        ? getSessionByViewerToken(viewerToken)
+        : getSession(sessionId);
+      if (!viewerSession || viewerSession.status === 'ended') {
+        socket.emit('viewer:expired', {
+          message: '場次不存在或已結束',
+        });
+        return;
+      }
+      socket.join(`viewer:${viewerSession.id}`);
+      broadcastViewerState(viewerSession.id);
+      return;
     }
+
+    if (!sessionId) return;
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) {
+      socket.emit('transcription:error', {
+        message: '無法存取此場次',
+      });
+      return;
+    }
+
+    socket.join(`control:${session.id}`);
+    broadcastControlState(session.id);
   });
 
   socket.on(
@@ -3566,7 +5229,7 @@ io.on('connection', (socket) => {
     }) => {
       if (!sessionId) return;
 
-      const session = getSession(sessionId);
+      const session = getOwnedSocketSession(sessionId);
       if (!session) return;
 
       const trimmedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
@@ -3687,7 +5350,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('setCurrentIndex', ({ sessionId, index }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (
@@ -3696,13 +5359,14 @@ io.on('connection', (socket) => {
       index < session.lines.length
     ) {
       session.currentIndex = index;
+      persistSession(session);
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
     }
   });
 
   socket.on('shiftIndex', ({ sessionId, delta }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     const nextIndex = Math.min(
@@ -3712,22 +5376,24 @@ io.on('connection', (socket) => {
 
     if (nextIndex !== session.currentIndex) {
       session.currentIndex = nextIndex;
+      persistSession(session);
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
     }
   });
 
   socket.on('setDisplay', ({ sessionId, displayEnabled }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     session.displayEnabled = Boolean(displayEnabled);
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
 
-  socket.on('updateLine', ({ sessionId, index, text, type, music }) => {
-    const session = getSession(sessionId);
+  socket.on('updateLine', ({ sessionId, index, text, type, music, languageId }) => {
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (
@@ -3736,9 +5402,14 @@ io.on('connection', (socket) => {
       index < session.lines.length &&
       typeof text === 'string'
     ) {
+      pushSessionHistory(session);
       const existingRaw = session.lines[index];
       const sanitized = sanitizeLineText(text);
       const explicitType = clampLineType(type);
+      const targetLanguageId =
+        typeof languageId === 'string' && languageId.trim()
+          ? languageId.trim()
+          : 'primary';
       const previousType =
         existingRaw &&
         typeof existingRaw === 'object' &&
@@ -3746,31 +5417,46 @@ io.on('connection', (socket) => {
           ? clampLineType(existingRaw.type)
           : null;
       const nextType = explicitType ?? previousType ?? LINE_TYPES.DIALOGUE;
+      const existingTranslations = normalizeTranslationsMap(
+        existingRaw?.translations,
+        'primary',
+        existingRaw?.text || '',
+      );
+      existingTranslations[targetLanguageId] = sanitized;
+      const primaryText =
+        targetLanguageId === 'primary'
+          ? sanitized
+          : sanitizeLineText(existingRaw?.text || '');
 
-      session.lines[index] =
+      session.lines[index] = createLineRecord(
         existingRaw && typeof existingRaw === 'object'
           ? {
               ...existingRaw,
-              text: sanitized,
+              text: primaryText,
               type: nextType,
               music:
                 typeof music === 'boolean'
                   ? normalizeLineMusic(music)
                   : existingRaw.music === true,
+              translations: existingTranslations,
             }
           : {
-              text: sanitized,
+              text: primaryText,
               type: nextType,
               music: normalizeLineMusic(music),
-            };
+              translations: existingTranslations,
+            },
+        'primary',
+      );
 
+      persistSession(session);
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
     }
   });
 
   socket.on('setLineType', ({ sessionId, index, type }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     const normalizedType = clampLineType(type);
@@ -3785,23 +5471,31 @@ io.on('connection', (socket) => {
 
     const existing = session.lines[index];
     if (!existing) return;
+    pushSessionHistory(session);
 
     const text = sanitizeLineText(
       typeof existing === 'string' ? existing : existing.text,
     );
 
-    session.lines[index] = {
-      text,
-      type: normalizedType,
-      music: isLineMarkedMusic(existing),
-    };
+    session.lines[index] = createLineRecord(
+      {
+        ...existing,
+        text,
+        type: normalizedType,
+        music: isLineMarkedMusic(existing),
+        translations: existing.translations,
+        role: existing.role,
+      },
+      'primary',
+    );
 
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
 
   socket.on('setLineMusic', ({ sessionId, index, music }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (
@@ -3815,6 +5509,7 @@ io.on('connection', (socket) => {
 
     const existing = session.lines[index];
     if (!existing) return;
+    pushSessionHistory(session);
 
     const text = sanitizeLineText(
       typeof existing === 'string' ? existing : existing.text,
@@ -3824,18 +5519,25 @@ io.on('connection', (socket) => {
         ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
         : LINE_TYPES.DIALOGUE;
 
-    session.lines[index] = {
-      text,
-      type,
-      music: normalizeLineMusic(music),
-    };
+    session.lines[index] = createLineRecord(
+      {
+        ...existing,
+        text,
+        type,
+        music: normalizeLineMusic(music),
+        translations: existing.translations,
+        role: existing.role,
+      },
+      'primary',
+    );
 
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
 
   socket.on('setLineMusicRange', ({ sessionId, startIndex, endIndex, music }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (
@@ -3853,6 +5555,7 @@ io.on('connection', (socket) => {
     const rangeStart = Math.min(startIndex, endIndex);
     const rangeEnd = Math.max(startIndex, endIndex);
     const nextMusic = normalizeLineMusic(music);
+    pushSessionHistory(session);
 
     for (let index = rangeStart; index <= rangeEnd; index += 1) {
       const existing = session.lines[index];
@@ -3866,19 +5569,26 @@ io.on('connection', (socket) => {
           ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
           : LINE_TYPES.DIALOGUE;
 
-      session.lines[index] = {
-        text,
-        type,
-        music: nextMusic,
-      };
+      session.lines[index] = createLineRecord(
+        {
+          ...existing,
+          text,
+          type,
+          music: nextMusic,
+          translations: existing.translations,
+          role: existing.role,
+        },
+        'primary',
+      );
     }
 
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
 
   socket.on('splitLine', ({ sessionId, index, beforeText, afterText }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (
@@ -3894,6 +5604,7 @@ io.on('connection', (socket) => {
     const before = sanitizeLineText(beforeText);
     const after = sanitizeLineText(afterText);
     if (!before || !after) return;
+    pushSessionHistory(session);
 
     const existing = session.lines[index];
     const type =
@@ -3905,25 +5616,46 @@ io.on('connection', (socket) => {
       text: before,
       type,
       music: isLineMarkedMusic(existing),
+      role: existing?.role || null,
+      translations: {
+        ...buildBlankTranslationsForSession(session),
+        primary: before,
+        ...Object.fromEntries(
+          Object.entries(existing?.translations || {}).filter(
+            ([languageId]) => languageId !== 'primary',
+          ),
+        ),
+      },
     };
     const secondLine = {
       text: after,
       type,
       music: isLineMarkedMusic(existing),
+      role: existing?.role || null,
+      translations: {
+        ...buildBlankTranslationsForSession(session),
+        primary: after,
+      },
     };
 
-    session.lines.splice(index, 1, firstLine, secondLine);
+    session.lines.splice(
+      index,
+      1,
+      createLineRecord(firstLine, 'primary'),
+      createLineRecord(secondLine, 'primary'),
+    );
 
     if (session.currentIndex > index) {
       session.currentIndex += 1;
     }
 
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
 
   socket.on('insertLineAfter', ({ sessionId, index, type }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
@@ -3937,23 +5669,34 @@ io.on('connection', (socket) => {
         ? clampLineType(existing.type)
         : null) ||
       LINE_TYPES.DIALOGUE;
+    pushSessionHistory(session);
 
-    session.lines.splice(index + 1, 0, {
-      text: '',
-      type: baseType,
-      music: isLineMarkedMusic(existing),
-    });
+    session.lines.splice(
+      index + 1,
+      0,
+      createLineRecord(
+        {
+          text: '',
+          type: baseType,
+          music: isLineMarkedMusic(existing),
+          role: existing?.role || null,
+          translations: buildBlankTranslationsForSession(session),
+        },
+        'primary',
+      ),
+    );
 
     if (session.currentIndex > index) {
       session.currentIndex += 1;
     }
 
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
 
   socket.on('deleteLine', ({ sessionId, index }) => {
-    const session = getSession(sessionId);
+    const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (
@@ -3964,6 +5707,7 @@ io.on('connection', (socket) => {
       return;
     }
 
+    pushSessionHistory(session);
     session.lines.splice(index, 1);
 
     if (session.currentIndex >= session.lines.length) {
@@ -3972,6 +5716,7 @@ io.on('connection', (socket) => {
       session.currentIndex -= 1;
     }
 
+    persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
   });
