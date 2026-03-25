@@ -84,6 +84,7 @@ const ViewerPage = () => {
           setLineSource(next.source)
           setLanguages(next.languages)
           setTranscriptionIsFinal(next.transcriptionIsFinal)
+          setRoleColorEnabled(next.roleColorEnabled)
         }
       } catch (fetchError) {
         if (!cancelled) {
@@ -115,6 +116,7 @@ const ViewerPage = () => {
       setLineSource(next.source)
       setLanguages(next.languages)
       setTranscriptionIsFinal(next.transcriptionIsFinal)
+      setRoleColorEnabled(next.roleColorEnabled)
       setError('')
     })
 
@@ -319,14 +321,6 @@ const ViewerPage = () => {
           </label>
         )}
 
-        <label className="viewer-toolbar-check">
-          <input
-            type="checkbox"
-            checked={roleColorEnabled}
-            onChange={(event) => setRoleColorEnabled(event.target.checked)}
-          />
-          顏色分辨角色
-        </label>
       </div>
 
       {displayEnabled && musicActive && (

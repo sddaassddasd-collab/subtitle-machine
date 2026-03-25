@@ -95,6 +95,7 @@ const transcriptionStreams = new Map();
 const users = new Map();
 const authSessions = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
+const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
 const SESSION_HISTORY_LIMIT = 80;
@@ -113,6 +114,14 @@ const ADMIN_BOOTSTRAP_USERNAME = normalizeUsername(
 );
 const ADMIN_BOOTSTRAP_PASSWORD = normalizePassword(
   process.env.ADMIN_BOOTSTRAP_PASSWORD || '',
+);
+const SHARED_ACCESS_PASSWORD = normalizePassword(
+  process.env.SUBTITLE_MACHINE_ACCESS_PASSWORD || '20141017',
+);
+const SHARED_ACCESS_USER_ID = 'shared_access_user';
+const SHARED_ACCESS_USERNAME = '控制端';
+const SHARED_ACCESS_COOKIE_VALUE = hashToken(
+  `shared-access:${SHARED_ACCESS_PASSWORD}`,
 );
 
 const defaultTranscriptionState = () => ({
@@ -312,10 +321,16 @@ const TRANSCRIPTION_TRADITIONAL_OUTPUT_PROMPT =
 const punctuationOnlyRegex = /^[\p{P}\p{S}\s]+$/u;
 const strongSentencePunctuationRegex = /[。！？!?]$/u;
 const weakSentencePunctuationRegex = /[，,、；;：:]$/u;
+const englishStrongSentencePunctuationRegex = /[.!?]["')\]]*$/u;
+const englishWeakSentencePunctuationRegex = /[,;:]["')\]]*$/u;
 const avoidBoundarySuffixRegex =
   /(的|了|著|过|過|在|跟|和|與|及|而且|但是|如果|因為|所以|就是|然後|還有|對|把|被|給|讓|嗎|呢|吧)$/u;
 const avoidBoundaryPrefixRegex =
   /^(的|了|著|过|過|在|跟|和|與|及|而且|但是|如果|因為|所以|就是|然後|還有|對|把|被|給|讓|嗎|呢|吧)/u;
+const avoidEnglishBoundarySuffixRegex =
+  /\b(a|an|the|and|or|but|so|to|of|in|on|at|for|from|with|into|onto|by|as|if|than|then|that|this|these|those|my|your|his|her|its|our|their|is|are|was|were|be|been|being|am|do|does|did|have|has|had|will|would|can|could|should|may|might|must|not)$/iu;
+const avoidEnglishBoundaryPrefixRegex =
+  /^(and|or|but|so|because|if|when|while|though|although|that|which|who|whom|whose|where|to|of|in|on|at|for|from|with|into|onto|by|as|than|then|is|are|was|were|be|been|being|am|do|does|did|have|has|had|will|would|can|could|should|may|might|must|not)\b/iu;
 const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
 const DEFAULT_REALTIME_SESSION_TYPE = 'realtime';
@@ -639,7 +654,15 @@ function isUserDisabled(user) {
   );
 }
 
+function isSharedAccessUser(user) {
+  return Boolean(
+    user &&
+      (user.isSharedAccess === true || user.id === SHARED_ACCESS_USER_ID),
+  );
+}
+
 function canManageSessions(user) {
+  if (isSharedAccessUser(user)) return true;
   if (!user || isUserDisabled(user)) return false;
   return (
     user.role === USER_ROLES.ADMIN || user.role === USER_ROLES.OPERATOR
@@ -647,6 +670,7 @@ function canManageSessions(user) {
 }
 
 function isAdminUser(user) {
+  if (isSharedAccessUser(user)) return false;
   return Boolean(user && user.role === USER_ROLES.ADMIN && !isUserDisabled(user));
 }
 
@@ -674,6 +698,18 @@ function getPublicResetState(user) {
 
 function serializeUser(user) {
   if (!user) return null;
+  if (isSharedAccessUser(user)) {
+    return {
+      id: SHARED_ACCESS_USER_ID,
+      username: SHARED_ACCESS_USERNAME,
+      role: USER_ROLES.OPERATOR,
+      disabled: false,
+      disabledAt: null,
+      canManageSessions: true,
+      passwordReset: null,
+      createdAt: null,
+    };
+  }
   return {
     id: user.id,
     username: user.username,
@@ -780,32 +816,63 @@ function findUserByNormalizedUsername(usernameNormalized) {
   );
 }
 
+function createSharedAccessUser() {
+  return {
+    id: SHARED_ACCESS_USER_ID,
+    username: SHARED_ACCESS_USERNAME,
+    usernameNormalized: SHARED_ACCESS_USERNAME.toLowerCase(),
+    role: USER_ROLES.OPERATOR,
+    disabledAt: null,
+    passwordReset: null,
+    passwordHash: '',
+    createdAt: 0,
+    isSharedAccess: true,
+  };
+}
+
+function safeTokenEquals(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') {
+    return false;
+  }
+
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isSharedAccessCookieValid(cookieValue) {
+  return safeTokenEquals(cookieValue, SHARED_ACCESS_COOKIE_VALUE);
+}
+
 function resolveAuthFromCookieHeader(headerValue) {
   cleanupExpiredAuthSessions();
   cleanupExpiredPasswordResetTokens();
   const cookies = parseCookieHeader(headerValue);
+  if (isSharedAccessCookieValid(cookies[ACCESS_COOKIE_NAME])) {
+    return {
+      user: createSharedAccessUser(),
+      authSession: null,
+    };
+  }
+
   const token = cookies[AUTH_COOKIE_NAME];
-  if (!token) {
-    return { user: null, authSession: null };
+  if (token) {
+    const authSession = authSessions.get(hashToken(token));
+    if (authSession) {
+      const user = users.get(authSession.userId) || null;
+      if (user && !isUserDisabled(user)) {
+        return { user, authSession };
+      }
+
+      authSessions.delete(authSession.tokenHash);
+    }
   }
 
-  const authSession = authSessions.get(hashToken(token));
-  if (!authSession) {
-    return { user: null, authSession: null };
-  }
-
-  const user = users.get(authSession.userId) || null;
-  if (!user) {
-    authSessions.delete(authSession.tokenHash);
-    return { user: null, authSession: null };
-  }
-
-  if (isUserDisabled(user)) {
-    authSessions.delete(authSession.tokenHash);
-    return { user: null, authSession: null };
-  }
-
-  return { user, authSession };
+  return { user: null, authSession: null };
 }
 
 function authMiddleware(req, res, next) {
@@ -855,8 +922,27 @@ function setAuthCookie(res, token) {
   });
 }
 
+function setAccessCookie(res) {
+  res.cookie(ACCESS_COOKIE_NAME, SHARED_ACCESS_COOKIE_VALUE, {
+    httpOnly: true,
+    sameSite: COOKIE_SAME_SITE,
+    secure: COOKIE_SECURE,
+    path: '/',
+    maxAge: AUTH_TOKEN_TTL_MS,
+  });
+}
+
 function clearAuthCookie(res) {
   res.clearCookie(AUTH_COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: COOKIE_SAME_SITE,
+    secure: COOKIE_SECURE,
+    path: '/',
+  });
+}
+
+function clearAccessCookie(res) {
+  res.clearCookie(ACCESS_COOKIE_NAME, {
     httpOnly: true,
     sameSite: COOKIE_SAME_SITE,
     secure: COOKIE_SECURE,
@@ -1357,6 +1443,20 @@ function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
   return null;
 }
 
+function isLatinHeavyText(text) {
+  const sanitized = sanitizeTranscriptionText(text);
+  if (!sanitized) return false;
+
+  const latinMatches = sanitized.match(/[A-Za-z]/g) || [];
+  if (latinMatches.length < 4) return false;
+  const cjkMatches =
+    sanitized.match(
+      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu,
+    ) || [];
+
+  return latinMatches.length >= cjkMatches.length;
+}
+
 function normalizeScriptLines(entries, options = {}) {
   const keepEmpty = Boolean(options.keepEmpty);
   const primaryLanguageId =
@@ -1832,6 +1932,7 @@ function captureSessionSnapshot(session) {
       selectedCellId: session.selectedCellId,
       currentIndex: session.currentIndex,
       displayEnabled: session.displayEnabled,
+      roleColorEnabled: session.roleColorEnabled,
       status: session.status,
       endedAt: session.endedAt || null,
     }),
@@ -1861,6 +1962,7 @@ function restoreSessionSnapshot(session, snapshot) {
     ? snapshot.currentIndex
     : 0;
   session.displayEnabled = snapshot.displayEnabled !== false;
+  session.roleColorEnabled = snapshot.roleColorEnabled !== false;
   session.status = snapshot.status === 'ended' ? 'ended' : 'active';
   session.endedAt =
     Number.isFinite(snapshot.endedAt) && snapshot.endedAt > 0
@@ -1934,6 +2036,7 @@ function ensureSessionStructure(session) {
       ? session.endedAt
       : null;
   session.displayEnabled = session.displayEnabled !== false;
+  session.roleColorEnabled = session.roleColorEnabled !== false;
   session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
 
   ensureSessionLanguages(session);
@@ -1978,6 +2081,7 @@ function createSessionRecord(ownerUserId) {
     updatedAt: now,
     status: 'active',
     displayEnabled: true,
+    roleColorEnabled: true,
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
     languages: [createLanguageDefinition({}, 0)],
     selectedCellId: null,
@@ -1999,6 +2103,7 @@ function serializeSessionForStorage(session) {
     updatedAt: normalized.updatedAt,
     endedAt: normalized.endedAt,
     displayEnabled: normalized.displayEnabled,
+    roleColorEnabled: normalized.roleColorEnabled,
     projectorLayout: normalized.projectorLayout,
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
@@ -2388,8 +2493,7 @@ function buildAccurateTranscriptionPrompt({ language, transcriptionContext }) {
 }
 
 function getTranscriptionTextLength(text) {
-  return Array.from(sanitizeTranscriptionText(text)).filter((char) => !/\s/u.test(char))
-    .length;
+  return measureSubtitleTextWidth(sanitizeTranscriptionText(text));
 }
 
 function joinTranscriptionTexts(leftText, rightText) {
@@ -2549,6 +2653,7 @@ function shouldBreakBetweenFragments({
   const mergedText = joinTranscriptionTexts(left, right);
   const leftLength = getTranscriptionTextLength(left);
   const mergedLength = getTranscriptionTextLength(mergedText);
+  const englishHeavyBoundary = isLatinHeavyText(`${left} ${right}`);
   if (mergedLength >= TRANSCRIPTION_BOUNDARY_HARD_MAX_CHARS) {
     return true;
   }
@@ -2569,11 +2674,28 @@ function shouldBreakBetweenFragments({
     score += 0.5;
   }
 
+  if (englishStrongSentencePunctuationRegex.test(left)) {
+    score += 2;
+  } else if (englishWeakSentencePunctuationRegex.test(left)) {
+    score += 0.5;
+  } else if (englishHeavyBoundary) {
+    score -= 1.25;
+  }
+
   if (avoidBoundarySuffixRegex.test(left)) {
     score -= 2;
   }
   if (avoidBoundaryPrefixRegex.test(right)) {
     score -= 2;
+  }
+  if (avoidEnglishBoundarySuffixRegex.test(left)) {
+    score -= 2;
+  }
+  if (avoidEnglishBoundaryPrefixRegex.test(right)) {
+    score -= 2;
+  }
+  if (englishHeavyBoundary && /^[a-z]/u.test(right)) {
+    score -= 0.75;
   }
 
   if (boundaryMeta.forced) {
@@ -4128,6 +4250,7 @@ function getSessionSummary(session) {
     updatedAt: normalized.updatedAt,
     endedAt: normalized.endedAt,
     selectedCellId: normalized.selectedCellId,
+    roleColorEnabled: normalized.roleColorEnabled,
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
@@ -4146,6 +4269,7 @@ function getControlPayload(session) {
     lines,
     currentIndex: normalized.currentIndex,
     displayEnabled: normalized.displayEnabled,
+    roleColorEnabled: normalized.roleColorEnabled,
     projector: {
       token: normalized.projectorToken,
       layout: normalized.projectorLayout,
@@ -4230,6 +4354,7 @@ function getViewerPayload(session) {
       musicActive: false,
       musicText: '',
       displayEnabled: false,
+      roleColorEnabled: normalized.roleColorEnabled,
       source: 'hidden',
       transcription,
     };
@@ -4251,6 +4376,7 @@ function getViewerPayload(session) {
       musicActive,
       musicText,
       displayEnabled: true,
+      roleColorEnabled: normalized.roleColorEnabled,
       source: 'transcription',
       transcription,
     };
@@ -4271,6 +4397,7 @@ function getViewerPayload(session) {
     musicActive,
     musicText,
     displayEnabled: true,
+    roleColorEnabled: normalized.roleColorEnabled,
     source: 'script',
     transcription,
   };
@@ -4301,6 +4428,7 @@ function getProjectorPayload(session) {
       musicActive: false,
       musicText: '',
       displayEnabled: false,
+      roleColorEnabled: normalized.roleColorEnabled,
       source: 'hidden',
       layout: normalized.projectorLayout,
       transcription,
@@ -4322,6 +4450,7 @@ function getProjectorPayload(session) {
       musicActive,
       musicText,
       displayEnabled: true,
+      roleColorEnabled: normalized.roleColorEnabled,
       source: 'transcription',
       layout: normalized.projectorLayout,
       transcription,
@@ -4342,6 +4471,7 @@ function getProjectorPayload(session) {
     musicActive,
     musicText,
     displayEnabled: true,
+    roleColorEnabled: normalized.roleColorEnabled,
     source: 'script',
     layout: normalized.projectorLayout,
     transcription,
@@ -4389,7 +4519,10 @@ function getSessionByProjectorToken(projectorToken) {
 function getOwnedSession(sessionId, userId) {
   const session = getSession(sessionId);
   if (!session) return null;
-  if (!userId || session.ownerUserId !== userId) return null;
+  if (!userId) return null;
+  if (userId !== SHARED_ACCESS_USER_ID && session.ownerUserId !== userId) {
+    return null;
+  }
   return session;
 }
 
@@ -4652,6 +4785,24 @@ const changePasswordRateLimit = createRateLimitMiddleware({
   keyGenerator: (req) => `${getRequestIp(req)}:${req.authUser?.id || 'guest'}`,
 });
 
+const accessUnlockRateLimit = createRateLimitMiddleware({
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+  message: '密碼嘗試過多，請稍後再試',
+  keyPrefix: 'access:unlock',
+});
+
+app.post('/api/access/unlock', accessUnlockRateLimit, (req, res) => {
+  const password = normalizePassword(req.body?.password);
+
+  if (!safeTokenEquals(password, SHARED_ACCESS_PASSWORD)) {
+    return res.status(401).json({ error: '密碼錯誤' });
+  }
+
+  setAccessCookie(res);
+  res.json({ user: serializeUser(createSharedAccessUser()) });
+});
+
 app.post('/api/auth/register', registerRateLimit, (req, res) => {
   const username = normalizeDisplayName(req.body?.username);
   const usernameNormalized = normalizeUsername(req.body?.username);
@@ -4761,6 +4912,7 @@ app.post('/api/auth/logout', (req, res) => {
     persistApplicationStore();
   }
   clearAuthCookie(res);
+  clearAccessCookie(res);
   res.json({ ok: true });
 });
 
@@ -4878,12 +5030,16 @@ app.delete('/api/admin/users/:userId', requireAdmin, (req, res) => {
 });
 
 app.get('/api/sessions', requireAuth, (req, res) => {
-  const ownedSessions = Array.from(sessions.values())
-    .filter((session) => session.ownerUserId === req.authUser.id)
+  const visibleSessions = Array.from(sessions.values())
+    .filter((session) =>
+      isSharedAccessUser(req.authUser)
+        ? true
+        : session.ownerUserId === req.authUser.id,
+    )
     .map((session) => getSessionSummary(session))
     .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
 
-  res.json({ sessions: ownedSessions });
+  res.json({ sessions: visibleSessions });
 });
 
 app.post('/api/session', requireSessionManager, (req, res) => {
@@ -5878,6 +6034,16 @@ io.on('connection', (socket) => {
     if (!session) return;
 
     session.displayEnabled = Boolean(displayEnabled);
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setRoleColorEnabled', ({ sessionId, roleColorEnabled }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    session.roleColorEnabled = roleColorEnabled !== false;
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);

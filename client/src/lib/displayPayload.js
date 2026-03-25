@@ -33,6 +33,7 @@ export const normalizeDisplayPayload = (payload) => {
     typeof payload?.displayEnabled === 'boolean'
       ? payload.displayEnabled
       : true
+  const roleColorEnabled = payload?.roleColorEnabled !== false
 
   const lineCandidate = payload?.line
   const nextLine =
@@ -91,6 +92,7 @@ export const normalizeDisplayPayload = (payload) => {
     languages: Array.isArray(payload?.languages) ? payload.languages : [],
     transcriptionIsFinal,
     layout: normalizeProjectorLayout(payload?.layout),
+    roleColorEnabled,
   }
 }
 

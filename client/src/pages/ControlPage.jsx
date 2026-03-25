@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
-import { normalizeProjectorLayout } from '../lib/displayPayload'
+import { normalizeProjectorLayout, roleToColor } from '../lib/displayPayload'
 
 const storageKeys = {
   apiKey: 'subtitleMachineApiKey',
@@ -266,6 +266,7 @@ const ControlPage = () => {
   const [lines, setLines] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [projectorLayout, setProjectorLayout] = useState(() =>
     normalizeProjectorLayout(),
   )
@@ -297,6 +298,7 @@ const ControlPage = () => {
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
+  const pendingLineClickTimeoutRef = useRef(null)
   const skipBlurRef = useRef(new Set())
   const lastTranscriptionErrorRef = useRef('')
   const captureStateRef = useRef({
@@ -403,6 +405,7 @@ const ControlPage = () => {
         ? payload.displayEnabled
         : true,
     )
+    setRoleColorEnabled(payload?.roleColorEnabled !== false)
     setProjectorLayout(normalizeProjectorLayout(payload?.projector?.layout))
     setTranscription(normalizeTranscriptionState(payload?.transcription))
     setHistoryState({
@@ -471,6 +474,26 @@ const ControlPage = () => {
       silenceNode: null,
     }
   }
+
+  const clearPendingLineClick = useCallback(() => {
+    if (!pendingLineClickTimeoutRef.current) return
+    window.clearTimeout(pendingLineClickTimeoutRef.current)
+    pendingLineClickTimeoutRef.current = null
+  }, [])
+
+  const queueLineSelection = useCallback(
+    (index) => {
+      clearPendingLineClick()
+      pendingLineClickTimeoutRef.current = window.setTimeout(() => {
+        pendingLineClickTimeoutRef.current = null
+        if (!socketRef.current || !sessionId) return
+        setEditingIndex(null)
+        socketRef.current.emit('setCurrentIndex', { sessionId, index })
+        setCurrentIndex(index)
+      }, 180)
+    },
+    [clearPendingLineClick, sessionId],
+  )
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -564,6 +587,7 @@ const ControlPage = () => {
   }, [lines, pendingMusicRangeStartIndex])
 
   useEffect(() => {
+    if (editingIndex != null) return
     const node = lineRefs.current[currentIndex]
     if (!node) return
 
@@ -577,7 +601,7 @@ const ControlPage = () => {
       inline: 'nearest',
       behavior: autoCenterEnabled ? 'smooth' : 'auto',
     })
-  }, [currentIndex, lines, autoCenterEnabled])
+  }, [currentIndex, lines, autoCenterEnabled, editingIndex])
 
   useEffect(() => {
     if (!authReady || !user || !sessionId) return
@@ -652,9 +676,10 @@ const ControlPage = () => {
 
   useEffect(() => {
     return () => {
+      clearPendingLineClick()
       releaseMicrophoneCapture()
     }
-  }, [])
+  }, [clearPendingLineClick])
 
   useEffect(() => {
     if (transcription.active || transcription.status === 'connecting') {
@@ -736,6 +761,22 @@ const ControlPage = () => {
     setStatus({
       kind: 'info',
       message: nextState ? '外部字幕已重新顯示' : '檢視端與投影端已遮蔽字幕',
+    })
+  }
+
+  const handleToggleRoleColorEnabled = () => {
+    if (!socketRef.current || !sessionId) return
+    const nextState = !roleColorEnabled
+    socketRef.current.emit('setRoleColorEnabled', {
+      sessionId,
+      roleColorEnabled: nextState,
+    })
+    setRoleColorEnabled(nextState)
+    setStatus({
+      kind: 'info',
+      message: nextState
+        ? '外部字幕已改為顏色區分角色'
+        : '外部字幕已改為單色顯示',
     })
   }
 
@@ -1022,10 +1063,23 @@ const ControlPage = () => {
   }
 
   const handleJumpToLine = (index) => {
+    clearPendingLineClick()
     if (!socketRef.current || !sessionId) return
     setEditingIndex(null)
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
     setCurrentIndex(index)
+  }
+
+  const handleLineTextClick = (event, index) => {
+    event.stopPropagation()
+    if (editingIndex === index) return
+    queueLineSelection(index)
+  }
+
+  const handleLineTextDoubleClick = (event, index) => {
+    event.stopPropagation()
+    clearPendingLineClick()
+    setEditingIndex(index)
   }
 
   const handleLineBlur = (event, index) => {
@@ -1698,6 +1752,10 @@ const ControlPage = () => {
     '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
     '--projector-preview-top': `${50 + projectorLayout.offsetY * 0.9}%`,
   }
+  const previewRoleColor =
+    roleColorEnabled && currentLine?.type !== 'direction'
+      ? roleToColor(currentLine?.role)
+      : ''
 
   if (!authReady) {
     return (
@@ -1927,7 +1985,7 @@ const ControlPage = () => {
                 }
               />
               <span className="input-note">
-                角色會被保留到字幕資料裡，檢視端可切換是否用顏色區分。
+                角色會被保留到字幕資料裡，可由控制端切換是否用顏色區分。
               </span>
               <button type="submit" disabled={parsingPrimary || !selectedCellId}>
                 {parsingPrimary ? '解析中…' : '解析第一語言'}
@@ -2084,6 +2142,14 @@ const ControlPage = () => {
 
             <div className="viewer-preview">
               <label>投影預覽</label>
+              <label className="checkbox-row viewer-preview-toggle">
+                <input
+                  type="checkbox"
+                  checked={roleColorEnabled}
+                  onChange={handleToggleRoleColorEnabled}
+                />
+                顏色分辨角色
+              </label>
               <div
                 className={`viewer-preview-box ${
                   displayEnabled ? '' : 'viewer-muted'
@@ -2095,11 +2161,21 @@ const ControlPage = () => {
                 style={projectorPreviewStyle}
               >
                 <div className="viewer-preview-stage">
-                  <div className="viewer-preview-text">{projectorPreviewText}</div>
+                  <div
+                    className="viewer-preview-text"
+                    style={previewRoleColor ? { color: previewRoleColor } : undefined}
+                  >
+                    {projectorPreviewText}
+                  </div>
                 </div>
               </div>
               {currentLine?.role && (
-                <div className="viewer-preview-role">角色：{currentLine.role}</div>
+                <div
+                  className="viewer-preview-role"
+                  style={previewRoleColor ? { color: previewRoleColor } : undefined}
+                >
+                  角色：{currentLine.role}
+                </div>
               )}
               {currentLineMusicActive && (
                 <div className="viewer-preview-music">此處有音樂</div>
@@ -2274,7 +2350,8 @@ const ControlPage = () => {
                   suppressContentEditableWarning
                   spellCheck={false}
                   tabIndex={0}
-                  onDoubleClick={() => setEditingIndex(index)}
+                  onClick={(event) => handleLineTextClick(event, index)}
+                  onDoubleClick={(event) => handleLineTextDoubleClick(event, index)}
                   onBlur={(event) => handleLineBlur(event, index)}
                   onKeyDown={(event) => handleLineKeyDown(event, index)}
                 >

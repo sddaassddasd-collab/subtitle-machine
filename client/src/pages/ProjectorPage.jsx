@@ -5,6 +5,7 @@ import {
   DEFAULT_PROJECTOR_LAYOUT,
   normalizeDisplayPayload,
   normalizeProjectorLayout,
+  roleToColor,
 } from '../lib/displayPayload'
 
 const ProjectorPage = () => {
@@ -24,6 +25,7 @@ const ProjectorPage = () => {
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
   const [layout, setLayout] = useState(DEFAULT_PROJECTOR_LAYOUT)
+  const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
@@ -52,6 +54,7 @@ const ProjectorPage = () => {
           setMusicText(next.musicText)
           setLineSource(next.source)
           setLayout(next.layout)
+          setRoleColorEnabled(next.roleColorEnabled)
         }
       } catch (fetchError) {
         if (!cancelled) {
@@ -85,6 +88,7 @@ const ProjectorPage = () => {
       setMusicText(next.musicText)
       setLineSource(next.source)
       setLayout(next.layout)
+      setRoleColorEnabled(next.roleColorEnabled)
       setError('')
     })
 
@@ -197,6 +201,8 @@ const ProjectorPage = () => {
     line &&
     line.type !== 'direction'
   const scriptText = shouldRenderScriptText ? line.text || '' : ''
+  const scriptTextColor =
+    roleColorEnabled && shouldRenderScriptText ? roleToColor(line?.role) : ''
   const entries =
     liveEntries.length > 0
       ? liveEntries
@@ -245,7 +251,12 @@ const ProjectorPage = () => {
               })}
             </div>
           ) : (
-            <div className="projector-text">{scriptText}</div>
+            <div
+              className="projector-text"
+              style={scriptTextColor ? { color: scriptTextColor } : undefined}
+            >
+              {scriptText}
+            </div>
           )}
         </div>
       </div>

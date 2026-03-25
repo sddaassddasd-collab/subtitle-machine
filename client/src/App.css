@@ -158,6 +158,14 @@
   color: #cbd5f5;
 }
 
+.viewer-preview-toggle {
+  color: #cbd5f5;
+}
+
+.viewer-preview-toggle input {
+  width: auto;
+}
+
 .json-actions {
   display: flex;
   gap: 0.5rem;
@@ -191,7 +199,8 @@
   min-height: 72px;
   padding: 0.55rem 0.65rem;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
   line-height: 1.4;
   font-size: 0.92rem;
   border: 1px solid rgba(148, 163, 184, 0.25);
@@ -236,7 +245,8 @@
   );
   line-height: 1.35;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .viewer-preview-box.viewer-direction {
@@ -467,7 +477,8 @@
   min-height: 1.4rem;
   padding: 0.2rem 0;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
   cursor: text;
   color: inherit;
 }
@@ -618,6 +629,8 @@
   line-height: 1.4;
   max-width: 960px;
   white-space: pre-line;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .viewer-text.viewer-live {
@@ -648,7 +661,8 @@
   line-height: 1.45;
   color: rgba(248, 250, 252, 0.68);
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .viewer-live-line-active {
@@ -851,7 +865,8 @@
   line-height: 1.28;
   text-align: center;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
   text-shadow:
     0 0 12px rgba(0, 0, 0, 0.75),
     0 0 36px rgba(15, 23, 42, 0.42);
@@ -874,7 +889,8 @@
   color: rgba(248, 250, 252, 0.64);
   text-align: center;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
   text-shadow: 0 0 12px rgba(0, 0, 0, 0.8);
 }
 
