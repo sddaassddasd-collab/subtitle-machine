@@ -2,12 +2,17 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const { Pool } = require('pg');
 
 const APP_DIRECTORY_NAME = 'subtitle-machine';
 const STORE_KEYS = ['users', 'authSessions', 'sessions'];
 const LEGACY_DATA_DIR = path.join(__dirname, '..', 'data');
 const LEGACY_STORE_FILE_PATH = path.join(LEGACY_DATA_DIR, 'app-store.json');
+const DATABASE_URL =
+  typeof process.env.DATABASE_URL === 'string'
+    ? process.env.DATABASE_URL.trim()
+    : '';
+const PERSISTENCE_BACKEND = DATABASE_URL ? 'postgres' : 'sqlite';
 
 function resolveDataDir() {
   const configuredDir =
@@ -46,8 +51,11 @@ function resolveDataDir() {
 }
 
 const DATA_DIR = resolveDataDir();
-const DATABASE_FILE_PATH = path.join(DATA_DIR, 'app-store.sqlite');
-let database = null;
+const SQLITE_FILE_PATH = path.join(DATA_DIR, 'app-store.sqlite');
+let sqliteDatabase = null;
+let postgresPoolPromise = null;
+let saveQueue = Promise.resolve();
+let sqliteModule = null;
 
 function createEmptyStore() {
   return {
@@ -69,7 +77,54 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function initializeDatabase(db) {
+function getSqliteDatabaseSync() {
+  if (!sqliteModule) {
+    try {
+      sqliteModule = require('node:sqlite');
+    } catch (error) {
+      throw new Error(
+        'SQLite persistence requires a Node.js runtime that supports node:sqlite.',
+        { cause: error },
+      );
+    }
+  }
+
+  return sqliteModule.DatabaseSync;
+}
+
+function normalizeBooleanEnv(rawValue, fallback = false) {
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function createPostgresConfig() {
+  const useSsl = normalizeBooleanEnv(
+    process.env.POSTGRES_SSL,
+    normalizeBooleanEnv(process.env.PGSSLMODE === 'require' ? 'true' : '', false),
+  );
+  const config = {
+    connectionString: DATABASE_URL,
+  };
+
+  if (useSsl) {
+    config.ssl = { rejectUnauthorized: false };
+  }
+
+  return config;
+}
+
+function initializeSqliteDatabase(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_store (
       store_key TEXT PRIMARY KEY,
@@ -79,15 +134,38 @@ function initializeDatabase(db) {
   `);
 }
 
-function getDatabase() {
-  if (database) {
-    return database;
+function getSqliteDatabase() {
+  if (sqliteDatabase) {
+    return sqliteDatabase;
   }
 
   ensureDataDir();
-  database = new DatabaseSync(DATABASE_FILE_PATH);
-  initializeDatabase(database);
-  return database;
+  const DatabaseSync = getSqliteDatabaseSync();
+  sqliteDatabase = new DatabaseSync(SQLITE_FILE_PATH);
+  initializeSqliteDatabase(sqliteDatabase);
+  return sqliteDatabase;
+}
+
+async function initializePostgresDatabase(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_store (
+      store_key TEXT PRIMARY KEY,
+      store_value JSONB NOT NULL,
+      updated_at BIGINT NOT NULL
+    )
+  `);
+}
+
+async function getPostgresPool() {
+  if (!postgresPoolPromise) {
+    postgresPoolPromise = (async () => {
+      const pool = new Pool(createPostgresConfig());
+      await initializePostgresDatabase(pool);
+      return pool;
+    })();
+  }
+
+  return postgresPoolPromise;
 }
 
 function readLegacyStoreFile() {
@@ -99,6 +177,7 @@ function readLegacyStoreFile() {
     const raw = fs.readFileSync(LEGACY_STORE_FILE_PATH, 'utf8');
     const parsed = JSON.parse(raw);
     return {
+      source: 'legacy-json',
       raw,
       store: normalizeStore(parsed),
     };
@@ -108,14 +187,88 @@ function readLegacyStoreFile() {
   }
 }
 
-function archiveAndRemoveLegacyStore(raw) {
-  ensureDataDir();
-  const backupPath = path.join(DATA_DIR, `legacy-app-store-${Date.now()}.json`);
-  fs.writeFileSync(backupPath, raw, 'utf8');
-  fs.unlinkSync(LEGACY_STORE_FILE_PATH);
+function readStoreFromSqliteFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  let db = null;
+  try {
+    const DatabaseSync = getSqliteDatabaseSync();
+    db = new DatabaseSync(filePath);
+    const appStoreTable = db
+      .prepare(
+        `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table' AND name = 'app_store'
+        `,
+      )
+      .get();
+
+    if (!appStoreTable) {
+      return null;
+    }
+
+    const store = createEmptyStore();
+    const rows = db
+      .prepare(
+        `
+          SELECT store_key, store_value
+          FROM app_store
+          WHERE store_key IN (?, ?, ?)
+        `,
+      )
+      .all(...STORE_KEYS);
+
+    rows.forEach((row) => {
+      if (!STORE_KEYS.includes(row?.store_key)) {
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(row.store_value);
+        store[row.store_key] = Array.isArray(parsed) ? parsed : [];
+      } catch (_error) {
+        store[row.store_key] = [];
+      }
+    });
+
+    return {
+      source: 'legacy-sqlite',
+      store,
+    };
+  } catch (error) {
+    console.warn('Failed to read legacy SQLite store, skipping migration.', error);
+    return null;
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        // Ignore close failures.
+      }
+    }
+  }
 }
 
-function writeStore(db, store) {
+function writeLegacyBackupFile(raw, sourceLabel = 'legacy-json') {
+  ensureDataDir();
+  const backupPath = path.join(
+    DATA_DIR,
+    `${sourceLabel}-backup-${Date.now()}.json`,
+  );
+  fs.writeFileSync(backupPath, raw, 'utf8');
+}
+
+function removeLegacyStoreFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+  fs.unlinkSync(filePath);
+}
+
+function writeStoreToSqlite(db, store) {
   const normalized = normalizeStore(store);
   const statement = db.prepare(`
     INSERT INTO app_store (store_key, store_value, updated_at)
@@ -138,7 +291,35 @@ function writeStore(db, store) {
   }
 }
 
-function migrateLegacyStoreIfNeeded(db) {
+async function writeStoreToPostgres(pool, store) {
+  const normalized = normalizeStore(store);
+  const now = Date.now();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    for (const storeKey of STORE_KEYS) {
+      await client.query(
+        `
+          INSERT INTO app_store (store_key, store_value, updated_at)
+          VALUES ($1, $2::jsonb, $3)
+          ON CONFLICT (store_key) DO UPDATE SET
+            store_value = EXCLUDED.store_value,
+            updated_at = EXCLUDED.updated_at
+        `,
+        [storeKey, JSON.stringify(normalized[storeKey]), now],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function migrateToSqliteIfNeeded(db) {
   const row = db
     .prepare('SELECT COUNT(*) AS entryCount FROM app_store')
     .get();
@@ -153,18 +334,45 @@ function migrateLegacyStoreIfNeeded(db) {
     return;
   }
 
-  writeStore(db, legacyStore.store);
+  writeStoreToSqlite(db, legacyStore.store);
 
   try {
-    archiveAndRemoveLegacyStore(legacyStore.raw);
+    writeLegacyBackupFile(legacyStore.raw, legacyStore.source);
+    removeLegacyStoreFile(LEGACY_STORE_FILE_PATH);
   } catch (error) {
     console.warn('Legacy JSON store migrated but cleanup failed.', error);
   }
 }
 
-function loadStore() {
-  const db = getDatabase();
-  migrateLegacyStoreIfNeeded(db);
+async function migrateToPostgresIfNeeded(pool) {
+  const existing = await pool.query('SELECT COUNT(*)::int AS entry_count FROM app_store');
+  const entryCount = Number(existing.rows?.[0]?.entry_count || 0);
+
+  if (entryCount > 0) {
+    return;
+  }
+
+  const legacyJsonStore = readLegacyStoreFile();
+  if (legacyJsonStore) {
+    await writeStoreToPostgres(pool, legacyJsonStore.store);
+    try {
+      writeLegacyBackupFile(legacyJsonStore.raw, legacyJsonStore.source);
+      removeLegacyStoreFile(LEGACY_STORE_FILE_PATH);
+    } catch (error) {
+      console.warn('Legacy JSON store migrated but cleanup failed.', error);
+    }
+    return;
+  }
+
+  const sqliteStore = readStoreFromSqliteFile(SQLITE_FILE_PATH);
+  if (sqliteStore) {
+    await writeStoreToPostgres(pool, sqliteStore.store);
+  }
+}
+
+async function loadStoreFromSqlite() {
+  const db = getSqliteDatabase();
+  await migrateToSqliteIfNeeded(db);
 
   const store = createEmptyStore();
   const rows = db
@@ -193,9 +401,58 @@ function loadStore() {
   return store;
 }
 
+async function loadStoreFromPostgres() {
+  const pool = await getPostgresPool();
+  await migrateToPostgresIfNeeded(pool);
+
+  const store = createEmptyStore();
+  const result = await pool.query(
+    `
+      SELECT store_key, store_value
+      FROM app_store
+      WHERE store_key = ANY($1::text[])
+    `,
+    [STORE_KEYS],
+  );
+
+  result.rows.forEach((row) => {
+    if (!STORE_KEYS.includes(row?.store_key)) {
+      return;
+    }
+    store[row.store_key] = Array.isArray(row.store_value) ? row.store_value : [];
+  });
+
+  return store;
+}
+
+async function loadStore() {
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    return loadStoreFromPostgres();
+  }
+  return loadStoreFromSqlite();
+}
+
+function scheduleSave(work) {
+  saveQueue = saveQueue
+    .catch(() => {})
+    .then(() => work());
+  return saveQueue;
+}
+
 function saveStore(store) {
-  const db = getDatabase();
-  writeStore(db, store);
+  const normalized = normalizeStore(store);
+
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    return scheduleSave(async () => {
+      const pool = await getPostgresPool();
+      await writeStoreToPostgres(pool, normalized);
+    });
+  }
+
+  return scheduleSave(async () => {
+    const db = getSqliteDatabase();
+    writeStoreToSqlite(db, normalized);
+  });
 }
 
 function createOpaqueToken(byteLength = 18) {
@@ -240,8 +497,10 @@ function parseCookieHeader(headerValue = '') {
 
 module.exports = {
   DATA_DIR,
-  DATABASE_FILE_PATH,
+  DATABASE_URL,
   LEGACY_STORE_FILE_PATH,
+  PERSISTENCE_BACKEND,
+  SQLITE_FILE_PATH,
   createOpaqueToken,
   createPasswordHash,
   hashToken,

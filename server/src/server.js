@@ -15,6 +15,7 @@ const {
   hashToken,
   loadStore,
   parseCookieHeader,
+  PERSISTENCE_BACKEND,
   saveStore,
   verifyPassword,
 } = require('./persistence');
@@ -694,10 +695,10 @@ function countAdminUsers() {
   return Array.from(users.values()).filter((user) => isAdminUser(user)).length;
 }
 
-function persistApplicationStore() {
+function persistApplicationStore({ throwOnError = false } = {}) {
   cleanupExpiredAuthSessions();
   cleanupExpiredPasswordResetTokens();
-  saveStore({
+  const nextStore = {
     users: Array.from(users.values()).map((user) => ({
       id: user.id,
       username: user.username,
@@ -721,6 +722,15 @@ function persistApplicationStore() {
     sessions: Array.from(sessions.values()).map((session) =>
       serializeSessionForStorage(session),
     ),
+  };
+
+  const savePromise = saveStore(nextStore);
+  if (throwOnError) {
+    return savePromise;
+  }
+
+  return savePromise.catch((error) => {
+    console.error('Failed to persist application store:', error);
   });
 }
 
@@ -1954,51 +1964,64 @@ function serializeSessionForStorage(session) {
   };
 }
 
-const persistedStore = loadStore();
-persistedStore.users.forEach((user) => {
-  if (!user || typeof user !== 'object') return;
-  if (typeof user.id !== 'string' || !user.id.trim()) return;
-  users.set(user.id, {
-    id: user.id,
-    username: normalizeDisplayName(user.username),
-    usernameNormalized: normalizeUsername(
-      user.usernameNormalized || user.username,
-    ),
-    role: normalizeUserRole(
-      user.role,
-      USER_ROLES.VIEWER,
-    ),
-    disabledAt:
-      Number.isFinite(user.disabledAt) && user.disabledAt > 0
-        ? user.disabledAt
-        : null,
-    passwordReset:
-      user.passwordReset && typeof user.passwordReset === 'object'
-        ? user.passwordReset
-        : null,
-    passwordHash:
-      typeof user.passwordHash === 'string' ? user.passwordHash : '',
-    createdAt:
-      Number.isFinite(user.createdAt) && user.createdAt > 0
-        ? user.createdAt
-        : Date.now(),
+function hydrateApplicationStore(persistedStore) {
+  users.clear();
+  authSessions.clear();
+  sessions.clear();
+
+  persistedStore.users.forEach((user) => {
+    if (!user || typeof user !== 'object') return;
+    if (typeof user.id !== 'string' || !user.id.trim()) return;
+    users.set(user.id, {
+      id: user.id,
+      username: normalizeDisplayName(user.username),
+      usernameNormalized: normalizeUsername(
+        user.usernameNormalized || user.username,
+      ),
+      role: normalizeUserRole(
+        user.role,
+        USER_ROLES.VIEWER,
+      ),
+      disabledAt:
+        Number.isFinite(user.disabledAt) && user.disabledAt > 0
+          ? user.disabledAt
+          : null,
+      passwordReset:
+        user.passwordReset && typeof user.passwordReset === 'object'
+          ? user.passwordReset
+          : null,
+      passwordHash:
+        typeof user.passwordHash === 'string' ? user.passwordHash : '',
+      createdAt:
+        Number.isFinite(user.createdAt) && user.createdAt > 0
+          ? user.createdAt
+          : Date.now(),
+    });
   });
-});
-persistedStore.authSessions.forEach((authSession) => {
-  if (!authSession || typeof authSession !== 'object') return;
-  if (typeof authSession.tokenHash !== 'string' || !authSession.tokenHash) {
-    return;
-  }
-  authSessions.set(authSession.tokenHash, authSession);
-});
-persistedStore.sessions.forEach((rawSession) => {
-  const normalized = ensureSessionStructure(rawSession);
-  if (!normalized || !normalized.id) return;
-  sessions.set(normalized.id, normalized);
-});
-cleanupExpiredAuthSessions();
-ensureAdminBootstrapUser();
-persistApplicationStore();
+
+  persistedStore.authSessions.forEach((authSession) => {
+    if (!authSession || typeof authSession !== 'object') return;
+    if (typeof authSession.tokenHash !== 'string' || !authSession.tokenHash) {
+      return;
+    }
+    authSessions.set(authSession.tokenHash, authSession);
+  });
+
+  persistedStore.sessions.forEach((rawSession) => {
+    const normalized = ensureSessionStructure(rawSession);
+    if (!normalized || !normalized.id) return;
+    sessions.set(normalized.id, normalized);
+  });
+
+  cleanupExpiredAuthSessions();
+  ensureAdminBootstrapUser();
+}
+
+async function initializeApplicationStore() {
+  const persistedStore = await loadStore();
+  hydrateApplicationStore(persistedStore);
+  await persistApplicationStore({ throwOnError: true });
+}
 
 function normalizeForComparison(text) {
   return text
@@ -6025,6 +6048,18 @@ if (fs.existsSync(clientDistPath)) {
   });
 }
 
-server.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    await initializeApplicationStore();
+    server.listen(PORT, () => {
+      console.log(
+        `Server listening on http://localhost:${PORT} using ${PERSISTENCE_BACKEND} persistence`,
+      );
+    });
+  } catch (error) {
+    console.error('Failed to initialize application store:', error);
+    process.exit(1);
+  }
+}
+
+startServer();
