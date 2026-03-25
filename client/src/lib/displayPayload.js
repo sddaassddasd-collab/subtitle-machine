@@ -34,6 +34,11 @@ export const normalizeDisplayPayload = (payload) => {
       ? payload.displayEnabled
       : true
   const roleColorEnabled = payload?.roleColorEnabled !== false
+  const defaultLanguageId =
+    typeof payload?.defaultLanguageId === 'string' &&
+    payload.defaultLanguageId.trim().length > 0
+      ? payload.defaultLanguageId.trim()
+      : 'primary'
 
   const lineCandidate = payload?.line
   const nextLine =
@@ -90,10 +95,26 @@ export const normalizeDisplayPayload = (payload) => {
     musicText,
     source,
     languages: Array.isArray(payload?.languages) ? payload.languages : [],
+    defaultLanguageId,
     transcriptionIsFinal,
     layout: normalizeProjectorLayout(payload?.layout),
     roleColorEnabled,
   }
+}
+
+export const resolveAvailableLanguageId = (languages, preferredLanguageId) => {
+  const list = Array.isArray(languages) ? languages : []
+  if (
+    typeof preferredLanguageId === 'string' &&
+    preferredLanguageId.trim().length > 0 &&
+    list.some((language) => language?.id === preferredLanguageId.trim())
+  ) {
+    return preferredLanguageId.trim()
+  }
+  const fallback = list.find(
+    (language) => typeof language?.id === 'string' && language.id.trim().length > 0,
+  )
+  return fallback?.id || 'primary'
 }
 
 export const resolveLineText = (line, languageId) => {

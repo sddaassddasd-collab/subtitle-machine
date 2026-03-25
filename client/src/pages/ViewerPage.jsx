@@ -3,6 +3,7 @@ import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import {
   normalizeDisplayPayload,
+  resolveAvailableLanguageId,
   resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
@@ -41,7 +42,9 @@ const ViewerPage = () => {
   const [lineSource, setLineSource] = useState('script')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [languages, setLanguages] = useState([])
+  const [viewerDefaultLanguageId, setViewerDefaultLanguageId] = useState('primary')
   const [selectedLanguageId, setSelectedLanguageId] = useState('primary')
+  const [hasLanguageOverride, setHasLanguageOverride] = useState(false)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [viewerFontPercent, setViewerFontPercent] = useState(
     getInitialViewerFontPercent,
@@ -83,6 +86,9 @@ const ViewerPage = () => {
           setMusicText(next.musicText)
           setLineSource(next.source)
           setLanguages(next.languages)
+          setViewerDefaultLanguageId(
+            resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
+          )
           setTranscriptionIsFinal(next.transcriptionIsFinal)
           setRoleColorEnabled(next.roleColorEnabled)
         }
@@ -115,6 +121,9 @@ const ViewerPage = () => {
       setMusicText(next.musicText)
       setLineSource(next.source)
       setLanguages(next.languages)
+      setViewerDefaultLanguageId(
+        resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
+      )
       setTranscriptionIsFinal(next.transcriptionIsFinal)
       setRoleColorEnabled(next.roleColorEnabled)
       setError('')
@@ -135,9 +144,34 @@ const ViewerPage = () => {
 
   useEffect(() => {
     if (!languages.length) return
-    if (languages.some((language) => language.id === selectedLanguageId)) return
-    setSelectedLanguageId(languages[0]?.id || 'primary')
-  }, [languages, selectedLanguageId])
+
+    const fallbackLanguageId = resolveAvailableLanguageId(
+      languages,
+      viewerDefaultLanguageId,
+    )
+    const selectedLanguageStillAvailable = languages.some(
+      (language) => language.id === selectedLanguageId,
+    )
+
+    if (!hasLanguageOverride) {
+      if (selectedLanguageId !== fallbackLanguageId) {
+        setSelectedLanguageId(fallbackLanguageId)
+      }
+      return
+    }
+
+    if (selectedLanguageStillAvailable) {
+      return
+    }
+
+    setSelectedLanguageId(fallbackLanguageId)
+    setHasLanguageOverride(false)
+  }, [
+    hasLanguageOverride,
+    languages,
+    selectedLanguageId,
+    viewerDefaultLanguageId,
+  ])
 
   useEffect(() => {
     if (lineSource !== 'transcription') return
@@ -310,7 +344,10 @@ const ViewerPage = () => {
             <span>語言</span>
             <select
               value={selectedLanguageId}
-              onChange={(event) => setSelectedLanguageId(event.target.value)}
+              onChange={(event) => {
+                setSelectedLanguageId(event.target.value)
+                setHasLanguageOverride(true)
+              }}
             >
               {languages.map((language) => (
                 <option key={language.id} value={language.id}>

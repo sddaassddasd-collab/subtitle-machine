@@ -1817,6 +1817,23 @@ function getPrimaryLanguageId(session) {
   return primaryLanguage?.id || 'primary';
 }
 
+function resolveSessionLanguageId(session, rawLanguageId) {
+  const languages = Array.isArray(session?.languages) ? session.languages : [];
+  const normalizedLanguageId =
+    typeof rawLanguageId === 'string' && rawLanguageId.trim()
+      ? rawLanguageId.trim()
+      : '';
+
+  if (
+    normalizedLanguageId &&
+    languages.some((language) => language?.id === normalizedLanguageId)
+  ) {
+    return normalizedLanguageId;
+  }
+
+  return getPrimaryLanguageId(session);
+}
+
 function buildBlankTranslationsForSession(session) {
   const translations = {};
   const languages = Array.isArray(session?.languages) ? session.languages : [];
@@ -1935,6 +1952,8 @@ function captureSessionSnapshot(session) {
       currentIndex: session.currentIndex,
       displayEnabled: session.displayEnabled,
       roleColorEnabled: session.roleColorEnabled,
+      viewerDefaultLanguageId: session.viewerDefaultLanguageId,
+      projectorDefaultLanguageId: session.projectorDefaultLanguageId,
       status: session.status,
       endedAt: session.endedAt || null,
     }),
@@ -1965,6 +1984,14 @@ function restoreSessionSnapshot(session, snapshot) {
     : 0;
   session.displayEnabled = snapshot.displayEnabled !== false;
   session.roleColorEnabled = snapshot.roleColorEnabled !== false;
+  session.viewerDefaultLanguageId =
+    typeof snapshot.viewerDefaultLanguageId === 'string'
+      ? snapshot.viewerDefaultLanguageId
+      : session.viewerDefaultLanguageId;
+  session.projectorDefaultLanguageId =
+    typeof snapshot.projectorDefaultLanguageId === 'string'
+      ? snapshot.projectorDefaultLanguageId
+      : session.projectorDefaultLanguageId;
   session.status = snapshot.status === 'ended' ? 'ended' : 'active';
   session.endedAt =
     Number.isFinite(snapshot.endedAt) && snapshot.endedAt > 0
@@ -2042,6 +2069,14 @@ function ensureSessionStructure(session) {
   session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
 
   ensureSessionLanguages(session);
+  session.viewerDefaultLanguageId = resolveSessionLanguageId(
+    session,
+    session.viewerDefaultLanguageId,
+  );
+  session.projectorDefaultLanguageId = resolveSessionLanguageId(
+    session,
+    session.projectorDefaultLanguageId,
+  );
   const primaryLanguageId = getPrimaryLanguageId(session);
 
   const rawCells =
@@ -2084,6 +2119,8 @@ function createSessionRecord(ownerUserId) {
     status: 'active',
     displayEnabled: true,
     roleColorEnabled: true,
+    viewerDefaultLanguageId: 'primary',
+    projectorDefaultLanguageId: 'primary',
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
     languages: [createLanguageDefinition({}, 0)],
     selectedCellId: null,
@@ -2106,6 +2143,8 @@ function serializeSessionForStorage(session) {
     endedAt: normalized.endedAt,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
+    viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
+    projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorLayout: normalized.projectorLayout,
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
@@ -4347,6 +4386,8 @@ function getSessionSummary(session) {
     endedAt: normalized.endedAt,
     selectedCellId: normalized.selectedCellId,
     roleColorEnabled: normalized.roleColorEnabled,
+    viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
+    projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
@@ -4366,6 +4407,8 @@ function getControlPayload(session) {
     currentIndex: normalized.currentIndex,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
+    viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
+    projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projector: {
       token: normalized.projectorToken,
       layout: normalized.projectorLayout,
@@ -4443,6 +4486,7 @@ function getViewerPayload(session) {
       viewerToken: normalized.viewerToken,
       status: normalized.status,
       languages: normalized.languages,
+      defaultLanguageId: normalized.viewerDefaultLanguageId,
       line: null,
       text: '',
       liveEntries: [],
@@ -4462,6 +4506,7 @@ function getViewerPayload(session) {
       viewerToken: normalized.viewerToken,
       status: normalized.status,
       languages: normalized.languages,
+      defaultLanguageId: normalized.viewerDefaultLanguageId,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
         type: LINE_TYPES.DIALOGUE,
@@ -4483,6 +4528,7 @@ function getViewerPayload(session) {
     viewerToken: normalized.viewerToken,
     status: normalized.status,
     languages: normalized.languages,
+    defaultLanguageId: normalized.viewerDefaultLanguageId,
     line: toPublicLine(activeScriptLine),
     text:
       activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
@@ -4517,6 +4563,8 @@ function getProjectorPayload(session) {
       sessionId: normalized.id,
       projectorToken: normalized.projectorToken,
       status: normalized.status,
+      languages: normalized.languages,
+      defaultLanguageId: normalized.projectorDefaultLanguageId,
       line: null,
       text: '',
       liveEntries: [],
@@ -4536,6 +4584,8 @@ function getProjectorPayload(session) {
       sessionId: normalized.id,
       projectorToken: normalized.projectorToken,
       status: normalized.status,
+      languages: normalized.languages,
+      defaultLanguageId: normalized.projectorDefaultLanguageId,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
         type: LINE_TYPES.DIALOGUE,
@@ -4557,6 +4607,8 @@ function getProjectorPayload(session) {
     sessionId: normalized.id,
     projectorToken: normalized.projectorToken,
     status: normalized.status,
+    languages: normalized.languages,
+    defaultLanguageId: normalized.projectorDefaultLanguageId,
     line: toPublicLine(activeScriptLine),
     text:
       activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
@@ -6160,6 +6212,38 @@ io.on('connection', (socket) => {
     if (!session) return;
 
     session.roleColorEnabled = roleColorEnabled !== false;
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setViewerDefaultLanguage', ({ sessionId, languageId }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    const nextLanguageId = resolveSessionLanguageId(session, languageId);
+    if (session.viewerDefaultLanguageId === nextLanguageId) {
+      return;
+    }
+
+    pushSessionHistory(session);
+    session.viewerDefaultLanguageId = nextLanguageId;
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setProjectorDefaultLanguage', ({ sessionId, languageId }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    const nextLanguageId = resolveSessionLanguageId(session, languageId);
+    if (session.projectorDefaultLanguageId === nextLanguageId) {
+      return;
+    }
+
+    pushSessionHistory(session);
+    session.projectorDefaultLanguageId = nextLanguageId;
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);

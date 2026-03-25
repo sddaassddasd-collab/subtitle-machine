@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
-import { normalizeProjectorLayout, roleToColor } from '../lib/displayPayload'
+import {
+  normalizeProjectorLayout,
+  resolveLineText,
+  roleToColor,
+} from '../lib/displayPayload'
 
 const storageKeys = {
   apiKey: 'subtitleMachineApiKey',
@@ -332,6 +336,10 @@ const ControlPage = () => {
   const selectedCell =
     cells.find((cell) => cell.id === selectedCellId) || null
   const extraLanguages = languages.filter((language) => language.id !== 'primary')
+  const viewerDefaultLanguageId =
+    sessionMeta?.viewerDefaultLanguageId || languages[0]?.id || 'primary'
+  const projectorDefaultLanguageId =
+    sessionMeta?.projectorDefaultLanguageId || languages[0]?.id || 'primary'
 
   const setDraftInputValue = (cellId, languageId, value) => {
     if (!cellId || !languageId) return
@@ -777,6 +785,48 @@ const ControlPage = () => {
       message: nextState
         ? '外部字幕已改為顏色區分角色'
         : '外部字幕已改為單色顯示',
+    })
+  }
+
+  const handleViewerDefaultLanguageChange = (event) => {
+    if (!socketRef.current || !sessionId) return
+    const nextLanguageId = event.target.value
+    socketRef.current.emit('setViewerDefaultLanguage', {
+      sessionId,
+      languageId: nextLanguageId,
+    })
+    setSessionMeta((prev) =>
+      prev
+        ? {
+            ...prev,
+            viewerDefaultLanguageId: nextLanguageId,
+          }
+        : prev,
+    )
+    setStatus({
+      kind: 'info',
+      message: '檢視端預設語言已更新',
+    })
+  }
+
+  const handleProjectorDefaultLanguageChange = (event) => {
+    if (!socketRef.current || !sessionId) return
+    const nextLanguageId = event.target.value
+    socketRef.current.emit('setProjectorDefaultLanguage', {
+      sessionId,
+      languageId: nextLanguageId,
+    })
+    setSessionMeta((prev) =>
+      prev
+        ? {
+            ...prev,
+            projectorDefaultLanguageId: nextLanguageId,
+          }
+        : prev,
+    )
+    setStatus({
+      kind: 'info',
+      message: '投影端播放語言已更新',
     })
   }
 
@@ -1778,7 +1828,7 @@ const ControlPage = () => {
       ? '字幕已遮蔽'
       : currentLine?.type === 'direction'
         ? '舞台指示不投影'
-        : currentLine?.text || '尚未載入字幕'
+        : resolveLineText(currentLine, projectorDefaultLanguageId) || '尚未載入字幕'
   const projectorPreviewStyle = {
     '--projector-preview-scale': projectorLayout.fontSizePercent / 100,
     '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
@@ -2003,6 +2053,43 @@ const ControlPage = () => {
                   </div>
                 ))}
               </div>
+            </div>
+
+            <div className="input-group">
+              <label>外部字幕預設語言</label>
+              <div className="language-default-grid">
+                <label className="input-group" htmlFor="viewer-default-language">
+                  <span>檢視端預設</span>
+                  <select
+                    id="viewer-default-language"
+                    value={viewerDefaultLanguageId}
+                    onChange={handleViewerDefaultLanguageChange}
+                  >
+                    {languages.map((language) => (
+                      <option key={language.id} value={language.id}>
+                        {language.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="input-group" htmlFor="projector-default-language">
+                  <span>投影端播放</span>
+                  <select
+                    id="projector-default-language"
+                    value={projectorDefaultLanguageId}
+                    onChange={handleProjectorDefaultLanguageChange}
+                  >
+                    {languages.map((language) => (
+                      <option key={language.id} value={language.id}>
+                        {language.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <span className="input-note">
+                檢視端初次進入會先套用預設語言，但觀眾之後仍可自行切換；投影端則會持續跟著這裡的設定。
+              </span>
             </div>
 
             <form className="input-group" onSubmit={handleParsePrimaryScript}>
@@ -2232,7 +2319,7 @@ const ControlPage = () => {
                 <br />
                 • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 還原
                 <br />
-                • 觀眾可在檢視端自行切換語言與字級
+                • 觀眾進入檢視端會先套用預設語言，之後仍可自行切換語言與字級
               </div>
             </div>
 

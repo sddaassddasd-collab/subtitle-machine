@@ -120,6 +120,7 @@
 .input-group input[type='text'],
 .input-group input[type='password'],
 .input-group input[type='file'],
+.input-group select,
 .input-group textarea {
   padding: 0.55rem 0.7rem;
   border-radius: 8px;
@@ -170,6 +171,12 @@
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+}
+
+.language-default-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
 }
 
 .transcription-panel {

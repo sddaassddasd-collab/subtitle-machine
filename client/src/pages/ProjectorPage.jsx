@@ -5,6 +5,8 @@ import {
   DEFAULT_PROJECTOR_LAYOUT,
   normalizeDisplayPayload,
   normalizeProjectorLayout,
+  resolveAvailableLanguageId,
+  resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
 
@@ -24,6 +26,8 @@ const ProjectorPage = () => {
   const [musicText, setMusicText] = useState('此處有音樂')
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
+  const [languages, setLanguages] = useState([])
+  const [projectorLanguageId, setProjectorLanguageId] = useState('primary')
   const [layout, setLayout] = useState(DEFAULT_PROJECTOR_LAYOUT)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [error, setError] = useState('')
@@ -53,6 +57,10 @@ const ProjectorPage = () => {
           setMusicActive(next.musicActive)
           setMusicText(next.musicText)
           setLineSource(next.source)
+          setLanguages(next.languages)
+          setProjectorLanguageId(
+            resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
+          )
           setLayout(next.layout)
           setRoleColorEnabled(next.roleColorEnabled)
         }
@@ -87,6 +95,10 @@ const ProjectorPage = () => {
       setMusicActive(next.musicActive)
       setMusicText(next.musicText)
       setLineSource(next.source)
+      setLanguages(next.languages)
+      setProjectorLanguageId(
+        resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
+      )
       setLayout(next.layout)
       setRoleColorEnabled(next.roleColorEnabled)
       setError('')
@@ -200,7 +212,12 @@ const ProjectorPage = () => {
     lineSource !== 'transcription' &&
     line &&
     line.type !== 'direction'
-  const scriptText = shouldRenderScriptText ? line.text || '' : ''
+  const scriptText = shouldRenderScriptText
+    ? resolveLineText(
+        line,
+        resolveAvailableLanguageId(languages, projectorLanguageId),
+      ) || ''
+    : ''
   const scriptTextColor =
     roleColorEnabled && shouldRenderScriptText ? roleToColor(line?.role) : ''
   const entries =
