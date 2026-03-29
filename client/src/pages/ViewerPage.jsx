@@ -413,7 +413,6 @@ const ViewerPage = () => {
 
       <div className="viewer-toolbar">
         <div className="viewer-toolbar-group viewer-font-controls">
-          <span>字級</span>
           <button
             type="button"
             className="viewer-toolbar-button"
@@ -423,7 +422,6 @@ const ViewerPage = () => {
           >
             −
           </button>
-          <span className="viewer-font-value">{viewerFontPercent}%</span>
           <button
             type="button"
             className="viewer-toolbar-button"

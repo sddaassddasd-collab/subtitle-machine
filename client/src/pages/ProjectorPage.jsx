@@ -334,7 +334,7 @@ const ProjectorPage = () => {
 
   const resolvedLayout = normalizeProjectorLayout(layout)
   const projectorStyle = {
-    '--projector-font-scale': resolvedLayout.fontSizePercent / 100,
+    '--projector-font-scale': Math.max(resolvedLayout.fontSizePercent, 0) / 100,
     '--projector-offset-x': `${resolvedLayout.offsetX}vw`,
     '--projector-offset-y': `${resolvedLayout.offsetY}vh`,
   }
@@ -365,12 +365,10 @@ const ProjectorPage = () => {
     <div className="projector-page" ref={containerRef} style={projectorStyle}>
       <button
         type="button"
-        className="fullscreen-button projector-fullscreen-button"
+        className="projector-fullscreen-hotspot"
         onClick={toggleFullscreen}
         aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-      >
-        ⛶
-      </button>
+      />
 
       {displayEnabled && musicActive && (
         <div className="viewer-music-banner projector-music-banner" role="status" aria-live="polite">

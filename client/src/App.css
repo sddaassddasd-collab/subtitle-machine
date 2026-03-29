@@ -159,6 +159,21 @@
   color: #cbd5f5;
 }
 
+.projector-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.projector-preview-toggles {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .viewer-preview-toggle {
   color: #cbd5f5;
 }
@@ -276,6 +291,16 @@
   color: #fce7f3;
   font-size: 0.82rem;
   font-weight: 600;
+}
+
+.viewer-preview-note {
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  color: #cbd5e1;
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 
 .status-bar {
@@ -582,32 +607,113 @@
   flex-wrap: wrap;
 }
 
-.projector-layout-card {
-  display: grid;
+.projector-preview-controls {
+  display: flex;
+  flex-direction: column;
   gap: 0.75rem;
+}
+
+.projector-control-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.projector-control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
   padding: 0.85rem;
   border-radius: 12px;
   background: rgba(15, 23, 42, 0.45);
   border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #e2e8f0;
 }
 
-.range-control {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.35rem 0.75rem;
+.projector-control-panel-inline {
+  flex-direction: row;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.projector-control-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: min(100%, 220px);
   color: #e2e8f0;
   font-size: 0.88rem;
 }
 
-.range-control strong {
-  color: #f8fafc;
-  font-size: 0.82rem;
+.projector-control-label {
+  color: #e2e8f0;
+  font-size: 0.88rem;
+  font-weight: 600;
 }
 
-.range-control input[type='range'] {
-  grid-column: 1 / -1;
+.projector-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.projector-stepper strong {
+  min-width: 4.2rem;
+  text-align: center;
+  color: #f8fafc;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.projector-step-button {
+  min-width: 2.35rem;
+  min-height: 2.35rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  background: rgba(59, 130, 246, 0.18);
+  color: #f8fafc;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.projector-step-button:hover {
+  background: rgba(59, 130, 246, 0.34);
+}
+
+.projector-position-readout {
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.projector-axis-pad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(2.35rem, auto));
+  gap: 0.45rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.projector-axis-pad > span {
+  display: block;
   width: 100%;
+  height: 100%;
+}
+
+.projector-axis-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.35rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.9rem;
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .control-actions {
@@ -936,8 +1042,23 @@
   color: #d1fae5;
 }
 
-.projector-fullscreen-button {
+.projector-fullscreen-hotspot {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 3rem;
+  height: 3rem;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: transparent;
+  appearance: none;
+  cursor: pointer;
   z-index: 5;
+}
+
+.projector-fullscreen-hotspot:focus-visible {
+  outline: none;
 }
 
 .projector-music-banner {
@@ -955,6 +1076,13 @@
     width: 2.25rem;
     height: 2.25rem;
     font-size: 1rem;
+  }
+
+  .projector-fullscreen-hotspot {
+    top: 0.75rem;
+    right: 0.75rem;
+    width: 2.5rem;
+    height: 2.5rem;
   }
 
   .viewer-live-badge {
@@ -1585,7 +1713,7 @@
 }
 
 .viewer-font-controls {
-  gap: 0.5rem;
+  gap: 0.35rem;
 }
 
 .viewer-toolbar-button {
@@ -1605,12 +1733,6 @@
 .viewer-toolbar-button:disabled {
   background: rgba(148, 163, 184, 0.2);
   color: rgba(226, 232, 240, 0.52);
-}
-
-.viewer-font-value {
-  min-width: 3rem;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 
 .viewer-toolbar-check input {
@@ -1640,6 +1762,18 @@
     bottom: 1rem;
     left: 1rem;
     right: 4.5rem;
+  }
+
+  .projector-preview-header {
+    flex-direction: column;
+  }
+
+  .projector-preview-toggles {
+    justify-content: flex-start;
+  }
+
+  .projector-control-panel-inline {
+    align-items: stretch;
   }
 
   .projector-link-actions {

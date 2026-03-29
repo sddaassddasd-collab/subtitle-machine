@@ -41,6 +41,9 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   updatedAt: null,
 }
 
+const PROJECTOR_FONT_STEP = 5
+const PROJECTOR_POSITION_STEP = 1
+
 const TARGET_SAMPLE_RATE = 24000
 const MIC_CAPTURE_WORKLET_URL = new URL(
   '../worklets/mic-capture-processor.js',
@@ -258,6 +261,130 @@ const getMusicRangeAroundIndex = (sourceLines, index) => {
   return { startIndex, endIndex }
 }
 
+const normalizeEditableSegment = (text, { trim = true } = {}) => {
+  const cleaned = (text ?? '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\u200b/g, '')
+    .replace(/\r?\n/g, ' ')
+  return trim ? cleaned.trim() : cleaned
+}
+
+const getCollapsedLineSelectionContext = (node) => {
+  if (!node || !window.getSelection) return null
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
+    return null
+  }
+
+  const range = selection.getRangeAt(0)
+  if (!node.contains(range.endContainer)) return null
+
+  const beforeRange = range.cloneRange()
+  beforeRange.selectNodeContents(node)
+  beforeRange.setEnd(range.endContainer, range.endOffset)
+
+  const fullTextRaw = normalizeEditableSegment(node.textContent ?? '', {
+    trim: false,
+  })
+  const normalizedFull = normalizeEditableSegment(fullTextRaw)
+  const caretTextRaw = normalizeEditableSegment(beforeRange.toString(), {
+    trim: false,
+  })
+  const caretOffset = Math.min(caretTextRaw.length, fullTextRaw.length)
+
+  let beforeText = normalizeEditableSegment(fullTextRaw.slice(0, caretOffset))
+  const afterText = normalizeEditableSegment(fullTextRaw.slice(caretOffset))
+  const combinedText = normalizeEditableSegment(`${beforeText}${afterText}`)
+
+  if (normalizedFull && combinedText !== normalizedFull) {
+    if (afterText) {
+      const fallbackLength = Math.max(normalizedFull.length - afterText.length, 0)
+      beforeText = normalizeEditableSegment(normalizedFull.slice(0, fallbackLength))
+    } else {
+      beforeText = normalizedFull
+    }
+  }
+
+  return {
+    caretOffset,
+    normalizedFull,
+    beforeText,
+    afterText,
+  }
+}
+
+const joinLineTextFragments = (leftText, rightText) => {
+  const left = normalizeEditableSegment(leftText)
+  const right = normalizeEditableSegment(rightText)
+  if (!left) return right
+  if (!right) return left
+
+  const lastChar = left.slice(-1)
+  const firstChar = right.charAt(0)
+  const needsSpace =
+    /[\p{L}\p{N}]/u.test(lastChar) &&
+    /[\p{L}\p{N}]/u.test(firstChar) &&
+    !/[\p{Script=Han}]/u.test(lastChar) &&
+    !/[\p{Script=Han}]/u.test(firstChar)
+
+  return needsSpace ? `${left} ${right}` : `${left}${right}`
+}
+
+const mergeLineTranslations = (previousTranslations, currentTranslations) => {
+  const translationIds = new Set([
+    ...Object.keys(previousTranslations || {}),
+    ...Object.keys(currentTranslations || {}),
+  ])
+  const merged = {}
+  translationIds.forEach((languageId) => {
+    merged[languageId] = joinLineTextFragments(
+      previousTranslations?.[languageId] || '',
+      currentTranslations?.[languageId] || '',
+    )
+  })
+  return merged
+}
+
+const mergeLineRecords = (previousLine, currentLine, currentTextOverride = null) => {
+  const previousText =
+    typeof previousLine === 'object' && previousLine
+      ? previousLine.text || ''
+      : typeof previousLine === 'string'
+        ? previousLine
+        : ''
+  const currentText =
+    typeof currentTextOverride === 'string'
+      ? currentTextOverride
+      : typeof currentLine === 'object' && currentLine
+        ? currentLine.text || ''
+        : typeof currentLine === 'string'
+          ? currentLine
+          : ''
+  const mergedText = joinLineTextFragments(previousText, currentText)
+  const mergedTranslations = mergeLineTranslations(
+    previousLine?.translations,
+    currentLine?.translations,
+  )
+
+  return {
+    ...(previousLine && typeof previousLine === 'object' ? previousLine : {}),
+    text: mergedText,
+    type:
+      previousLine && typeof previousLine === 'object' && previousLine.type === 'direction'
+        ? 'direction'
+        : 'dialogue',
+    music: isLineMarkedMusic(previousLine) || isLineMarkedMusic(currentLine),
+    role:
+      previousLine && typeof previousLine === 'object' && previousLine.role
+        ? previousLine.role
+        : currentLine?.role || null,
+    translations: {
+      ...mergedTranslations,
+      primary: mergedText,
+    },
+  }
+}
+
 const ControlPage = () => {
   const location = useLocation()
   const navigate = useNavigate()
@@ -353,6 +480,7 @@ const ControlPage = () => {
     sessionMeta?.viewerDefaultLanguageId || languages[0]?.id || 'primary'
   const projectorDefaultLanguageId =
     sessionMeta?.projectorDefaultLanguageId || languages[0]?.id || 'primary'
+  const musicEffectEnabled = sessionMeta?.musicEffectEnabled !== false
 
   const setDraftInputValue = (cellId, languageId, value) => {
     if (!cellId || !languageId) return
@@ -853,6 +981,29 @@ const ControlPage = () => {
     })
   }
 
+  const handleToggleMusicEffectEnabled = () => {
+    if (!socketRef.current || !sessionId) return
+    const nextState = !musicEffectEnabled
+    socketRef.current.emit('setMusicEffectEnabled', {
+      sessionId,
+      musicEffectEnabled: nextState,
+    })
+    setSessionMeta((prev) =>
+      prev
+        ? {
+            ...prev,
+            musicEffectEnabled: nextState,
+          }
+        : prev,
+    )
+    setStatus({
+      kind: 'info',
+      message: nextState
+        ? '本場次已開啟「此段有音樂」效果'
+        : '本場次已關閉「此段有音樂」效果',
+    })
+  }
+
   const handleViewerDefaultLanguageChange = (event) => {
     if (!socketRef.current || !sessionId) return
     const nextLanguageId = event.target.value
@@ -1318,65 +1469,67 @@ const ControlPage = () => {
   }
 
   const handleLineKeyDown = (event, index) => {
-    if (event.key !== 'Enter') return
-    if (event.shiftKey || event.isComposing || event.keyCode === 229) return
     if (!socketRef.current || !sessionId || !window.getSelection) return
 
     const node = lineRefs.current[index] ?? event.currentTarget
     if (!node) return
-    const selection = window.getSelection()
-    if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
-      return
-    }
 
-    const range = selection.getRangeAt(0)
-    if (!node.contains(range.endContainer)) return
+    const selectionContext = getCollapsedLineSelectionContext(node)
+    if (!selectionContext) return
 
-    const beforeRange = range.cloneRange()
-    beforeRange.selectNodeContents(node)
-    beforeRange.setEnd(range.endContainer, range.endOffset)
-
-    const normalizeSegment = (text, { trim = true } = {}) => {
-      const cleaned = (text ?? '')
-        .replace(/\u00a0/g, ' ')
-        .replace(/\u200b/g, '')
-        .replace(/\r?\n/g, ' ')
-      return trim ? cleaned.trim() : cleaned
-    }
-
-    const fullTextRaw = normalizeSegment(node.textContent ?? '', {
-      trim: false,
-    })
-    const normalizedFull = normalizeSegment(fullTextRaw)
-    const caretTextRaw = normalizeSegment(beforeRange.toString(), {
-      trim: false,
-    })
-    let caretOffset = caretTextRaw.length
-    if (caretOffset > fullTextRaw.length) {
-      caretOffset = fullTextRaw.length
-    }
-
-    let beforeText = normalizeSegment(fullTextRaw.slice(0, caretOffset))
-    let afterText = normalizeSegment(fullTextRaw.slice(caretOffset))
-    const combinedText = normalizeSegment(`${beforeText}${afterText}`)
-    if (normalizedFull && combinedText !== normalizedFull) {
-      if (afterText) {
-        const fallbackLength = Math.max(
-          normalizedFull.length - afterText.length,
-          0,
-        )
-        beforeText = normalizeSegment(normalizedFull.slice(0, fallbackLength))
-      } else {
-        beforeText = normalizedFull
-      }
-    }
+    const { caretOffset, normalizedFull, beforeText, afterText } = selectionContext
 
     const currentLine = lines[index]
     const currentType =
       typeof currentLine === 'object' && currentLine?.type === 'direction'
         ? 'direction'
-        : 'dialogue'
+      : 'dialogue'
     const currentMusic = isLineMarkedMusic(currentLine)
+
+    if (
+      event.key === 'Backspace' &&
+      !event.shiftKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      caretOffset === 0 &&
+      index > 0
+    ) {
+      event.preventDefault()
+      const currentText = normalizedFull
+      setLines((prev) => {
+        const next = [...prev]
+        next.splice(
+          index - 1,
+          2,
+          mergeLineRecords(next[index - 1], next[index], currentText),
+        )
+        return next
+      })
+      setCurrentIndex((prev) => {
+        if (prev > index) return Math.max(prev - 1, 0)
+        if (prev === index) return index - 1
+        return prev
+      })
+      setPendingMusicRangeStartIndex((prev) => {
+        if (prev == null) return prev
+        if (prev === index) return index - 1
+        if (prev > index) return prev - 1
+        return prev
+      })
+      setEditingIndex(index - 1)
+      setAutoCenterEnabled(true)
+      socketRef.current.emit('mergeLineIntoPrevious', {
+        sessionId,
+        index,
+        currentText,
+      })
+      setStatus({ kind: 'info', message: '字幕已併回上一段' })
+      return
+    }
+
+    if (event.key !== 'Enter') return
+    if (event.shiftKey || event.isComposing || event.keyCode === 229) return
 
     if (normalizedFull) {
       setLines((prev) => {
@@ -1823,7 +1976,7 @@ const ControlPage = () => {
       nextWindow.focus()
       setStatus({
         kind: 'info',
-        message: '投影頁已開啟，請拖到外接螢幕後切換全螢幕',
+        message: '投影頁已開啟，請拖到外接螢幕後點右上角隱藏熱區切換全螢幕',
       })
       return
     }
@@ -1851,9 +2004,9 @@ const ControlPage = () => {
     }
   }
 
-  const handleProjectorSliderChange = (field) => (event) => {
-    const nextValue = Number(event.target.value)
-    if (!Number.isFinite(nextValue)) return
+  const adjustProjectorLayout = (field, delta) => {
+    const currentValue = Number(projectorLayoutDraftRef.current?.[field])
+    const nextValue = (Number.isFinite(currentValue) ? currentValue : 0) + delta
     updateProjectorLayout({ [field]: nextValue })
   }
 
@@ -1879,9 +2032,7 @@ const ControlPage = () => {
   const handleResetProjectorLayout = () => {
     updateProjectorLayout(
       {
-        fontSizePercent: 100,
-        offsetX: 0,
-        offsetY: 24,
+        ...normalizeProjectorLayout(),
       },
       '投影版面已重設',
     )
@@ -2019,6 +2170,7 @@ const ControlPage = () => {
   const speakerRecognitionEnabled =
     transcription.speakerRecognitionEnabled === true
   const currentLineMusicActive = isLineMarkedMusic(currentLine)
+  const currentLineMusicVisible = musicEffectEnabled && currentLineMusicActive
   const musicSelectionHint =
     pendingMusicRangeStartIndex != null
       ? `音樂範圍選取中：已選第 ${pendingMusicRangeStartIndex + 1} 行為起點，請再勾選結束行。`
@@ -2036,7 +2188,7 @@ const ControlPage = () => {
         ? '舞台指示不投影'
         : resolveLineText(currentLine, projectorDefaultLanguageId) || '尚未載入字幕'
   const projectorPreviewStyle = {
-    '--projector-preview-scale': projectorLayout.fontSizePercent / 100,
+    '--projector-preview-scale': Math.max(projectorLayout.fontSizePercent, 0) / 100,
     '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
     '--projector-preview-top': `${50 + projectorLayout.offsetY * 0.9}%`,
   }
@@ -2179,64 +2331,9 @@ const ControlPage = () => {
                   <button type="button" className="subtle-button" onClick={handleOpenProjectorWindow}>
                     開啟投影頁
                   </button>
-                  <button type="button" className="subtle-button" onClick={handleResetProjectorLayout}>
-                    重設版面
-                  </button>
-                </div>
-                <div className="projector-layout-card">
-                  <label className="range-control">
-                    <span>投影顯示內容</span>
-                    <select
-                      value={projectorDisplayMode}
-                      onChange={handleProjectorDisplayModeChange}
-                    >
-                      <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
-                        固定劇本字幕
-                      </option>
-                      <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
-                        即時語音辨識
-                      </option>
-                    </select>
-                  </label>
-                  <label className="range-control">
-                    <span>字體大小</span>
-                    <strong>{projectorLayout.fontSizePercent}%</strong>
-                    <input
-                      type="range"
-                      min="60"
-                      max="220"
-                      step="5"
-                      value={projectorLayout.fontSizePercent}
-                      onChange={handleProjectorSliderChange('fontSizePercent')}
-                    />
-                  </label>
-                  <label className="range-control">
-                    <span>左右位置</span>
-                    <strong>{projectorLayout.offsetX}</strong>
-                    <input
-                      type="range"
-                      min="-35"
-                      max="35"
-                      step="1"
-                      value={projectorLayout.offsetX}
-                      onChange={handleProjectorSliderChange('offsetX')}
-                    />
-                  </label>
-                  <label className="range-control">
-                    <span>上下位置</span>
-                    <strong>{projectorLayout.offsetY}</strong>
-                    <input
-                      type="range"
-                      min="-20"
-                      max="35"
-                      step="1"
-                      value={projectorLayout.offsetY}
-                      onChange={handleProjectorSliderChange('offsetY')}
-                    />
-                  </label>
                 </div>
                 <span className="input-note">
-                  請使用延伸桌面，將投影頁移到外接螢幕後切換全螢幕。投影端預設固定顯示劇本，不會再自動被即時語音覆蓋。
+                  請使用延伸桌面，將投影頁移到外接螢幕後點右上角隱藏熱區切換全螢幕。投影端預設固定顯示劇本，不會再自動被即時語音覆蓋。
                 </span>
               </div>
             </header>
@@ -2529,22 +2626,34 @@ const ControlPage = () => {
             </div>
 
             <div className="viewer-preview">
-              <label>投影預覽</label>
-              <label className="checkbox-row viewer-preview-toggle">
-                <input
-                  type="checkbox"
-                  checked={roleColorEnabled}
-                  onChange={handleToggleRoleColorEnabled}
-                />
-                顏色分辨角色
-              </label>
+              <div className="projector-preview-header">
+                <label>投影預覽</label>
+                <div className="projector-preview-toggles">
+                  <label className="checkbox-row viewer-preview-toggle">
+                    <input
+                      type="checkbox"
+                      checked={roleColorEnabled}
+                      onChange={handleToggleRoleColorEnabled}
+                    />
+                    顏色分辨角色
+                  </label>
+                  <label className="checkbox-row viewer-preview-toggle">
+                    <input
+                      type="checkbox"
+                      checked={musicEffectEnabled}
+                      onChange={handleToggleMusicEffectEnabled}
+                    />
+                    開啟「此段有音樂」效果
+                  </label>
+                </div>
+              </div>
               <div
                 className={`viewer-preview-box ${
                   displayEnabled ? '' : 'viewer-muted'
                 } ${
                   currentLine?.type === 'direction' ? 'viewer-direction' : ''
                 } ${
-                  currentLineMusicActive ? 'viewer-music-preview' : ''
+                  currentLineMusicVisible ? 'viewer-music-preview' : ''
                 }`}
                 style={projectorPreviewStyle}
               >
@@ -2565,9 +2674,118 @@ const ControlPage = () => {
                   角色：{currentLine.role}
                 </div>
               )}
-              {currentLineMusicActive && (
+              {currentLineMusicVisible && (
                 <div className="viewer-preview-music">此處有音樂</div>
               )}
+              {!musicEffectEnabled && (
+                <div className="viewer-preview-note">
+                  本場次已關閉「此段有音樂」效果，逐行音樂標記會保留但不顯示。
+                </div>
+              )}
+              <div className="projector-preview-controls">
+                <div className="projector-control-panel projector-control-panel-inline">
+                  <label className="projector-control-select">
+                    <span>投影顯示內容</span>
+                    <select
+                      value={projectorDisplayMode}
+                      onChange={handleProjectorDisplayModeChange}
+                    >
+                      <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
+                        固定劇本字幕
+                      </option>
+                      <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
+                        即時語音辨識
+                      </option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="subtle-button"
+                    onClick={handleResetProjectorLayout}
+                  >
+                    重設位置與字體
+                  </button>
+                </div>
+                <div className="projector-control-grid">
+                  <div className="projector-control-panel">
+                    <span className="projector-control-label">字體大小</span>
+                    <div className="projector-stepper">
+                      <button
+                        type="button"
+                        className="projector-step-button"
+                        onClick={() =>
+                          adjustProjectorLayout('fontSizePercent', -PROJECTOR_FONT_STEP)
+                        }
+                      >
+                        −
+                      </button>
+                      <strong>{projectorLayout.fontSizePercent}%</strong>
+                      <button
+                        type="button"
+                        className="projector-step-button"
+                        onClick={() =>
+                          adjustProjectorLayout('fontSizePercent', PROJECTOR_FONT_STEP)
+                        }
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <div className="projector-control-panel">
+                    <span className="projector-control-label">字幕位置</span>
+                    <div className="projector-position-readout">
+                      左右 {projectorLayout.offsetX} / 上下 {projectorLayout.offsetY}
+                    </div>
+                    <div className="projector-axis-pad">
+                      <span />
+                      <button
+                        type="button"
+                        className="projector-step-button"
+                        aria-label="字幕往上移"
+                        onClick={() =>
+                          adjustProjectorLayout('offsetY', -PROJECTOR_POSITION_STEP)
+                        }
+                      >
+                        ↑
+                      </button>
+                      <span />
+                      <button
+                        type="button"
+                        className="projector-step-button"
+                        aria-label="字幕往左移"
+                        onClick={() =>
+                          adjustProjectorLayout('offsetX', -PROJECTOR_POSITION_STEP)
+                        }
+                      >
+                        ←
+                      </button>
+                      <div className="projector-axis-center">位置</div>
+                      <button
+                        type="button"
+                        className="projector-step-button"
+                        aria-label="字幕往右移"
+                        onClick={() =>
+                          adjustProjectorLayout('offsetX', PROJECTOR_POSITION_STEP)
+                        }
+                      >
+                        →
+                      </button>
+                      <span />
+                      <button
+                        type="button"
+                        className="projector-step-button"
+                        aria-label="字幕往下移"
+                        onClick={() =>
+                          adjustProjectorLayout('offsetY', PROJECTOR_POSITION_STEP)
+                        }
+                      >
+                        ↓
+                      </button>
+                      <span />
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div className="control-instructions">
                 • 上下方向鍵切換字幕
                 <br />

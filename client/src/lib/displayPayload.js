@@ -1,7 +1,10 @@
-const clampInt = (rawValue, fallback, min, max) => {
+const normalizeInt = (rawValue, fallback, min = null, max = null) => {
   const parsed = Number(rawValue)
   if (!Number.isFinite(parsed)) return fallback
-  return Math.min(Math.max(Math.round(parsed), min), max)
+  const rounded = Math.round(parsed)
+  if (Number.isFinite(min) && rounded < min) return min
+  if (Number.isFinite(max) && rounded > max) return max
+  return rounded
 }
 
 export const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
@@ -22,14 +25,12 @@ export const normalizeProjectorLayout = (rawLayout) => {
       : DEFAULT_PROJECTOR_LAYOUT
 
   return {
-    fontSizePercent: clampInt(
+    fontSizePercent: normalizeInt(
       source.fontSizePercent,
       DEFAULT_PROJECTOR_LAYOUT.fontSizePercent,
-      60,
-      220,
     ),
-    offsetX: clampInt(source.offsetX, DEFAULT_PROJECTOR_LAYOUT.offsetX, -35, 35),
-    offsetY: clampInt(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY, -20, 35),
+    offsetX: normalizeInt(source.offsetX, DEFAULT_PROJECTOR_LAYOUT.offsetX),
+    offsetY: normalizeInt(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY),
   }
 }
 
@@ -49,7 +50,7 @@ export const normalizeProjectorDisplayMode = (rawMode) =>
     : PROJECTOR_DISPLAY_MODES.SCRIPT
 
 export const normalizeProjectorRevision = (rawRevision) =>
-  clampInt(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER)
+  normalizeInt(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER)
 
 export const normalizeDisplayPayload = (payload) => {
   const enabled =

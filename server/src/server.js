@@ -719,10 +719,13 @@ function normalizeLineMusic(rawMusic) {
   return rawMusic === true;
 }
 
-function normalizeBoundedInteger(rawValue, fallback, min, max) {
+function normalizeInteger(rawValue, fallback, min = null, max = null) {
   const parsed = Number(rawValue);
   if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(Math.round(parsed), min), max);
+  const rounded = Math.round(parsed);
+  if (Number.isFinite(min) && rounded < min) return min;
+  if (Number.isFinite(max) && rounded > max) return max;
+  return rounded;
 }
 
 function normalizeProjectorLayout(rawLayout) {
@@ -732,24 +735,12 @@ function normalizeProjectorLayout(rawLayout) {
       : DEFAULT_PROJECTOR_LAYOUT;
 
   return {
-    fontSizePercent: normalizeBoundedInteger(
+    fontSizePercent: normalizeInteger(
       source.fontSizePercent,
       DEFAULT_PROJECTOR_LAYOUT.fontSizePercent,
-      60,
-      220,
     ),
-    offsetX: normalizeBoundedInteger(
-      source.offsetX,
-      DEFAULT_PROJECTOR_LAYOUT.offsetX,
-      -35,
-      35,
-    ),
-    offsetY: normalizeBoundedInteger(
-      source.offsetY,
-      DEFAULT_PROJECTOR_LAYOUT.offsetY,
-      -20,
-      35,
-    ),
+    offsetX: normalizeInteger(source.offsetX, DEFAULT_PROJECTOR_LAYOUT.offsetX),
+    offsetY: normalizeInteger(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY),
   };
 }
 
@@ -770,7 +761,7 @@ function normalizeProjectorDisplayMode(rawMode) {
 }
 
 function normalizeProjectorRevision(rawRevision) {
-  return normalizeBoundedInteger(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER);
+  return normalizeInteger(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER);
 }
 
 function isLineMarkedMusic(entry) {
@@ -2750,6 +2741,7 @@ function captureSessionSnapshot(session) {
       currentIndex: session.currentIndex,
       displayEnabled: session.displayEnabled,
       roleColorEnabled: session.roleColorEnabled,
+      musicEffectEnabled: session.musicEffectEnabled,
       viewerDefaultLanguageId: session.viewerDefaultLanguageId,
       projectorDefaultLanguageId: session.projectorDefaultLanguageId,
       projectorDisplayMode: session.projectorDisplayMode,
@@ -2783,6 +2775,7 @@ function restoreSessionSnapshot(session, snapshot) {
     : 0;
   session.displayEnabled = snapshot.displayEnabled !== false;
   session.roleColorEnabled = snapshot.roleColorEnabled !== false;
+  session.musicEffectEnabled = snapshot.musicEffectEnabled !== false;
   session.viewerDefaultLanguageId =
     typeof snapshot.viewerDefaultLanguageId === 'string'
       ? snapshot.viewerDefaultLanguageId
@@ -2869,6 +2862,7 @@ function ensureSessionStructure(session) {
       : null;
   session.displayEnabled = session.displayEnabled !== false;
   session.roleColorEnabled = session.roleColorEnabled !== false;
+  session.musicEffectEnabled = session.musicEffectEnabled !== false;
   session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
   session.projectorDisplayMode = normalizeProjectorDisplayMode(
     session.projectorDisplayMode,
@@ -2927,6 +2921,7 @@ function createSessionRecord(ownerUserId) {
     status: 'active',
     displayEnabled: true,
     roleColorEnabled: true,
+    musicEffectEnabled: true,
     viewerDefaultLanguageId: 'primary',
     projectorDefaultLanguageId: 'primary',
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
@@ -2954,6 +2949,7 @@ function serializeSessionForStorage(session) {
     endedAt: normalized.endedAt,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
+    musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorLayout: normalized.projectorLayout,
@@ -5218,6 +5214,7 @@ function getSessionSummary(session) {
     endedAt: normalized.endedAt,
     selectedCellId: normalized.selectedCellId,
     roleColorEnabled: normalized.roleColorEnabled,
+    musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorDisplayMode: normalized.projectorDisplayMode,
@@ -5241,6 +5238,7 @@ function getControlPayload(session) {
     currentIndex: normalized.currentIndex,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
+    musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projector: {
@@ -5287,7 +5285,9 @@ function getSessionDisplayState(session) {
     : [];
   const activeScriptLine =
     lines.length > 0 ? lines[normalized.currentIndex] || null : null;
-  const musicActive = isLineMarkedMusic(activeScriptLine);
+  const musicActive =
+    normalized.musicEffectEnabled !== false &&
+    isLineMarkedMusic(activeScriptLine);
   const musicText = musicActive ? '此處有音樂' : '';
 
   return {
@@ -7217,6 +7217,16 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
+  socket.on('setMusicEffectEnabled', ({ sessionId, musicEffectEnabled }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    session.musicEffectEnabled = musicEffectEnabled !== false;
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
   socket.on('setViewerDefaultLanguage', ({ sessionId, languageId }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
@@ -7585,6 +7595,92 @@ io.on('connection', (socket) => {
 
     if (session.currentIndex > index) {
       session.currentIndex += 1;
+    }
+
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('mergeLineIntoPrevious', ({ sessionId, index, currentText }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    if (
+      !Number.isInteger(index) ||
+      index <= 0 ||
+      index >= session.lines.length
+    ) {
+      return;
+    }
+
+    const previous = session.lines[index - 1];
+    const current = session.lines[index];
+    if (!previous || !current) return;
+    pushSessionHistory(session);
+
+    const previousText = sanitizeLineText(
+      typeof previous === 'string' ? previous : previous.text,
+    );
+    const nextCurrentText = sanitizeLineText(
+      typeof currentText === 'string'
+        ? currentText
+        : typeof current === 'string'
+          ? current
+          : current.text,
+    );
+    const previousType =
+      previous && typeof previous === 'object'
+        ? clampLineType(previous.type) || LINE_TYPES.DIALOGUE
+        : LINE_TYPES.DIALOGUE;
+    const blankTranslations = buildBlankTranslationsForSession(session);
+    const previousTranslations = normalizeTranslationsMap(
+      previous?.translations,
+      'primary',
+      previousText,
+    );
+    const currentTranslations = normalizeTranslationsMap(
+      current?.translations,
+      'primary',
+      nextCurrentText,
+    );
+    const mergedTranslationIds = new Set([
+      ...Object.keys(blankTranslations),
+      ...Object.keys(previousTranslations),
+      ...Object.keys(currentTranslations),
+    ]);
+    const mergedTranslations = {};
+
+    mergedTranslationIds.forEach((languageId) => {
+      mergedTranslations[languageId] = joinTranscriptionTexts(
+        previousTranslations[languageId] || '',
+        currentTranslations[languageId] || '',
+      );
+    });
+
+    const mergedText = joinTranscriptionTexts(previousText, nextCurrentText);
+    mergedTranslations.primary = mergedText;
+
+    session.lines.splice(
+      index - 1,
+      2,
+      createLineRecord(
+        {
+          ...previous,
+          text: mergedText,
+          type: previousType,
+          music: isLineMarkedMusic(previous) || isLineMarkedMusic(current),
+          role: previous?.role || current?.role || null,
+          translations: mergedTranslations,
+        },
+        'primary',
+      ),
+    );
+
+    if (session.currentIndex > index) {
+      session.currentIndex -= 1;
+    } else if (session.currentIndex === index) {
+      session.currentIndex = index - 1;
     }
 
     persistSession(session);
