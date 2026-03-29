@@ -1504,6 +1504,63 @@ const ControlPage = () => {
     setStatus({ kind: 'info', message: '字幕已刪除' })
   }
 
+  const createDraftLine = (baseLine = null) => ({
+    id: `draft-line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    text: '',
+    type:
+      baseLine && typeof baseLine === 'object' && baseLine.type === 'direction'
+        ? 'direction'
+        : 'dialogue',
+    music: isLineMarkedMusic(baseLine),
+    role:
+      baseLine && typeof baseLine === 'object' && baseLine.role
+        ? baseLine.role
+        : null,
+    translations: { primary: '' },
+  })
+
+  const handleAddLine = async () => {
+    if (!sessionId || !selectedCellId) return
+
+    const nextIndex = lines.length
+    const draftLine = createDraftLine(lines[nextIndex - 1] || null)
+
+    if (nextIndex === 0 || !socketRef.current?.connected) {
+      try {
+        await performSessionMutation(
+          () =>
+            fetch(`/api/session/${sessionId}/lines`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                cellId: selectedCellId,
+                lines: [...lines, draftLine],
+              }),
+            }),
+          {
+            successMessage:
+              nextIndex === 0 ? '已新增第一個字幕格' : '已新增字幕格',
+          },
+        )
+        setEditingIndex(nextIndex)
+        setAutoCenterEnabled(true)
+      } catch {
+        // performSessionMutation already reports the error.
+      }
+      return
+    }
+
+    setLines((prev) => [...prev, draftLine])
+    setEditingIndex(nextIndex)
+    setAutoCenterEnabled(true)
+    socketRef.current.emit('insertLineAfter', {
+      sessionId,
+      index: nextIndex - 1,
+      type: draftLine.type,
+    })
+    setStatus({ kind: 'success', message: '已新增字幕格' })
+  }
+
   const handleImportJson = async (event) => {
     const file = event.target.files?.[0]
     if (!file || !sessionId || !selectedCellId) return
@@ -2549,6 +2606,9 @@ const ControlPage = () => {
             </div>
           </div>
           <div className="script-toolbar">
+            <button type="button" className="subtle-button" onClick={handleAddLine}>
+              新增字幕格
+            </button>
             <button
               type="button"
               className="subtle-button"
@@ -2570,9 +2630,14 @@ const ControlPage = () => {
 
         <div className="script-list">
           {lines.length === 0 && (
-            <p className="empty-hint">
-              尚未載入字幕，請先解析第一語言劇本，或匯入 JSON 到目前儲存格。
-            </p>
+            <div className="empty-state">
+              <p className="empty-hint">
+                尚未載入字幕，請先解析第一語言劇本、匯入 JSON，或直接新增第一個字幕格。
+              </p>
+              <button type="button" className="subtle-button" onClick={handleAddLine}>
+                新增第一個字幕格
+              </button>
+            </div>
           )}
           {lines.map((line, index) => {
             const lineText =
