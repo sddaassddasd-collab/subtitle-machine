@@ -507,6 +507,11 @@ const buildBlankTranslations = (languages) => {
 
 const getEditingCellKey = (index, languageId) => `${index}:${languageId}`
 
+const formatStatusTimestamp = (timestamp) => {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return ''
+  return new Date(timestamp).toLocaleString('zh-TW', { hour12: false })
+}
+
 const ControlPage = () => {
   const location = useLocation()
   const navigate = useNavigate()
@@ -2441,6 +2446,20 @@ const ControlPage = () => {
       : currentLine?.type === 'direction'
         ? '舞台指示不投影'
         : resolveLineText(currentLine, projectorDefaultLanguageId) || '尚未載入字幕'
+  const projectorStatus = sessionMeta?.projectorStatus || null
+  const projectorStatusMessage = projectorStatus?.message
+    ? projectorStatus.message
+    : projectorStatus?.connected
+      ? '投影端正常'
+      : '尚未偵測到投影端連線'
+  const projectorStatusBadgeLabel = projectorStatus?.connected
+    ? projectorStatus?.connectionCount > 1
+      ? `已連線 ${projectorStatus.connectionCount}`
+      : '已連線'
+    : '未連線'
+  const projectorStatusUpdatedAtLabel = formatStatusTimestamp(
+    projectorStatus?.updatedAt,
+  )
   const projectorPreviewStyle = {
     '--projector-preview-scale': Math.max(projectorLayout.fontSizePercent, 0) / 100,
     '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
@@ -2910,6 +2929,22 @@ const ControlPage = () => {
                     開啟「此段有音樂」效果
                   </label>
                 </div>
+              </div>
+              <div
+                className={`projector-status-panel projector-status-${projectorStatus?.level || 'idle'}`}
+              >
+                <div className="projector-status-row">
+                  <strong>投影端狀態</strong>
+                  <span className="projector-status-badge">
+                    {projectorStatusBadgeLabel}
+                  </span>
+                </div>
+                <div className="projector-status-message">{projectorStatusMessage}</div>
+                {projectorStatusUpdatedAtLabel && (
+                  <div className="projector-status-time">
+                    最後更新：{projectorStatusUpdatedAtLabel}
+                  </div>
+                )}
               </div>
               <div
                 className={`viewer-preview-box ${

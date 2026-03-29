@@ -96,6 +96,7 @@ const users = new Map();
 const authSessions = new Map();
 const viewerSessionTombstones = new Map();
 const projectorSessionTombstones = new Map();
+const projectorConnections = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -154,6 +155,20 @@ const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
 const PROJECTOR_DISPLAY_MODES = Object.freeze({
   SCRIPT: 'script',
   TRANSCRIPTION: 'transcription',
+});
+
+const PROJECTOR_STATUS_LEVELS = Object.freeze({
+  IDLE: 'idle',
+  INFO: 'info',
+  WARNING: 'warning',
+  ERROR: 'error',
+});
+
+const DEFAULT_PROJECTOR_STATUS = Object.freeze({
+  level: PROJECTOR_STATUS_LEVELS.IDLE,
+  code: '',
+  message: '',
+  updatedAt: null,
 });
 
 const placeholderRegex = /^[第]?[零〇一二三四五六七八九十百千\d]+[句行條話]$/i;
@@ -2641,6 +2656,107 @@ function buildBlankTranslationsForSession(session) {
   return translations;
 }
 
+function normalizeProjectorStatus(rawStatus) {
+  const source = rawStatus && typeof rawStatus === 'object' ? rawStatus : {};
+  const level =
+    source.level === PROJECTOR_STATUS_LEVELS.INFO ||
+    source.level === PROJECTOR_STATUS_LEVELS.WARNING ||
+    source.level === PROJECTOR_STATUS_LEVELS.ERROR
+      ? source.level
+      : PROJECTOR_STATUS_LEVELS.IDLE;
+
+  return {
+    level,
+    code: sanitizeLineText(source.code || '').slice(0, 48),
+    message: sanitizeLineText(source.message || '').slice(0, 240),
+    updatedAt:
+      typeof source.updatedAt === 'number' && Number.isFinite(source.updatedAt)
+        ? source.updatedAt
+        : null,
+  };
+}
+
+function ensureProjectorStatus(session) {
+  if (!session || typeof session !== 'object') {
+    return { ...DEFAULT_PROJECTOR_STATUS };
+  }
+
+  session.projectorStatus = normalizeProjectorStatus(session.projectorStatus);
+  return session.projectorStatus;
+}
+
+function setProjectorStatus(session, rawStatus = {}) {
+  if (!session || typeof session !== 'object') return { ...DEFAULT_PROJECTOR_STATUS };
+
+  const level =
+    rawStatus.level === PROJECTOR_STATUS_LEVELS.INFO ||
+    rawStatus.level === PROJECTOR_STATUS_LEVELS.WARNING ||
+    rawStatus.level === PROJECTOR_STATUS_LEVELS.ERROR
+      ? rawStatus.level
+      : PROJECTOR_STATUS_LEVELS.IDLE;
+
+  session.projectorStatus = {
+    level,
+    code: sanitizeLineText(rawStatus.code || '').slice(0, 48),
+    message: sanitizeLineText(rawStatus.message || '').slice(0, 240),
+    updatedAt:
+      typeof rawStatus.occurredAt === 'number' && Number.isFinite(rawStatus.occurredAt)
+        ? rawStatus.occurredAt
+        : Date.now(),
+  };
+
+  return session.projectorStatus;
+}
+
+function getProjectorConnectionCount(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) return 0;
+  const connections = projectorConnections.get(sessionId.trim());
+  return connections instanceof Set ? connections.size : 0;
+}
+
+function addProjectorConnection(sessionId, socketId) {
+  if (
+    typeof sessionId !== 'string' ||
+    !sessionId.trim() ||
+    typeof socketId !== 'string' ||
+    !socketId.trim()
+  ) {
+    return 0;
+  }
+
+  const normalizedSessionId = sessionId.trim();
+  const connections = projectorConnections.get(normalizedSessionId) || new Set();
+  connections.add(socketId.trim());
+  projectorConnections.set(normalizedSessionId, connections);
+  return connections.size;
+}
+
+function removeProjectorConnection(sessionId, socketId) {
+  if (
+    typeof sessionId !== 'string' ||
+    !sessionId.trim() ||
+    typeof socketId !== 'string' ||
+    !socketId.trim()
+  ) {
+    return 0;
+  }
+
+  const normalizedSessionId = sessionId.trim();
+  const connections = projectorConnections.get(normalizedSessionId);
+  if (!(connections instanceof Set)) {
+    return 0;
+  }
+
+  connections.delete(socketId.trim());
+  if (connections.size === 0) {
+    projectorConnections.delete(normalizedSessionId);
+    return 0;
+  }
+
+  projectorConnections.set(normalizedSessionId, connections);
+  return connections.size;
+}
+
 function ensureSessionLanguages(session) {
   const uniqueIds = new Set();
   const inputLanguages = Array.isArray(session?.languages) ? session.languages : [];
@@ -2868,6 +2984,7 @@ function ensureSessionStructure(session) {
     session.projectorDisplayMode,
   );
   session.projectorRevision = normalizeProjectorRevision(session.projectorRevision);
+  ensureProjectorStatus(session);
 
   ensureSessionLanguages(session);
   session.viewerDefaultLanguageId = resolveSessionLanguageId(
@@ -2927,6 +3044,7 @@ function createSessionRecord(ownerUserId) {
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
     projectorDisplayMode: PROJECTOR_DISPLAY_MODES.SCRIPT,
     projectorRevision: 0,
+    projectorStatus: { ...DEFAULT_PROJECTOR_STATUS },
     languages: [createLanguageDefinition({}, 0)],
     selectedCellId: null,
     currentIndex: 0,
@@ -2955,6 +3073,7 @@ function serializeSessionForStorage(session) {
     projectorLayout: normalized.projectorLayout,
     projectorDisplayMode: normalized.projectorDisplayMode,
     projectorRevision: normalized.projectorRevision,
+    projectorStatus: normalized.projectorStatus,
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
     languages: normalized.languages.map((language) => ({
@@ -5200,6 +5319,17 @@ function toPublicLine(line) {
   };
 }
 
+function getPublicProjectorStatus(session) {
+  const normalized = ensureSessionStructure(session);
+  const status = ensureProjectorStatus(normalized);
+  const connectionCount = getProjectorConnectionCount(normalized.id);
+  return {
+    ...status,
+    connected: connectionCount > 0,
+    connectionCount,
+  };
+}
+
 function getSessionSummary(session) {
   const normalized = ensureSessionStructure(session);
   return {
@@ -5219,6 +5349,7 @@ function getSessionSummary(session) {
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorDisplayMode: normalized.projectorDisplayMode,
     projectorRevision: normalized.projectorRevision,
+    projectorStatus: getPublicProjectorStatus(normalized),
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
@@ -7026,6 +7157,8 @@ io.on('connection', (socket) => {
         return;
       }
       socket.join(`viewer:${viewerSession.id}`);
+      socket.data.publicRole = 'viewer';
+      socket.data.viewerSessionId = viewerSession.id;
       broadcastViewerState(viewerSession.id);
       return;
     }
@@ -7045,6 +7178,16 @@ io.on('connection', (socket) => {
         return;
       }
       socket.join(`projector:${projectorSession.id}`);
+      socket.data.publicRole = 'projector';
+      socket.data.projectorSessionId = projectorSession.id;
+      addProjectorConnection(projectorSession.id, socket.id);
+      setProjectorStatus(projectorSession, {
+        level: PROJECTOR_STATUS_LEVELS.INFO,
+        code: 'connected',
+        message: '投影端已連線',
+      });
+      persistSession(projectorSession);
+      broadcastControlState(projectorSession.id);
       broadcastProjectorState(projectorSession.id);
       return;
     }
@@ -7059,6 +7202,41 @@ io.on('connection', (socket) => {
     }
 
     socket.join(`control:${session.id}`);
+    socket.data.publicRole = 'control';
+    socket.data.controlSessionId = session.id;
+    broadcastControlState(session.id);
+  });
+
+  socket.on('projector:status', (payload) => {
+    const sessionId =
+      typeof socket.data?.projectorSessionId === 'string'
+        ? socket.data.projectorSessionId
+        : '';
+    if (!sessionId) return;
+
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    const level =
+      payload?.level === PROJECTOR_STATUS_LEVELS.WARNING ||
+      payload?.level === PROJECTOR_STATUS_LEVELS.ERROR
+        ? payload.level
+        : PROJECTOR_STATUS_LEVELS.INFO;
+    const code = sanitizeLineText(payload?.code || '').slice(0, 48);
+    const message = sanitizeLineText(payload?.message || '').slice(0, 240);
+
+    if (!code && !message) return;
+
+    setProjectorStatus(session, {
+      level,
+      code,
+      message,
+      occurredAt:
+        typeof payload?.occurredAt === 'number' && Number.isFinite(payload.occurredAt)
+          ? payload.occurredAt
+          : Date.now(),
+    });
+    persistSession(session);
     broadcastControlState(session.id);
   });
 
@@ -7833,6 +8011,30 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    const projectorSessionId =
+      typeof socket.data?.projectorSessionId === 'string'
+        ? socket.data.projectorSessionId
+        : '';
+    if (projectorSessionId) {
+      const remainingConnections = removeProjectorConnection(projectorSessionId, socket.id);
+      const projectorSession = getSession(projectorSessionId);
+      if (projectorSession) {
+        setProjectorStatus(projectorSession, {
+          level:
+            remainingConnections > 0
+              ? PROJECTOR_STATUS_LEVELS.INFO
+              : PROJECTOR_STATUS_LEVELS.WARNING,
+          code: remainingConnections > 0 ? 'connected' : 'disconnected',
+          message:
+            remainingConnections > 0
+              ? `投影端仍有 ${remainingConnections} 個連線`
+              : '投影端已斷線',
+        });
+        persistSession(projectorSession);
+        broadcastControlState(projectorSessionId);
+      }
+    }
+
     const ownedSessions = [];
     transcriptionStreams.forEach((stream, sessionId) => {
       if (stream.socketId === socket.id) {

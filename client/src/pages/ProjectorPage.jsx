@@ -39,15 +39,82 @@ const ProjectorPage = () => {
   const [, setHasLoadedState] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
+  const socketRef = useRef(null)
   const layoutRevisionRef = useRef(0)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
+  const pendingStatusReportsRef = useRef([])
+  const lastStatusReportKeyRef = useRef('')
 
   const clearRecoveryTimer = useCallback(() => {
     if (!recoveryTimerRef.current) return
     window.clearTimeout(recoveryTimerRef.current)
     recoveryTimerRef.current = null
   }, [])
+
+  const flushQueuedStatusReports = useCallback(() => {
+    const socket = socketRef.current
+    if (!socket?.connected || pendingStatusReportsRef.current.length === 0) {
+      return
+    }
+
+    const queuedReports = [...pendingStatusReportsRef.current]
+    pendingStatusReportsRef.current = []
+    queuedReports.forEach((report) => {
+      socket.emit('projector:status', report)
+    })
+  }, [])
+
+  const reportProjectorStatus = useCallback((rawReport) => {
+    const level =
+      rawReport?.level === 'error'
+        ? 'error'
+        : rawReport?.level === 'warning'
+          ? 'warning'
+          : 'info'
+    const code =
+      typeof rawReport?.code === 'string' ? rawReport.code.trim() : ''
+    const message =
+      typeof rawReport?.message === 'string' ? rawReport.message.trim() : ''
+
+    if (!code && !message) return
+
+    const report = {
+      level,
+      code: code || `projector-${level}`,
+      message: message || code || '投影端狀態更新',
+      occurredAt: Date.now(),
+    }
+    const reportKey = `${report.level}:${report.code}:${report.message}`
+    if (lastStatusReportKeyRef.current === reportKey) {
+      return
+    }
+    lastStatusReportKeyRef.current = reportKey
+
+    const socket = socketRef.current
+    if (socket?.connected) {
+      socket.emit('projector:status', report)
+      return
+    }
+
+    pendingStatusReportsRef.current = [
+      ...pendingStatusReportsRef.current.slice(-4),
+      report,
+    ]
+  }, [])
+
+  const markProjectorRecovered = useCallback(() => {
+    if (
+      lastStatusReportKeyRef.current.startsWith('warning:') ||
+      lastStatusReportKeyRef.current.startsWith('error:')
+    ) {
+      reportProjectorStatus({
+        level: 'info',
+        code: 'recovered',
+        message: '投影端已恢復正常',
+      })
+    }
+  }, [reportProjectorStatus])
 
   const applyProjectorLayoutPayload = useCallback((rawLayout, rawRevision) => {
     const nextRevision = normalizeProjectorRevision(rawRevision)
@@ -113,6 +180,11 @@ const ProjectorPage = () => {
             '無法載入投影字幕',
           )
           if (cancelled) return
+          reportProjectorStatus({
+            level: failure.fatal ? 'error' : 'warning',
+            code: failure.reason || 'fetch_failed',
+            message: failure.message,
+          })
           if (failure.fatal) {
             setFatalError(failure.message)
           } else {
@@ -122,9 +194,15 @@ const ProjectorPage = () => {
         }
         if (!cancelled) {
           applyProjectorDisplayPayload(data)
+          markProjectorRecovered()
         }
       } catch (fetchError) {
         if (!cancelled) {
+          reportProjectorStatus({
+            level: 'warning',
+            code: 'fetch_failed',
+            message: fetchError.message || '無法載入投影字幕',
+          })
           setConnectionIssue(fetchError.message || '無法載入投影字幕')
         }
       }
@@ -143,6 +221,8 @@ const ProjectorPage = () => {
     applyProjectorDisplayPayload,
     classifyPublicFailure,
     clearRecoveryTimer,
+    markProjectorRecovered,
+    reportProjectorStatus,
     resolvedProjectorToken,
   ])
 
@@ -150,6 +230,7 @@ const ProjectorPage = () => {
     if (!resolvedProjectorToken) return
 
     const socket = io()
+    socketRef.current = socket
     const joinProjectorSession = () => {
       socket.emit('join', {
         projectorToken: resolvedProjectorToken,
@@ -167,6 +248,11 @@ const ProjectorPage = () => {
             data,
             '無法載入投影字幕',
           )
+          reportProjectorStatus({
+            level: failure.fatal ? 'error' : 'warning',
+            code: failure.reason || 'fetch_failed',
+            message: failure.message,
+          })
           if (failure.fatal) {
             setFatalError(failure.message)
           } else {
@@ -175,7 +261,13 @@ const ProjectorPage = () => {
           return
         }
         applyProjectorDisplayPayload(data)
+        markProjectorRecovered()
       } catch (error) {
+        reportProjectorStatus({
+          level: 'warning',
+          code: 'fetch_failed',
+          message: error.message || '與伺服器重新同步失敗',
+        })
         setConnectionIssue(error.message || '與伺服器重新同步失敗')
       }
     }
@@ -190,17 +282,24 @@ const ProjectorPage = () => {
 
     socket.on('connect', () => {
       joinProjectorSession()
+      flushQueuedStatusReports()
       void fetchProjectorState()
     })
 
     socket.on('disconnect', () => {
       if (hasLoadedStateRef.current) {
+        reportProjectorStatus({
+          level: 'warning',
+          code: 'socket_disconnect',
+          message: '投影端與伺服器連線中斷',
+        })
         setConnectionIssue('與伺服器連線中斷，正在重新連線')
       }
     })
 
     socket.on('projector:update', (payload) => {
       applyProjectorDisplayPayload(payload)
+      markProjectorRecovered()
     })
 
     socket.on('projector:layout', (payload) => {
@@ -216,6 +315,11 @@ const ProjectorPage = () => {
         typeof payload?.message === 'string' && payload.message.trim()
           ? payload.message.trim()
           : '本場次已結束'
+      reportProjectorStatus({
+        level: 'error',
+        code: reason || 'expired',
+        message,
+      })
 
       if (reason === 'ended' || reason === 'deleted' || !hasLoadedStateRef.current) {
         setFatalError(message)
@@ -229,12 +333,18 @@ const ProjectorPage = () => {
     return () => {
       clearRecoveryTimer()
       socket.disconnect()
+      if (socketRef.current === socket) {
+        socketRef.current = null
+      }
     }
   }, [
     applyProjectorDisplayPayload,
     applyProjectorLayoutPayload,
     classifyPublicFailure,
     clearRecoveryTimer,
+    flushQueuedStatusReports,
+    markProjectorRecovered,
+    reportProjectorStatus,
     resolvedProjectorToken,
   ])
 
@@ -304,11 +414,23 @@ const ProjectorPage = () => {
       document.msFullscreenElement
 
     if (!active) {
-      requestFullscreen(container)
+      requestFullscreen(container).catch((error) => {
+        reportProjectorStatus({
+          level: 'warning',
+          code: 'fullscreen_enter_failed',
+          message: error?.message || '無法進入全螢幕',
+        })
+      })
     } else {
-      exitFullscreen().catch(() => {})
+      exitFullscreen().catch((error) => {
+        reportProjectorStatus({
+          level: 'warning',
+          code: 'fullscreen_exit_failed',
+          message: error?.message || '無法離開全螢幕',
+        })
+      })
     }
-  }, [])
+  }, [reportProjectorStatus])
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -336,6 +458,35 @@ const ProjectorPage = () => {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [toggleFullscreen])
+
+  useEffect(() => {
+    const handleRuntimeError = (event) => {
+      reportProjectorStatus({
+        level: 'error',
+        code: 'runtime_error',
+        message: event?.message || '投影端發生未預期錯誤',
+      })
+    }
+
+    const handleUnhandledRejection = (event) => {
+      const reason = event?.reason
+      reportProjectorStatus({
+        level: 'error',
+        code: 'unhandled_rejection',
+        message:
+          typeof reason === 'string'
+            ? reason
+            : reason?.message || '投影端發生未處理的 Promise 錯誤',
+      })
+    }
+
+    window.addEventListener('error', handleRuntimeError)
+    window.addEventListener('unhandledrejection', handleUnhandledRejection)
+    return () => {
+      window.removeEventListener('error', handleRuntimeError)
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+    }
+  }, [reportProjectorStatus])
 
   const resolvedLayout = normalizeProjectorLayout(layout)
   const projectorStyle = {
