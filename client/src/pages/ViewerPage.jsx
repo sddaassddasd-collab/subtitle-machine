@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import {
@@ -13,6 +13,8 @@ const DEFAULT_VIEWER_FONT_PERCENT = 100
 const MIN_VIEWER_FONT_PERCENT = 70
 const MAX_VIEWER_FONT_PERCENT = 180
 const VIEWER_FONT_STEP = 10
+const PUBLIC_STATE_REFRESH_INTERVAL_MS = 15000
+const PUBLIC_RECOVERY_RETRY_DELAY_MS = 1200
 
 const getInitialViewerFontPercent = () => {
   if (typeof window === 'undefined') return DEFAULT_VIEWER_FONT_PERCENT
@@ -49,10 +51,14 @@ const ViewerPage = () => {
   const [viewerFontPercent, setViewerFontPercent] = useState(
     getInitialViewerFontPercent,
   )
-  const [error, setError] = useState('')
+  const [fatalError, setFatalError] = useState('')
+  const [connectionIssue, setConnectionIssue] = useState('')
+  const [hasLoadedState, setHasLoadedState] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const liveFeedRef = useRef(null)
+  const hasLoadedStateRef = useRef(false)
+  const recoveryTimerRef = useRef(null)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -62,85 +68,164 @@ const ViewerPage = () => {
     )
   }, [viewerFontPercent])
 
+  const clearRecoveryTimer = useCallback(() => {
+    if (!recoveryTimerRef.current) return
+    window.clearTimeout(recoveryTimerRef.current)
+    recoveryTimerRef.current = null
+  }, [])
+
+  const applyViewerPayload = useCallback((payload) => {
+    const next = normalizeDisplayPayload(payload)
+    setDisplayEnabled(next.enabled)
+    setLine(next.line)
+    setLiveEntries(next.liveEntries)
+    setLiveLines(next.liveLines)
+    setMusicActive(next.musicActive)
+    setMusicText(next.musicText)
+    setLineSource(next.source)
+    setLanguages(next.languages)
+    setViewerDefaultLanguageId(
+      resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
+    )
+    setTranscriptionIsFinal(next.transcriptionIsFinal)
+    setRoleColorEnabled(next.roleColorEnabled)
+    hasLoadedStateRef.current = true
+    setHasLoadedState(true)
+    setConnectionIssue('')
+    setFatalError('')
+  }, [])
+
+  const classifyPublicFailure = useCallback((response, data, fallbackMessage) => {
+    const reason =
+      typeof data?.reason === 'string' && data.reason.trim().length > 0
+        ? data.reason.trim()
+        : ''
+    const message =
+      data?.error || data?.message || fallbackMessage || '無法載入字幕'
+    const isTerminalReason = reason === 'ended' || reason === 'deleted'
+    const fatal =
+      isTerminalReason ||
+      (response?.status === 410 && !hasLoadedStateRef.current)
+
+    return { fatal, message, reason }
+  }, [])
+
   useEffect(() => {
     if (!resolvedViewerToken) {
-      setError('缺少檢視端連結')
+      setFatalError('缺少檢視端連結')
       return
     }
 
     let cancelled = false
-    const fetchInitialState = async () => {
+    const fetchViewerState = async () => {
       try {
         const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
-          throw new Error(data?.error || data?.message || '無法載入字幕')
+          const failure = classifyPublicFailure(response, data, '無法載入字幕')
+          if (cancelled) return
+          if (failure.fatal) {
+            setFatalError(failure.message)
+          } else {
+            setConnectionIssue(failure.message)
+          }
+          return
         }
         if (!cancelled) {
-          const next = normalizeDisplayPayload(data)
-          setDisplayEnabled(next.enabled)
-          setLine(next.line)
-          setLiveEntries(next.liveEntries)
-          setLiveLines(next.liveLines)
-          setMusicActive(next.musicActive)
-          setMusicText(next.musicText)
-          setLineSource(next.source)
-          setLanguages(next.languages)
-          setViewerDefaultLanguageId(
-            resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
-          )
-          setTranscriptionIsFinal(next.transcriptionIsFinal)
-          setRoleColorEnabled(next.roleColorEnabled)
+          applyViewerPayload(data)
         }
       } catch (fetchError) {
         if (!cancelled) {
-          setError(fetchError.message || '無法載入字幕')
+          setConnectionIssue(fetchError.message || '無法載入字幕')
         }
       }
     }
 
-    fetchInitialState()
+    void fetchViewerState()
+    const intervalId = window.setInterval(() => {
+      void fetchViewerState()
+    }, PUBLIC_STATE_REFRESH_INTERVAL_MS)
     return () => {
       cancelled = true
+      clearRecoveryTimer()
+      window.clearInterval(intervalId)
     }
-  }, [resolvedViewerToken])
+  }, [applyViewerPayload, classifyPublicFailure, clearRecoveryTimer, resolvedViewerToken])
 
   useEffect(() => {
     if (!resolvedViewerToken) return
 
     const socket = io()
-    socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
+    const joinViewerSession = () => {
+      socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
+    }
+
+    const fetchViewerState = async () => {
+      try {
+        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          const failure = classifyPublicFailure(response, data, '無法載入字幕')
+          if (failure.fatal) {
+            setFatalError(failure.message)
+          } else {
+            setConnectionIssue(failure.message)
+          }
+          return
+        }
+        applyViewerPayload(data)
+      } catch (error) {
+        setConnectionIssue(error.message || '與伺服器重新同步失敗')
+      }
+    }
+
+    const scheduleRecoveryFetch = () => {
+      clearRecoveryTimer()
+      recoveryTimerRef.current = window.setTimeout(() => {
+        recoveryTimerRef.current = null
+        void fetchViewerState()
+      }, PUBLIC_RECOVERY_RETRY_DELAY_MS)
+    }
+
+    socket.on('connect', () => {
+      joinViewerSession()
+      void fetchViewerState()
+    })
+
+    socket.on('disconnect', () => {
+      if (hasLoadedStateRef.current) {
+        setConnectionIssue('與伺服器連線中斷，正在重新連線')
+      }
+    })
 
     socket.on('viewer:update', (payload) => {
-      const next = normalizeDisplayPayload(payload)
-      setDisplayEnabled(next.enabled)
-      setLine(next.line)
-      setLiveEntries(next.liveEntries)
-      setLiveLines(next.liveLines)
-      setMusicActive(next.musicActive)
-      setMusicText(next.musicText)
-      setLineSource(next.source)
-      setLanguages(next.languages)
-      setViewerDefaultLanguageId(
-        resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
-      )
-      setTranscriptionIsFinal(next.transcriptionIsFinal)
-      setRoleColorEnabled(next.roleColorEnabled)
-      setError('')
+      applyViewerPayload(payload)
     })
 
     socket.on('viewer:expired', (payload) => {
-      setError(
-        typeof payload?.message === 'string'
-          ? payload.message
-          : '本場次已結束',
-      )
+      const reason =
+        typeof payload?.reason === 'string' && payload.reason.trim()
+          ? payload.reason.trim()
+          : ''
+      const message =
+        typeof payload?.message === 'string' && payload.message.trim()
+          ? payload.message.trim()
+          : '本場次已結束'
+
+      if (reason === 'ended' || reason === 'deleted' || !hasLoadedStateRef.current) {
+        setFatalError(message)
+        return
+      }
+
+      setConnectionIssue(message)
+      scheduleRecoveryFetch()
     })
 
     return () => {
+      clearRecoveryTimer()
       socket.disconnect()
     }
-  }, [resolvedViewerToken])
+  }, [applyViewerPayload, classifyPublicFailure, clearRecoveryTimer, resolvedViewerToken])
 
   useEffect(() => {
     if (!languages.length) return
@@ -269,12 +354,23 @@ const ViewerPage = () => {
     )
   }
 
-  if (error) {
+  if (fatalError) {
     return (
       <div className="viewer-page">
         <div className="no-session">
           <h2>無法載入字幕</h2>
-          <p>{error}</p>
+          <p>{fatalError}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!hasLoadedState && connectionIssue) {
+    return (
+      <div className="viewer-page">
+        <div className="no-session">
+          <h2>正在重新連線</h2>
+          <p>{connectionIssue}</p>
         </div>
       </div>
     )
@@ -365,6 +461,15 @@ const ViewerPage = () => {
           <div className="viewer-music-banner-inner">
             <span className="viewer-music-label">音樂提示</span>
             <span className="viewer-music-text">{musicText}</span>
+          </div>
+        </div>
+      )}
+
+      {connectionIssue && hasLoadedState && (
+        <div className="viewer-music-banner" role="status" aria-live="polite">
+          <div className="viewer-music-banner-inner">
+            <span className="viewer-music-label">連線狀態</span>
+            <span className="viewer-music-text">{connectionIssue}</span>
           </div>
         </div>
       )}

@@ -306,6 +306,7 @@ const ControlPage = () => {
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
+  const [viewerAliasInput, setViewerAliasInput] = useState('')
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
   const lineRefs = useRef([])
@@ -371,10 +372,22 @@ const ControlPage = () => {
 
   const primaryScriptInput = getDraftInputValue(selectedCellId, 'primary')
 
+  const viewerAliasBaseUrl = useMemo(() => {
+    if (typeof window === 'undefined') return '/v/'
+    return `${window.location.origin}/v/`
+  }, [])
+
   const viewerUrl = useMemo(() => {
     if (typeof window === 'undefined' || !sessionMeta?.viewerToken) return ''
     return `${window.location.origin}/viewer/${sessionMeta.viewerToken}`
   }, [sessionMeta?.viewerToken])
+
+  const viewerAliasUrl = useMemo(() => {
+    if (typeof window === 'undefined' || !sessionMeta?.viewerAlias) return ''
+    return `${window.location.origin}/v/${encodeURIComponent(sessionMeta.viewerAlias)}`
+  }, [sessionMeta?.viewerAlias])
+
+  const viewerShareUrl = viewerAliasUrl || viewerUrl
 
   const projectorUrl = useMemo(() => {
     if (typeof window === 'undefined' || !sessionMeta?.projectorToken) return ''
@@ -382,16 +395,20 @@ const ControlPage = () => {
   }, [sessionMeta?.projectorToken])
 
   useEffect(() => {
+    setViewerAliasInput(sessionMeta?.viewerAlias || '')
+  }, [sessionMeta?.viewerAlias])
+
+  useEffect(() => {
     let cancelled = false
 
     const generateQrCode = async () => {
-      if (!viewerUrl) {
+      if (!viewerShareUrl) {
         setQrCodeUrl('')
         return
       }
 
       try {
-        const nextQrCodeUrl = await QRCode.toDataURL(viewerUrl, {
+        const nextQrCodeUrl = await QRCode.toDataURL(viewerShareUrl, {
           errorCorrectionLevel: 'M',
           margin: 1,
           width: 512,
@@ -410,7 +427,7 @@ const ControlPage = () => {
     return () => {
       cancelled = true
     }
-  }, [viewerUrl])
+  }, [viewerShareUrl])
 
   const applyProjectorSettingsPayload = useCallback((projectorPayload) => {
     if (!projectorPayload || typeof projectorPayload !== 'object') return
@@ -1654,15 +1671,78 @@ const ControlPage = () => {
   }
 
   const handleCopyViewerLink = async () => {
-    if (!viewerUrl) return
+    if (!viewerShareUrl) return
     try {
-      await navigator.clipboard.writeText(viewerUrl)
-      setStatus({ kind: 'success', message: '檢視端連結已複製' })
+      await navigator.clipboard.writeText(viewerShareUrl)
+      setStatus({
+        kind: 'success',
+        message: sessionMeta?.viewerAlias
+          ? '檢視端入口網址已複製'
+          : '檢視端連結已複製',
+      })
     } catch {
       setStatus({
         kind: 'error',
         message: '無法複製，請手動複製連結',
       })
+    }
+  }
+
+  const handleCopyViewerFixedLink = async () => {
+    if (!viewerUrl) return
+    try {
+      await navigator.clipboard.writeText(viewerUrl)
+      setStatus({ kind: 'success', message: '固定檢視端網址已複製' })
+    } catch {
+      setStatus({
+        kind: 'error',
+        message: '無法複製，請手動複製固定網址',
+      })
+    }
+  }
+
+  const handleSaveViewerAlias = async () => {
+    if (!sessionId) return
+    const data = await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/viewer-alias`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ viewerAlias: viewerAliasInput }),
+        }),
+      { keepStatus: true },
+    )
+    const nextAlias = data?.session?.viewerAlias || ''
+    setStatus({
+      kind: 'success',
+      message: nextAlias
+        ? `檢視端入口已更新為 ${viewerAliasBaseUrl}${nextAlias}`
+        : '檢視端入口已清除，已改回固定亂碼網址',
+    })
+  }
+
+  const handleClearViewerAlias = async () => {
+    if (!sessionId) return
+    const previousViewerAlias = sessionMeta?.viewerAlias || ''
+    setViewerAliasInput('')
+    try {
+      const data = await performSessionMutation(
+        () =>
+          fetch(`/api/session/${sessionId}/viewer-alias`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ viewerAlias: '' }),
+          }),
+        { keepStatus: true },
+      )
+      setStatus({
+        kind: 'success',
+        message: data?.session?.viewerAlias
+          ? `檢視端入口已更新為 ${viewerAliasBaseUrl}${data.session.viewerAlias}`
+          : '檢視端入口已清除，已改回固定亂碼網址',
+      })
+    } catch {
+      setViewerAliasInput(previousViewerAlias)
     }
   }
 
@@ -1854,7 +1934,7 @@ const ControlPage = () => {
   const handleEndSession = async () => {
     if (!sessionId) return
     const confirmed = window.confirm(
-      '結束場次後，檢視端與投影端網址都會立即失效。要繼續嗎？',
+      '結束場次後，外部字幕會停止顯示，但檢視端與投影端網址不會失效。要繼續嗎？',
     )
     if (!confirmed) return
     await performSessionMutation(
@@ -1862,7 +1942,7 @@ const ControlPage = () => {
         fetch(`/api/session/${sessionId}/end`, {
           method: 'POST',
         }),
-      { successMessage: '場次已結束，檢視端與投影端已失效' },
+      { successMessage: '場次已結束，外部字幕已停止顯示' },
     )
   }
 
@@ -1950,7 +2030,7 @@ const ControlPage = () => {
                   <h1>{sessionMeta?.title || '控制端'}</h1>
                   <p className="input-note">
                     {sessionMeta?.status === 'ended'
-                      ? '已結束場次，檢視端與投影端網址已失效'
+                      ? '已結束場次，檢視端與投影端網址仍可使用，但外部字幕預設為停止顯示'
                       : '進行中場次'}
                   </p>
                 </div>
@@ -1979,14 +2059,48 @@ const ControlPage = () => {
               </div>
 
               <div className="input-group">
-                <label>檢視端亂碼網址</label>
+                <label htmlFor="viewer-alias">檢視端分享網址</label>
+                <p className="input-note">
+                  觀眾掃進去後會立即鎖定到當下場次；你之後改入口名稱，不會把已進場觀眾切到別場。
+                </p>
                 <div className="viewer-link">
-                  <span>{viewerUrl || '尚未建立場次'}</span>
+                  <span>{viewerShareUrl || '尚未建立場次'}</span>
                   <button type="button" onClick={handleCopyViewerLink}>
                     複製
                   </button>
                 </div>
-                {viewerUrl && (
+                <div className="viewer-alias-editor">
+                  <span className="viewer-alias-prefix">{viewerAliasBaseUrl}</span>
+                  <input
+                    id="viewer-alias"
+                    type="text"
+                    placeholder="例如 first-show 或 第一場"
+                    value={viewerAliasInput}
+                    maxLength={48}
+                    onChange={(event) => setViewerAliasInput(event.target.value)}
+                  />
+                  <button type="button" onClick={handleSaveViewerAlias}>
+                    儲存入口名稱
+                  </button>
+                  <button
+                    type="button"
+                    className="subtle-button"
+                    onClick={handleClearViewerAlias}
+                    disabled={!sessionMeta?.viewerAlias}
+                  >
+                    清除
+                  </button>
+                </div>
+                <p className="input-note">
+                  可用中文、英文、數字、-、_；空白會自動轉成 -。未設定時會直接使用固定亂碼網址。
+                </p>
+                <div className="viewer-link viewer-link-secondary">
+                  <span>{viewerUrl || '尚未建立場次'}</span>
+                  <button type="button" onClick={handleCopyViewerFixedLink}>
+                    複製固定網址
+                  </button>
+                </div>
+                {viewerShareUrl && (
                   <div className="qr-preview-card">
                     <img src={qrCodeUrl} alt="Viewer QR Code" />
                     <button type="button" onClick={handleDownloadQrCode}>

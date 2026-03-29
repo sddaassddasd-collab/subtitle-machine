@@ -11,6 +11,9 @@ import {
   roleToColor,
 } from '../lib/displayPayload'
 
+const PUBLIC_STATE_REFRESH_INTERVAL_MS = 15000
+const PUBLIC_RECOVERY_RETRY_DELAY_MS = 1200
+
 const ProjectorPage = () => {
   const { projectorToken } = useParams()
   const location = useLocation()
@@ -31,10 +34,20 @@ const ProjectorPage = () => {
   const [projectorLanguageId, setProjectorLanguageId] = useState('primary')
   const [layout, setLayout] = useState(DEFAULT_PROJECTOR_LAYOUT)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
-  const [error, setError] = useState('')
+  const [fatalError, setFatalError] = useState('')
+  const [connectionIssue, setConnectionIssue] = useState('')
+  const [hasLoadedState, setHasLoadedState] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const layoutRevisionRef = useRef(0)
+  const hasLoadedStateRef = useRef(false)
+  const recoveryTimerRef = useRef(null)
+
+  const clearRecoveryTimer = useCallback(() => {
+    if (!recoveryTimerRef.current) return
+    window.clearTimeout(recoveryTimerRef.current)
+    recoveryTimerRef.current = null
+  }, [])
 
   const applyProjectorLayoutPayload = useCallback((rawLayout, rawRevision) => {
     const nextRevision = normalizeProjectorRevision(rawRevision)
@@ -59,54 +72,135 @@ const ProjectorPage = () => {
       )
       applyProjectorLayoutPayload(next.layout, next.revision)
       setRoleColorEnabled(next.roleColorEnabled)
+      hasLoadedStateRef.current = true
+      setHasLoadedState(true)
+      setConnectionIssue('')
+      setFatalError('')
     },
     [applyProjectorLayoutPayload],
   )
 
+  const classifyPublicFailure = useCallback((response, data, fallbackMessage) => {
+    const reason =
+      typeof data?.reason === 'string' && data.reason.trim().length > 0
+        ? data.reason.trim()
+        : ''
+    const message =
+      data?.error || data?.message || fallbackMessage || '無法載入投影字幕'
+    const isTerminalReason = reason === 'ended' || reason === 'deleted'
+    const fatal =
+      isTerminalReason ||
+      (response?.status === 410 && !hasLoadedStateRef.current)
+
+    return { fatal, message, reason }
+  }, [])
+
   useEffect(() => {
     if (!resolvedProjectorToken) {
-      setError('缺少投影端連結')
+      setFatalError('缺少投影端連結')
       return
     }
 
     let cancelled = false
-    const fetchInitialState = async () => {
+    const fetchProjectorState = async () => {
       try {
         const response = await fetch(`/api/projector/${resolvedProjectorToken}`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
-          throw new Error(
-            data?.error || data?.message || '無法載入投影字幕',
+          const failure = classifyPublicFailure(
+            response,
+            data,
+            '無法載入投影字幕',
           )
+          if (cancelled) return
+          if (failure.fatal) {
+            setFatalError(failure.message)
+          } else {
+            setConnectionIssue(failure.message)
+          }
+          return
         }
         if (!cancelled) {
           applyProjectorDisplayPayload(data)
         }
       } catch (fetchError) {
         if (!cancelled) {
-          setError(fetchError.message || '無法載入投影字幕')
+          setConnectionIssue(fetchError.message || '無法載入投影字幕')
         }
       }
     }
 
-    fetchInitialState()
+    void fetchProjectorState()
+    const intervalId = window.setInterval(() => {
+      void fetchProjectorState()
+    }, PUBLIC_STATE_REFRESH_INTERVAL_MS)
     return () => {
       cancelled = true
+      clearRecoveryTimer()
+      window.clearInterval(intervalId)
     }
-  }, [applyProjectorDisplayPayload, resolvedProjectorToken])
+  }, [
+    applyProjectorDisplayPayload,
+    classifyPublicFailure,
+    clearRecoveryTimer,
+    resolvedProjectorToken,
+  ])
 
   useEffect(() => {
     if (!resolvedProjectorToken) return
 
     const socket = io()
-    socket.emit('join', {
-      projectorToken: resolvedProjectorToken,
-      role: 'projector',
+    const joinProjectorSession = () => {
+      socket.emit('join', {
+        projectorToken: resolvedProjectorToken,
+        role: 'projector',
+      })
+    }
+
+    const fetchProjectorState = async () => {
+      try {
+        const response = await fetch(`/api/projector/${resolvedProjectorToken}`)
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          const failure = classifyPublicFailure(
+            response,
+            data,
+            '無法載入投影字幕',
+          )
+          if (failure.fatal) {
+            setFatalError(failure.message)
+          } else {
+            setConnectionIssue(failure.message)
+          }
+          return
+        }
+        applyProjectorDisplayPayload(data)
+      } catch (error) {
+        setConnectionIssue(error.message || '與伺服器重新同步失敗')
+      }
+    }
+
+    const scheduleRecoveryFetch = () => {
+      clearRecoveryTimer()
+      recoveryTimerRef.current = window.setTimeout(() => {
+        recoveryTimerRef.current = null
+        void fetchProjectorState()
+      }, PUBLIC_RECOVERY_RETRY_DELAY_MS)
+    }
+
+    socket.on('connect', () => {
+      joinProjectorSession()
+      void fetchProjectorState()
+    })
+
+    socket.on('disconnect', () => {
+      if (hasLoadedStateRef.current) {
+        setConnectionIssue('與伺服器連線中斷，正在重新連線')
+      }
     })
 
     socket.on('projector:update', (payload) => {
       applyProjectorDisplayPayload(payload)
-      setError('')
     })
 
     socket.on('projector:layout', (payload) => {
@@ -114,17 +208,35 @@ const ProjectorPage = () => {
     })
 
     socket.on('projector:expired', (payload) => {
-      setError(
-        typeof payload?.message === 'string'
-          ? payload.message
-          : '本場次已結束',
-      )
+      const reason =
+        typeof payload?.reason === 'string' && payload.reason.trim()
+          ? payload.reason.trim()
+          : ''
+      const message =
+        typeof payload?.message === 'string' && payload.message.trim()
+          ? payload.message.trim()
+          : '本場次已結束'
+
+      if (reason === 'ended' || reason === 'deleted' || !hasLoadedStateRef.current) {
+        setFatalError(message)
+        return
+      }
+
+      setConnectionIssue(message)
+      scheduleRecoveryFetch()
     })
 
     return () => {
+      clearRecoveryTimer()
       socket.disconnect()
     }
-  }, [applyProjectorDisplayPayload, applyProjectorLayoutPayload, resolvedProjectorToken])
+  }, [
+    applyProjectorDisplayPayload,
+    applyProjectorLayoutPayload,
+    classifyPublicFailure,
+    clearRecoveryTimer,
+    resolvedProjectorToken,
+  ])
 
   useEffect(() => {
     const handler = () => {
@@ -198,12 +310,23 @@ const ProjectorPage = () => {
     }
   }
 
-  if (error) {
+  if (fatalError) {
     return (
       <div className="projector-page">
         <div className="no-session">
           <h2>無法載入投影字幕</h2>
-          <p>{error}</p>
+          <p>{fatalError}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!hasLoadedState && connectionIssue) {
+    return (
+      <div className="projector-page">
+        <div className="no-session">
+          <h2>正在重新連線</h2>
+          <p>{connectionIssue}</p>
         </div>
       </div>
     )
@@ -254,6 +377,15 @@ const ProjectorPage = () => {
           <div className="viewer-music-banner-inner">
             <span className="viewer-music-label">音樂提示</span>
             <span className="viewer-music-text">{musicText}</span>
+          </div>
+        </div>
+      )}
+
+      {connectionIssue && hasLoadedState && (
+        <div className="viewer-music-banner projector-music-banner" role="status" aria-live="polite">
+          <div className="viewer-music-banner-inner">
+            <span className="viewer-music-label">連線狀態</span>
+            <span className="viewer-music-text">{connectionIssue}</span>
           </div>
         </div>
       )}

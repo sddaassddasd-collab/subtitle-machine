@@ -127,6 +127,7 @@ const SHARED_ACCESS_COOKIE_VALUE = hashToken(
 );
 const SESSION_BACKUP_KIND = 'subtitle-machine-session-backup';
 const SESSION_BACKUP_VERSION = 1;
+const VIEWER_ALIAS_MAX_LENGTH = 48;
 
 const defaultTranscriptionState = () => ({
   active: false,
@@ -856,6 +857,25 @@ function normalizeUsername(rawUsername) {
 function normalizeDisplayName(rawUsername) {
   if (typeof rawUsername !== 'string') return '';
   return stripBom(rawUsername).trim().slice(0, 48);
+}
+
+function normalizeViewerAlias(rawAlias) {
+  if (typeof rawAlias !== 'string') return '';
+
+  return stripBom(rawAlias)
+    .trim()
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s]+/gu, '-')
+    .replace(/[–—－ー]+/gu, '-')
+    .replace(
+      /[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Latin}\p{Number}_-]+/gu,
+      '',
+    )
+    .replace(/-{2,}/g, '-')
+    .replace(/_{2,}/g, '_')
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .slice(0, VIEWER_ALIAS_MAX_LENGTH);
 }
 
 function normalizePassword(rawPassword) {
@@ -2832,6 +2852,7 @@ function ensureSessionStructure(session) {
     typeof session.viewerToken === 'string' && session.viewerToken.trim()
       ? session.viewerToken.trim()
       : createOpaqueToken(18);
+  session.viewerAlias = normalizeViewerAlias(session.viewerAlias);
   session.projectorToken =
     typeof session.projectorToken === 'string' && session.projectorToken.trim()
       ? session.projectorToken.trim()
@@ -2898,6 +2919,7 @@ function createSessionRecord(ownerUserId) {
     id: generateId('session'),
     ownerUserId,
     viewerToken: createOpaqueToken(18),
+    viewerAlias: '',
     projectorToken: createOpaqueToken(18),
     title: '',
     createdAt: now,
@@ -2924,6 +2946,7 @@ function serializeSessionForStorage(session) {
     ownerUserId: normalized.ownerUserId,
     title: normalized.title,
     viewerToken: normalized.viewerToken,
+    viewerAlias: normalized.viewerAlias,
     projectorToken: normalized.projectorToken,
     status: normalized.status,
     createdAt: normalized.createdAt,
@@ -3038,6 +3061,11 @@ function validateImportedSessionConflict(session) {
   const viewerTokenSession = getSessionByViewerToken(session.viewerToken);
   if (viewerTokenSession) {
     throw new Error('viewer 連結已被其他場次使用，無法還原此備份');
+  }
+
+  const viewerAliasSession = getSessionByViewerAlias(session.viewerAlias);
+  if (session.viewerAlias && viewerAliasSession) {
+    throw new Error('檢視端入口名稱已被其他場次使用，無法還原此備份');
   }
 
   const projectorTokenSession = getSessionByProjectorToken(session.projectorToken);
@@ -5182,6 +5210,7 @@ function getSessionSummary(session) {
     id: normalized.id,
     title: normalized.title,
     viewerToken: normalized.viewerToken,
+    viewerAlias: normalized.viewerAlias,
     projectorToken: normalized.projectorToken,
     status: normalized.status,
     createdAt: normalized.createdAt,
@@ -5504,6 +5533,16 @@ function getSessionByViewerToken(viewerToken) {
   );
 }
 
+function getSessionByViewerAlias(viewerAlias) {
+  const normalizedAlias = normalizeViewerAlias(viewerAlias);
+  if (!normalizedAlias) return null;
+  return (
+    Array.from(sessions.values()).find(
+      (session) => session.viewerAlias === normalizedAlias,
+    ) || null
+  );
+}
+
 function getSessionByProjectorToken(projectorToken) {
   if (typeof projectorToken !== 'string' || !projectorToken.trim()) return null;
   return (
@@ -5511,6 +5550,24 @@ function getSessionByProjectorToken(projectorToken) {
       (session) => session.projectorToken === projectorToken.trim(),
     ) || null
   );
+}
+
+function resolveViewerEntrySession(viewerEntry) {
+  const rawViewerEntry =
+    typeof viewerEntry === 'string' ? viewerEntry.trim() : '';
+  if (!rawViewerEntry) return null;
+
+  const viewerAliasSession = getSessionByViewerAlias(rawViewerEntry);
+  if (viewerAliasSession) {
+    return viewerAliasSession;
+  }
+
+  return getSessionByViewerToken(rawViewerEntry);
+}
+
+function getViewerEntryRedirectPath(session) {
+  const normalized = ensureSessionStructure(session);
+  return `/viewer/${encodeURIComponent(normalized.viewerToken)}`;
 }
 
 function getOwnedSession(sessionId, userId) {
@@ -6101,11 +6158,30 @@ app.get('/api/session/:sessionId/viewer', requireAuth, (req, res) => {
   res.json(getViewerPayload(session));
 });
 
+app.get('/api/viewer-entry/:viewerAlias', (req, res) => {
+  const viewerAlias =
+    typeof req.params.viewerAlias === 'string' ? req.params.viewerAlias.trim() : '';
+  const session = resolveViewerEntrySession(viewerAlias);
+  if (!session) {
+    return res.status(410).json({
+      reason: 'missing',
+      message: '找不到檢視端入口',
+      error: '找不到檢視端入口',
+    });
+  }
+
+  res.json({
+    viewerAlias: session.viewerAlias || '',
+    viewerToken: session.viewerToken,
+    redirectPath: getViewerEntryRedirectPath(session),
+  });
+});
+
 app.get('/api/viewer/:viewerToken', (req, res) => {
   const viewerToken =
     typeof req.params.viewerToken === 'string' ? req.params.viewerToken.trim() : '';
   const session = getSessionByViewerToken(viewerToken);
-  if (!session || session.status === 'ended') {
+  if (!session) {
     return res
       .status(410)
       .json(getPublicSessionUnavailablePayload('viewer', { session, token: viewerToken }));
@@ -6119,7 +6195,7 @@ app.get('/api/projector/:projectorToken', (req, res) => {
       ? req.params.projectorToken.trim()
       : '';
   const session = getSessionByProjectorToken(projectorToken);
-  if (!session || session.status === 'ended') {
+  if (!session) {
     return res.status(410).json(
       getPublicSessionUnavailablePayload('projector', {
         session,
@@ -6128,6 +6204,37 @@ app.get('/api/projector/:projectorToken', (req, res) => {
     );
   }
   res.json(getProjectorPayload(session));
+});
+
+app.put('/api/session/:sessionId/viewer-alias', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const rawViewerAlias =
+    typeof req.body?.viewerAlias === 'string' ? req.body.viewerAlias : '';
+  const nextViewerAlias = normalizeViewerAlias(rawViewerAlias);
+
+  if (rawViewerAlias.trim() && !nextViewerAlias) {
+    return res.status(400).json({
+      error: '檢視端入口只能使用中文、英文、數字、-、_',
+    });
+  }
+
+  const aliasOwner = getSessionByViewerAlias(nextViewerAlias);
+  if (aliasOwner && aliasOwner.id !== session.id) {
+    return res.status(409).json({
+      error: '此檢視端入口名稱已被其他場次使用',
+    });
+  }
+
+  if (session.viewerAlias === nextViewerAlias) {
+    return res.json(getControlPayload(session));
+  }
+
+  session.viewerAlias = nextViewerAlias;
+  persistSession(session);
+  broadcastControlState(session.id);
+  res.json(getControlPayload(session));
 });
 
 app.post('/api/session/:sessionId/end', requireAuth, (req, res) => {
@@ -6144,14 +6251,7 @@ app.post('/api/session/:sessionId/end', requireAuth, (req, res) => {
     reason: 'session ended',
   });
   broadcastControlState(session.id);
-  io.to(`viewer:${session.id}`).emit(
-    'viewer:expired',
-    getPublicSessionUnavailablePayload('viewer', { session }),
-  );
-  io.to(`projector:${session.id}`).emit(
-    'projector:expired',
-    getPublicSessionUnavailablePayload('projector', { session }),
-  );
+  broadcastViewerState(session.id);
 
   res.json(getControlPayload(session));
 });
@@ -6883,7 +6983,7 @@ io.on('connection', (socket) => {
       const viewerSession = viewerToken
         ? getSessionByViewerToken(viewerToken)
         : getSession(sessionId);
-      if (!viewerSession || viewerSession.status === 'ended') {
+      if (!viewerSession) {
         socket.emit(
           'viewer:expired',
           getPublicSessionUnavailablePayload('viewer', {
@@ -6902,7 +7002,7 @@ io.on('connection', (socket) => {
       const projectorSession = projectorToken
         ? getSessionByProjectorToken(projectorToken)
         : getSession(sessionId);
-      if (!projectorSession || projectorSession.status === 'ended') {
+      if (!projectorSession) {
         socket.emit(
           'projector:expired',
           getPublicSessionUnavailablePayload('projector', {
@@ -7533,6 +7633,18 @@ io.on('connection', (socket) => {
       });
     });
   });
+});
+
+app.get('/v/:viewerAlias', (req, res) => {
+  const viewerAlias =
+    typeof req.params.viewerAlias === 'string' ? req.params.viewerAlias.trim() : '';
+  const session = resolveViewerEntrySession(viewerAlias);
+  const redirectTarget = session
+    ? getViewerEntryRedirectPath(session)
+    : viewerAlias
+      ? `/viewer/${encodeURIComponent(viewerAlias)}`
+      : '/viewer';
+  res.redirect(302, redirectTarget);
 });
 
 const clientDistPath = path.join(__dirname, '..', '..', 'client', 'dist');
