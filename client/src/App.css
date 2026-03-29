@@ -37,6 +37,17 @@
   background-color: rgba(37, 99, 235, 0.1);
 }
 
+.control-page .subtle-button {
+  color: #e2e8f0;
+  border-color: rgba(226, 232, 240, 0.72);
+  background: rgba(15, 23, 42, 0.22);
+}
+
+.control-page .subtle-button:hover {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(147, 197, 253, 0.88);
+}
+
 
 .control-page {
   height: 100vh;
@@ -845,34 +856,6 @@
   opacity: 0.35;
 }
 
-.fullscreen-button {
-  position: absolute;
-  top: 1rem;
-  right: 1rem;
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: 50%;
-  border: none;
-  background: rgba(148, 163, 184, 0.2);
-  color: #f8fafc;
-  font-size: 1.1rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  backdrop-filter: blur(6px);
-  transition: background 0.2s ease, transform 0.2s ease;
-}
-
-.fullscreen-button:hover {
-  background: rgba(59, 130, 246, 0.4);
-  transform: scale(1.05);
-}
-
-.fullscreen-button:active {
-  transform: scale(0.98);
-}
-
 .viewer-live-badge {
   position: absolute;
   top: 1rem;
@@ -1068,14 +1051,6 @@
 @media (max-width: 600px) {
   .viewer-page {
     padding: 1.5rem 1rem;
-  }
-
-  .fullscreen-button {
-    top: 0.75rem;
-    right: 0.75rem;
-    width: 2.25rem;
-    height: 2.25rem;
-    font-size: 1rem;
   }
 
   .projector-fullscreen-hotspot {
