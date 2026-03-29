@@ -72,10 +72,10 @@ const ViewerPage = () => {
     const fetchInitialState = async () => {
       try {
         const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const data = await response.json().catch(() => ({}))
         if (!response.ok) {
-          throw new Error('場次不存在或已結束')
+          throw new Error(data?.error || data?.message || '無法載入字幕')
         }
-        const data = await response.json()
         if (!cancelled) {
           const next = normalizeDisplayPayload(data)
           setDisplayEnabled(next.enabled)

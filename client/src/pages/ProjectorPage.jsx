@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import {
   DEFAULT_PROJECTOR_LAYOUT,
   normalizeDisplayPayload,
   normalizeProjectorLayout,
+  normalizeProjectorRevision,
   resolveAvailableLanguageId,
   resolveLineText,
   roleToColor,
@@ -33,60 +34,17 @@ const ProjectorPage = () => {
   const [error, setError] = useState('')
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
+  const layoutRevisionRef = useRef(0)
 
-  useEffect(() => {
-    if (!resolvedProjectorToken) {
-      setError('缺少投影端連結')
-      return
-    }
+  const applyProjectorLayoutPayload = useCallback((rawLayout, rawRevision) => {
+    const nextRevision = normalizeProjectorRevision(rawRevision)
+    if (nextRevision < layoutRevisionRef.current) return
+    layoutRevisionRef.current = nextRevision
+    setLayout(normalizeProjectorLayout(rawLayout))
+  }, [])
 
-    let cancelled = false
-    const fetchInitialState = async () => {
-      try {
-        const response = await fetch(`/api/projector/${resolvedProjectorToken}`)
-        if (!response.ok) {
-          throw new Error('場次不存在或已結束')
-        }
-        const data = await response.json()
-        if (!cancelled) {
-          const next = normalizeDisplayPayload(data)
-          setDisplayEnabled(next.enabled)
-          setLine(next.line)
-          setLiveEntries(next.liveEntries)
-          setLiveLines(next.liveLines)
-          setMusicActive(next.musicActive)
-          setMusicText(next.musicText)
-          setLineSource(next.source)
-          setLanguages(next.languages)
-          setProjectorLanguageId(
-            resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
-          )
-          setLayout(next.layout)
-          setRoleColorEnabled(next.roleColorEnabled)
-        }
-      } catch (fetchError) {
-        if (!cancelled) {
-          setError(fetchError.message || '無法載入投影字幕')
-        }
-      }
-    }
-
-    fetchInitialState()
-    return () => {
-      cancelled = true
-    }
-  }, [resolvedProjectorToken])
-
-  useEffect(() => {
-    if (!resolvedProjectorToken) return
-
-    const socket = io()
-    socket.emit('join', {
-      projectorToken: resolvedProjectorToken,
-      role: 'projector',
-    })
-
-    socket.on('projector:update', (payload) => {
+  const applyProjectorDisplayPayload = useCallback(
+    (payload) => {
       const next = normalizeDisplayPayload(payload)
       setDisplayEnabled(next.enabled)
       setLine(next.line)
@@ -99,9 +57,60 @@ const ProjectorPage = () => {
       setProjectorLanguageId(
         resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
       )
-      setLayout(next.layout)
+      applyProjectorLayoutPayload(next.layout, next.revision)
       setRoleColorEnabled(next.roleColorEnabled)
+    },
+    [applyProjectorLayoutPayload],
+  )
+
+  useEffect(() => {
+    if (!resolvedProjectorToken) {
+      setError('缺少投影端連結')
+      return
+    }
+
+    let cancelled = false
+    const fetchInitialState = async () => {
+      try {
+        const response = await fetch(`/api/projector/${resolvedProjectorToken}`)
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          throw new Error(
+            data?.error || data?.message || '無法載入投影字幕',
+          )
+        }
+        if (!cancelled) {
+          applyProjectorDisplayPayload(data)
+        }
+      } catch (fetchError) {
+        if (!cancelled) {
+          setError(fetchError.message || '無法載入投影字幕')
+        }
+      }
+    }
+
+    fetchInitialState()
+    return () => {
+      cancelled = true
+    }
+  }, [applyProjectorDisplayPayload, resolvedProjectorToken])
+
+  useEffect(() => {
+    if (!resolvedProjectorToken) return
+
+    const socket = io()
+    socket.emit('join', {
+      projectorToken: resolvedProjectorToken,
+      role: 'projector',
+    })
+
+    socket.on('projector:update', (payload) => {
+      applyProjectorDisplayPayload(payload)
       setError('')
+    })
+
+    socket.on('projector:layout', (payload) => {
+      applyProjectorLayoutPayload(payload?.layout, payload?.revision)
     })
 
     socket.on('projector:expired', (payload) => {
@@ -115,7 +124,7 @@ const ProjectorPage = () => {
     return () => {
       socket.disconnect()
     }
-  }, [resolvedProjectorToken])
+  }, [applyProjectorDisplayPayload, applyProjectorLayoutPayload, resolvedProjectorToken])
 
   useEffect(() => {
     const handler = () => {

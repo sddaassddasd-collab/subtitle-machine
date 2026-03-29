@@ -3,7 +3,11 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
 import {
+  areProjectorLayoutsEqual,
+  normalizeProjectorDisplayMode,
   normalizeProjectorLayout,
+  normalizeProjectorRevision,
+  PROJECTOR_DISPLAY_MODES,
   resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
@@ -274,6 +278,9 @@ const ControlPage = () => {
   const [projectorLayout, setProjectorLayout] = useState(() =>
     normalizeProjectorLayout(),
   )
+  const [projectorDisplayMode, setProjectorDisplayMode] = useState(
+    PROJECTOR_DISPLAY_MODES.SCRIPT,
+  )
   const [historyState, setHistoryState] = useState({
     canUndo: false,
     canRedo: false,
@@ -305,6 +312,11 @@ const ControlPage = () => {
   const pendingLineClickTimeoutRef = useRef(null)
   const skipBlurRef = useRef(new Set())
   const lastTranscriptionErrorRef = useRef('')
+  const projectorRevisionRef = useRef(0)
+  const projectorLayoutDirtyRef = useRef(false)
+  const projectorLayoutDraftRef = useRef(normalizeProjectorLayout())
+  const projectorDisplayModeDirtyRef = useRef(false)
+  const projectorDisplayModeDraftRef = useRef(PROJECTOR_DISPLAY_MODES.SCRIPT)
   const captureStateRef = useRef({
     mediaStream: null,
     audioContext: null,
@@ -400,27 +412,63 @@ const ControlPage = () => {
     }
   }, [viewerUrl])
 
-  const applySessionPayload = useCallback((payload) => {
-    const nextSession =
-      payload && typeof payload.session === 'object' ? payload.session : null
-    setSessionMeta(nextSession)
-    setLines(Array.isArray(payload?.lines) ? payload.lines : [])
-    setCurrentIndex(
-      Number.isInteger(payload?.currentIndex) ? payload.currentIndex : 0,
+  const applyProjectorSettingsPayload = useCallback((projectorPayload) => {
+    if (!projectorPayload || typeof projectorPayload !== 'object') return
+    const nextLayout = normalizeProjectorLayout(projectorPayload?.layout)
+    const nextDisplayMode = normalizeProjectorDisplayMode(projectorPayload?.displayMode)
+    const nextRevision = normalizeProjectorRevision(projectorPayload?.revision)
+
+    if (nextRevision < projectorRevisionRef.current) {
+      return
+    }
+
+    const layoutMatchesDraft = areProjectorLayoutsEqual(
+      nextLayout,
+      projectorLayoutDraftRef.current,
     )
-    setDisplayEnabled(
-      typeof payload?.displayEnabled === 'boolean'
-        ? payload.displayEnabled
-        : true,
-    )
-    setRoleColorEnabled(payload?.roleColorEnabled !== false)
-    setProjectorLayout(normalizeProjectorLayout(payload?.projector?.layout))
-    setTranscription(normalizeTranscriptionState(payload?.transcription))
-    setHistoryState({
-      canUndo: payload?.history?.canUndo === true,
-      canRedo: payload?.history?.canRedo === true,
-    })
+    const displayModeMatchesDraft =
+      nextDisplayMode === projectorDisplayModeDraftRef.current
+
+    if (
+      (projectorLayoutDirtyRef.current && !layoutMatchesDraft) ||
+      (projectorDisplayModeDirtyRef.current && !displayModeMatchesDraft)
+    ) {
+      return
+    }
+
+    projectorRevisionRef.current = nextRevision
+    projectorLayoutDirtyRef.current = false
+    projectorDisplayModeDirtyRef.current = false
+    projectorLayoutDraftRef.current = nextLayout
+    projectorDisplayModeDraftRef.current = nextDisplayMode
+    setProjectorLayout(nextLayout)
+    setProjectorDisplayMode(nextDisplayMode)
   }, [])
+
+  const applySessionPayload = useCallback(
+    (payload) => {
+      const nextSession =
+        payload && typeof payload.session === 'object' ? payload.session : null
+      setSessionMeta(nextSession)
+      setLines(Array.isArray(payload?.lines) ? payload.lines : [])
+      setCurrentIndex(
+        Number.isInteger(payload?.currentIndex) ? payload.currentIndex : 0,
+      )
+      setDisplayEnabled(
+        typeof payload?.displayEnabled === 'boolean'
+          ? payload.displayEnabled
+          : true,
+      )
+      setRoleColorEnabled(payload?.roleColorEnabled !== false)
+      applyProjectorSettingsPayload(payload?.projector)
+      setTranscription(normalizeTranscriptionState(payload?.transcription))
+      setHistoryState({
+        canUndo: payload?.history?.canUndo === true,
+        canRedo: payload?.history?.canRedo === true,
+      })
+    },
+    [applyProjectorSettingsPayload],
+  )
 
   const releaseMicrophoneCapture = () => {
     const state = captureStateRef.current
@@ -1651,9 +1699,11 @@ const ControlPage = () => {
   const updateProjectorLayout = (patch, successMessage = '') => {
     if (!socketRef.current || !sessionId) return
     const nextLayout = normalizeProjectorLayout({
-      ...projectorLayout,
+      ...projectorLayoutDraftRef.current,
       ...patch,
     })
+    projectorLayoutDirtyRef.current = true
+    projectorLayoutDraftRef.current = nextLayout
     setProjectorLayout(nextLayout)
     socketRef.current.emit('updateProjectorLayout', {
       sessionId,
@@ -1668,6 +1718,25 @@ const ControlPage = () => {
     const nextValue = Number(event.target.value)
     if (!Number.isFinite(nextValue)) return
     updateProjectorLayout({ [field]: nextValue })
+  }
+
+  const handleProjectorDisplayModeChange = (event) => {
+    if (!socketRef.current || !sessionId) return
+    const nextDisplayMode = normalizeProjectorDisplayMode(event.target.value)
+    projectorDisplayModeDirtyRef.current = true
+    projectorDisplayModeDraftRef.current = nextDisplayMode
+    setProjectorDisplayMode(nextDisplayMode)
+    socketRef.current.emit('setProjectorDisplayMode', {
+      sessionId,
+      displayMode: nextDisplayMode,
+    })
+    setStatus({
+      kind: 'info',
+      message:
+        nextDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
+          ? '投影端已切換為即時語音辨識模式'
+          : '投影端已切換為固定劇本字幕模式',
+    })
   }
 
   const handleResetProjectorLayout = () => {
@@ -1945,6 +2014,20 @@ const ControlPage = () => {
                 </div>
                 <div className="projector-layout-card">
                   <label className="range-control">
+                    <span>投影顯示內容</span>
+                    <select
+                      value={projectorDisplayMode}
+                      onChange={handleProjectorDisplayModeChange}
+                    >
+                      <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
+                        固定劇本字幕
+                      </option>
+                      <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
+                        即時語音辨識
+                      </option>
+                    </select>
+                  </label>
+                  <label className="range-control">
                     <span>字體大小</span>
                     <strong>{projectorLayout.fontSizePercent}%</strong>
                     <input
@@ -1982,7 +2065,7 @@ const ControlPage = () => {
                   </label>
                 </div>
                 <span className="input-note">
-                  請使用延伸桌面，將投影頁移到外接螢幕後切換全螢幕。
+                  請使用延伸桌面，將投影頁移到外接螢幕後切換全螢幕。投影端預設固定顯示劇本，不會再自動被即時語音覆蓋。
                 </span>
               </div>
             </header>

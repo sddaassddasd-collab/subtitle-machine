@@ -10,6 +10,11 @@ export const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
   offsetY: 24,
 })
 
+export const PROJECTOR_DISPLAY_MODES = Object.freeze({
+  SCRIPT: 'script',
+  TRANSCRIPTION: 'transcription',
+})
+
 export const normalizeProjectorLayout = (rawLayout) => {
   const source =
     rawLayout && typeof rawLayout === 'object'
@@ -27,6 +32,24 @@ export const normalizeProjectorLayout = (rawLayout) => {
     offsetY: clampInt(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY, -20, 35),
   }
 }
+
+export const areProjectorLayoutsEqual = (leftLayout, rightLayout) => {
+  const left = normalizeProjectorLayout(leftLayout)
+  const right = normalizeProjectorLayout(rightLayout)
+  return (
+    left.fontSizePercent === right.fontSizePercent &&
+    left.offsetX === right.offsetX &&
+    left.offsetY === right.offsetY
+  )
+}
+
+export const normalizeProjectorDisplayMode = (rawMode) =>
+  rawMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
+    ? PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
+    : PROJECTOR_DISPLAY_MODES.SCRIPT
+
+export const normalizeProjectorRevision = (rawRevision) =>
+  clampInt(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER)
 
 export const normalizeDisplayPayload = (payload) => {
   const enabled =
@@ -98,6 +121,8 @@ export const normalizeDisplayPayload = (payload) => {
     defaultLanguageId,
     transcriptionIsFinal,
     layout: normalizeProjectorLayout(payload?.layout),
+    displayMode: normalizeProjectorDisplayMode(payload?.displayMode),
+    revision: normalizeProjectorRevision(payload?.revision),
     roleColorEnabled,
   }
 }

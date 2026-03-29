@@ -94,6 +94,8 @@ const sessions = new Map();
 const transcriptionStreams = new Map();
 const users = new Map();
 const authSessions = new Map();
+const viewerSessionTombstones = new Map();
+const projectorSessionTombstones = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -148,6 +150,10 @@ const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
   offsetX: 0,
   offsetY: 24,
 });
+const PROJECTOR_DISPLAY_MODES = Object.freeze({
+  SCRIPT: 'script',
+  TRANSCRIPTION: 'transcription',
+});
 
 const placeholderRegex = /^[第]?[零〇一二三四五六七八九十百千\d]+[句行條話]$/i;
 
@@ -167,6 +173,343 @@ const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
 const MAX_TRANSCRIPTION_DISPLAY_LINES = 8;
 const MAX_TRANSCRIPTION_CONTEXT_CHARS = 600;
+const LATIN_SCRIPT_LANGUAGE_CODES = new Set([
+  'ca',
+  'cs',
+  'da',
+  'de',
+  'en',
+  'es',
+  'fi',
+  'fr',
+  'hr',
+  'hu',
+  'is',
+  'it',
+  'nl',
+  'no',
+  'pl',
+  'pt',
+  'ro',
+  'sk',
+  'sl',
+  'sv',
+  'tr',
+]);
+const LATIN_SCRIPT_CHAR_GLOBAL_PATTERN = /\p{Script=Latin}/gu;
+const CJK_SCRIPT_CHAR_GLOBAL_PATTERN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+const LATIN_WORD_PATTERN =
+  /[\p{Script=Latin}]+(?:['’\-][\p{Script=Latin}]+)*/gu;
+const LATIN_SINGLE_WORD_PATTERN =
+  /[\p{Script=Latin}]+(?:['’\-][\p{Script=Latin}]+)*/u;
+const LATIN_BREAK_PUNCTUATION_PATTERN = /[,;:.!?…]/u;
+const LATIN_STRONG_BREAK_PUNCTUATION_PATTERN = /[.!?…]/u;
+const LATIN_WEAK_BREAK_PUNCTUATION_PATTERN = /[,;:]/u;
+const LATIN_BOUNDARY_TRAILING_DECORATION_PATTERN = /["')\]»”’]/u;
+const LATIN_BASE_BOUNDARY_SUFFIX_WORDS = new Set([
+  'a',
+  'an',
+  'the',
+  'and',
+  'or',
+  'but',
+  'so',
+  'to',
+  'of',
+  'in',
+  'on',
+  'at',
+  'for',
+  'from',
+  'with',
+  'into',
+  'onto',
+  'by',
+  'as',
+  'if',
+  'than',
+  'then',
+  'that',
+  'this',
+  'these',
+  'those',
+  'my',
+  'your',
+  'his',
+  'her',
+  'its',
+  'our',
+  'their',
+  'is',
+  'are',
+  'was',
+  'were',
+  'be',
+  'been',
+  'being',
+  'am',
+  'do',
+  'does',
+  'did',
+  'have',
+  'has',
+  'had',
+  'will',
+  'would',
+  'can',
+  'could',
+  'should',
+  'may',
+  'might',
+  'must',
+  'not',
+]);
+const LATIN_BASE_BOUNDARY_PREFIX_WORDS = new Set([
+  'and',
+  'or',
+  'but',
+  'so',
+  'because',
+  'if',
+  'when',
+  'while',
+  'though',
+  'although',
+  'that',
+  'which',
+  'who',
+  'whom',
+  'whose',
+  'where',
+  'to',
+  'of',
+  'in',
+  'on',
+  'at',
+  'for',
+  'from',
+  'with',
+  'into',
+  'onto',
+  'by',
+  'as',
+  'than',
+  'then',
+  'is',
+  'are',
+  'was',
+  'were',
+  'be',
+  'been',
+  'being',
+  'am',
+  'do',
+  'does',
+  'did',
+  'have',
+  'has',
+  'had',
+  'will',
+  'would',
+  'can',
+  'could',
+  'should',
+  'may',
+  'might',
+  'must',
+  'not',
+]);
+const LATIN_BASE_ABBREVIATIONS = new Set([
+  'dr',
+  'etc',
+  'eg',
+  'ie',
+  'mr',
+  'mrs',
+  'ms',
+  'prof',
+  'sr',
+  'jr',
+  'st',
+  'vs',
+]);
+const FRENCH_BOUNDARY_SUFFIX_WORDS = new Set([
+  'au',
+  'aux',
+  'ce',
+  'ces',
+  'cette',
+  'de',
+  'des',
+  'du',
+  'en',
+  'et',
+  'la',
+  'le',
+  'les',
+  'mais',
+  'ou',
+  'pour',
+  'que',
+  'qui',
+  'sur',
+  'un',
+  'une',
+]);
+const FRENCH_BOUNDARY_PREFIX_WORDS = new Set([
+  'au',
+  'aux',
+  'avec',
+  'dans',
+  'de',
+  'des',
+  'du',
+  'en',
+  'et',
+  'la',
+  'le',
+  'les',
+  'mais',
+  'ou',
+  'par',
+  'pour',
+  'que',
+  'qui',
+  'sans',
+  'sur',
+  'un',
+  'une',
+]);
+const FRENCH_ABBREVIATIONS = new Set([
+  'dr',
+  'env',
+  'etc',
+  'm',
+  'mlle',
+  'mme',
+  'pr',
+]);
+const GERMAN_BOUNDARY_SUFFIX_WORDS = new Set([
+  'aber',
+  'am',
+  'an',
+  'auf',
+  'bei',
+  'das',
+  'dem',
+  'den',
+  'der',
+  'des',
+  'die',
+  'ein',
+  'eine',
+  'einem',
+  'einen',
+  'einer',
+  'eines',
+  'für',
+  'im',
+  'in',
+  'mit',
+  'oder',
+  'und',
+  'von',
+  'vom',
+  'zu',
+  'zum',
+  'zur',
+]);
+const GERMAN_BOUNDARY_PREFIX_WORDS = new Set([
+  'aber',
+  'am',
+  'an',
+  'auf',
+  'bei',
+  'das',
+  'dem',
+  'den',
+  'der',
+  'des',
+  'die',
+  'ein',
+  'eine',
+  'einem',
+  'einen',
+  'einer',
+  'eines',
+  'für',
+  'im',
+  'in',
+  'mit',
+  'oder',
+  'und',
+  'von',
+  'vom',
+  'zu',
+  'zum',
+  'zur',
+]);
+const GERMAN_ABBREVIATIONS = new Set([
+  'bzw',
+  'ca',
+  'dh',
+  'dr',
+  'ggf',
+  'prof',
+  'usw',
+  'zb',
+]);
+const SCRIPT_SEGMENTATION_PROFILES = Object.freeze({
+  cjk: Object.freeze({
+    key: 'cjk',
+    family: 'cjk',
+    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS,
+    maxLineBreakOvershoot: MAX_LINE_BREAK_OVERSHOOT,
+    avoidBoundarySuffixWords: new Set(),
+    avoidBoundaryPrefixWords: new Set(),
+    abbreviations: new Set(),
+  }),
+  latin: Object.freeze({
+    key: 'latin',
+    family: 'latin',
+    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS,
+    maxLineBreakOvershoot: 3,
+    avoidBoundarySuffixWords: mergeWordSets(LATIN_BASE_BOUNDARY_SUFFIX_WORDS),
+    avoidBoundaryPrefixWords: mergeWordSets(LATIN_BASE_BOUNDARY_PREFIX_WORDS),
+    abbreviations: mergeWordSets(LATIN_BASE_ABBREVIATIONS),
+  }),
+  fr: Object.freeze({
+    key: 'fr',
+    family: 'latin',
+    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS,
+    maxLineBreakOvershoot: 3.5,
+    avoidBoundarySuffixWords: mergeWordSets(
+      LATIN_BASE_BOUNDARY_SUFFIX_WORDS,
+      FRENCH_BOUNDARY_SUFFIX_WORDS,
+    ),
+    avoidBoundaryPrefixWords: mergeWordSets(
+      LATIN_BASE_BOUNDARY_PREFIX_WORDS,
+      FRENCH_BOUNDARY_PREFIX_WORDS,
+    ),
+    abbreviations: mergeWordSets(LATIN_BASE_ABBREVIATIONS, FRENCH_ABBREVIATIONS),
+  }),
+  de: Object.freeze({
+    key: 'de',
+    family: 'latin',
+    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS + 1,
+    maxLineBreakOvershoot: 4,
+    avoidBoundarySuffixWords: mergeWordSets(
+      LATIN_BASE_BOUNDARY_SUFFIX_WORDS,
+      GERMAN_BOUNDARY_SUFFIX_WORDS,
+    ),
+    avoidBoundaryPrefixWords: mergeWordSets(
+      LATIN_BASE_BOUNDARY_PREFIX_WORDS,
+      GERMAN_BOUNDARY_PREFIX_WORDS,
+    ),
+    abbreviations: mergeWordSets(LATIN_BASE_ABBREVIATIONS, GERMAN_ABBREVIATIONS),
+  }),
+});
 const AUDIO_PCM_SAMPLE_RATE = 24000;
 const AUDIO_PCM_BYTES_PER_SAMPLE = 2;
 const parsedForceCommitIntervalMs = Number(
@@ -407,6 +750,26 @@ function normalizeProjectorLayout(rawLayout) {
       35,
     ),
   };
+}
+
+function projectorLayoutsEqual(leftLayout, rightLayout) {
+  const left = normalizeProjectorLayout(leftLayout);
+  const right = normalizeProjectorLayout(rightLayout);
+  return (
+    left.fontSizePercent === right.fontSizePercent &&
+    left.offsetX === right.offsetX &&
+    left.offsetY === right.offsetY
+  );
+}
+
+function normalizeProjectorDisplayMode(rawMode) {
+  return rawMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
+    ? PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
+    : PROJECTOR_DISPLAY_MODES.SCRIPT;
+}
+
+function normalizeProjectorRevision(rawRevision) {
+  return normalizeBoundedInteger(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER);
 }
 
 function isLineMarkedMusic(entry) {
@@ -1024,26 +1387,117 @@ function getAdminUserPayload(user) {
   };
 }
 
-function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
-  const ownedSessionIds = Array.from(sessions.values())
-    .filter((session) => session.ownerUserId === userId)
-    .map((session) => session.id);
+function getPublicSessionUnavailablePayload(
+  role,
+  { session = null, token = '', reason = '' } = {},
+) {
+  const roleLabel = role === 'projector' ? '投影端' : '檢視端';
 
-  ownedSessionIds.forEach((sessionId) => {
-    stopTranscriptionStream(sessionId, {
+  if (reason === 'deleted') {
+    const message = `本場次已被移除，${roleLabel}已失效`;
+    return {
+      reason: 'deleted',
+      message,
+      error: message,
+    };
+  }
+
+  if (session && session.status === 'ended') {
+    const message = `本場次已結束，${roleLabel}已失效`;
+    return {
+      reason: 'ended',
+      message,
+      error: message,
+    };
+  }
+
+  const tombstoneStore =
+    role === 'projector' ? projectorSessionTombstones : viewerSessionTombstones;
+  const tombstone =
+    typeof token === 'string' && token.trim() ? tombstoneStore.get(token.trim()) : null;
+  if (tombstone && typeof tombstone === 'object') {
+    const message =
+      typeof tombstone.message === 'string' && tombstone.message.trim()
+        ? tombstone.message.trim()
+        : `本場次已被移除，${roleLabel}已失效`;
+    return {
+      reason:
+        typeof tombstone.reason === 'string' && tombstone.reason.trim()
+          ? tombstone.reason.trim()
+          : 'deleted',
+      message,
+      error: message,
+    };
+  }
+
+  if (!session && IS_PRODUCTION && PERSISTENCE_BACKEND !== 'postgres') {
+    const message =
+      '場次不存在；若剛發生服務重啟或重新部署，且未使用資料庫保存場次，資料可能已遺失';
+    return {
+      reason: 'storage_lost',
+      message,
+      error: message,
+    };
+  }
+
+  const message = '場次不存在';
+  return {
+    reason: 'missing',
+    message,
+    error: message,
+  };
+}
+
+function rememberPublicSessionTombstones(session, reason = 'deleted') {
+  if (!session || typeof session !== 'object') return;
+
+  if (typeof session.viewerToken === 'string' && session.viewerToken.trim()) {
+    viewerSessionTombstones.set(
+      session.viewerToken.trim(),
+      getPublicSessionUnavailablePayload('viewer', { reason }),
+    );
+  }
+  if (typeof session.projectorToken === 'string' && session.projectorToken.trim()) {
+    projectorSessionTombstones.set(
+      session.projectorToken.trim(),
+      getPublicSessionUnavailablePayload('projector', { reason }),
+    );
+  }
+}
+
+function clearPublicSessionTombstones(session) {
+  if (!session || typeof session !== 'object') return;
+  if (typeof session.viewerToken === 'string' && session.viewerToken.trim()) {
+    viewerSessionTombstones.delete(session.viewerToken.trim());
+  }
+  if (typeof session.projectorToken === 'string' && session.projectorToken.trim()) {
+    projectorSessionTombstones.delete(session.projectorToken.trim());
+  }
+}
+
+function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
+  const ownedSessions = Array.from(sessions.values()).filter(
+    (session) => session.ownerUserId === userId,
+  );
+
+  ownedSessions.forEach((session) => {
+    stopTranscriptionStream(session.id, {
       keepText: false,
       reason,
     });
-    io.to(`viewer:${sessionId}`).emit('viewer:expired', {
-      message: '本場次已失效',
+    const viewerPayload = getPublicSessionUnavailablePayload('viewer', {
+      reason: 'deleted',
     });
-    io.to(`projector:${sessionId}`).emit('projector:expired', {
-      message: '本場次已失效',
+    const projectorPayload = getPublicSessionUnavailablePayload('projector', {
+      reason: 'deleted',
     });
-    sessions.delete(sessionId);
+    io.to(`viewer:${session.id}`).emit('viewer:expired', viewerPayload);
+    io.to(`projector:${session.id}`).emit('projector:expired', projectorPayload);
+    rememberPublicSessionTombstones(session, 'deleted');
+    sessions.delete(session.id);
   });
 
-  return ownedSessionIds.length;
+  return ownedSessions.length;
 }
 
 function ensureUserCanTransitionFromAdmin(user, nextRole, nextDisabled) {
@@ -1059,8 +1513,21 @@ function ensureUserCanTransitionFromAdmin(user, nextRole, nextDisabled) {
   return '';
 }
 
-function normalizePunctuation(text) {
+function normalizePunctuation(text, languageCode = '') {
   if (typeof text !== 'string') return '';
+
+  const profile = resolveScriptSegmentationProfile(languageCode, text);
+  if (profile.family === 'latin') {
+    return text
+      .replace(/，/g, ',')
+      .replace(/。|．/g, '.')
+      .replace(/、/g, ',')
+      .replace(/；/g, ';')
+      .replace(/：/g, ':')
+      .replace(/！/g, '!')
+      .replace(/？/g, '?');
+  }
+
   return text.replace(/[.,，。、]/g, ' ');
 }
 
@@ -1080,7 +1547,11 @@ function chunkLongUnit(unit, limit) {
   return chunks;
 }
 
-function chunkScript(rawText, limit = MAX_CHUNK_LENGTH) {
+function chunkScript(rawText, limit = MAX_CHUNK_LENGTH, options = {}) {
+  const profile = resolveScriptSegmentationProfile(
+    options.languageCode,
+    rawText,
+  );
   const units = [];
 
   rawText
@@ -1088,8 +1559,9 @@ function chunkScript(rawText, limit = MAX_CHUNK_LENGTH) {
     .map((paragraph) => paragraph.trim())
     .filter(Boolean)
     .forEach((paragraph) => {
-      const sentences =
-        paragraph.match(/[^。！？!?]+[。！？!?]?/gu) || [paragraph];
+      const sentences = splitScriptTextUnits(paragraph, profile, {
+        includeWeakBreaks: false,
+      });
       sentences.forEach((sentence) => {
         const trimmed = sentence.trim();
         if (trimmed) {
@@ -1144,6 +1616,310 @@ function sanitizeLineText(text) {
     text = text == null ? '' : String(text);
   }
   return stripBom(text).replace(/\r?\n/g, ' ').trim();
+}
+
+function mergeWordSets(...sets) {
+  const merged = new Set();
+
+  sets.forEach((set) => {
+    if (!(set instanceof Set)) return;
+    set.forEach((word) => {
+      const normalized = normalizeLatinWord(word);
+      if (normalized) {
+        merged.add(normalized);
+      }
+    });
+  });
+
+  return merged;
+}
+
+function normalizeLanguageCode(rawLanguageCode) {
+  if (typeof rawLanguageCode !== 'string') return '';
+  const sanitized = rawLanguageCode.trim().toLowerCase();
+  if (!sanitized) return '';
+
+  const [base] = sanitized.split(/[-_]/u);
+  return base || sanitized;
+}
+
+function normalizeLatinWord(word) {
+  if (typeof word !== 'string') return '';
+  return word
+    .trim()
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[^'\p{Script=Latin}]+/gu, '')
+    .replace(/^'+|'+$/g, '');
+}
+
+function countScriptMatches(text, pattern) {
+  if (typeof text !== 'string' || !text) return 0;
+  return (text.match(pattern) || []).length;
+}
+
+function isLatinHeavyTextSample(text) {
+  const sanitized = sanitizeLineText(text);
+  if (!sanitized) return false;
+
+  const latinMatches = countScriptMatches(
+    sanitized,
+    LATIN_SCRIPT_CHAR_GLOBAL_PATTERN,
+  );
+  if (latinMatches < 4) return false;
+
+  const cjkMatches = countScriptMatches(sanitized, CJK_SCRIPT_CHAR_GLOBAL_PATTERN);
+  return latinMatches >= cjkMatches;
+}
+
+function resolveScriptSegmentationProfile(languageCode = '', sampleText = '') {
+  const normalizedCode = normalizeLanguageCode(languageCode);
+
+  if (normalizedCode === 'fr') {
+    return SCRIPT_SEGMENTATION_PROFILES.fr;
+  }
+  if (normalizedCode === 'de') {
+    return SCRIPT_SEGMENTATION_PROFILES.de;
+  }
+  if (/^(zh|ja|ko)$/u.test(normalizedCode)) {
+    return SCRIPT_SEGMENTATION_PROFILES.cjk;
+  }
+  if (normalizedCode && LATIN_SCRIPT_LANGUAGE_CODES.has(normalizedCode)) {
+    return SCRIPT_SEGMENTATION_PROFILES.latin;
+  }
+  if (isLatinHeavyTextSample(sampleText)) {
+    return SCRIPT_SEGMENTATION_PROFILES.latin;
+  }
+
+  return SCRIPT_SEGMENTATION_PROFILES.cjk;
+}
+
+function getLastLatinWord(text) {
+  if (typeof text !== 'string') return '';
+  const matches = text.match(LATIN_WORD_PATTERN) || [];
+  return normalizeLatinWord(matches[matches.length - 1] || '');
+}
+
+function getFirstLatinWord(text) {
+  if (typeof text !== 'string') return '';
+  const match = text.match(LATIN_SINGLE_WORD_PATTERN);
+  return normalizeLatinWord(match ? match[0] : '');
+}
+
+function consumeLatinBoundaryTail(text, startIndex) {
+  let index = startIndex;
+  while (index < text.length) {
+    const char = text[index];
+    if (
+      LATIN_STRONG_BREAK_PUNCTUATION_PATTERN.test(char) ||
+      LATIN_BOUNDARY_TRAILING_DECORATION_PATTERN.test(char)
+    ) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return index;
+}
+
+function isLatinBoundaryAbbreviation(leftRawText, rightRawText, profile) {
+  const left = sanitizeLineText(leftRawText);
+  if (!left) return false;
+
+  if (/(\d)\.(\d)$/u.test(left)) {
+    return /^\d/u.test((rightRawText || '').trim());
+  }
+  if (/(?:\b\p{Script=Latin}\.){2,}["')\]]*$/u.test(left)) {
+    return true;
+  }
+
+  const wordMatch = left.match(/([\p{Script=Latin}]+)\.["')\]]*$/u);
+  if (!wordMatch) return false;
+
+  const normalizedWord = normalizeLatinWord(wordMatch[1]);
+  if (!normalizedWord) return false;
+  if (profile.abbreviations.has(normalizedWord)) return true;
+  if (normalizedWord.length <= 2 && (rightRawText || '').trim()) {
+    return true;
+  }
+
+  return false;
+}
+
+function shouldSplitLatinSentenceAt({
+  sentenceText,
+  boundaryIndex,
+  boundaryEnd,
+  profile,
+  includeWeakBreaks,
+}) {
+  const boundaryChar = sentenceText[boundaryIndex];
+  if (!boundaryChar) return false;
+  if (!includeWeakBreaks && LATIN_WEAK_BREAK_PUNCTUATION_PATTERN.test(boundaryChar)) {
+    return false;
+  }
+
+  const leftRawText = sentenceText.slice(0, boundaryEnd);
+  const rightRawText = sentenceText.slice(boundaryEnd);
+  if (!rightRawText.trim()) return true;
+
+  if (LATIN_STRONG_BREAK_PUNCTUATION_PATTERN.test(boundaryChar)) {
+    if (boundaryChar === '.' && isLatinBoundaryAbbreviation(leftRawText, rightRawText, profile)) {
+      return false;
+    }
+
+    const nextLatinWord = getFirstLatinWord(rightRawText);
+    const nextNonWhitespaceChar = (rightRawText.match(/\S/u) || [''])[0];
+    if (
+      boundaryChar === '.' &&
+      nextLatinWord &&
+      /^\p{Ll}/u.test(nextNonWhitespaceChar)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return LATIN_WEAK_BREAK_PUNCTUATION_PATTERN.test(boundaryChar);
+}
+
+function splitLatinTextUnits(
+  text,
+  profile,
+  { includeWeakBreaks = false } = {},
+) {
+  const units = [];
+  let start = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const isBoundary =
+      LATIN_STRONG_BREAK_PUNCTUATION_PATTERN.test(char) ||
+      (includeWeakBreaks && LATIN_WEAK_BREAK_PUNCTUATION_PATTERN.test(char));
+    if (!isBoundary) continue;
+
+    const boundaryEnd = consumeLatinBoundaryTail(text, index + 1);
+    if (
+      !shouldSplitLatinSentenceAt({
+        sentenceText: text.slice(start),
+        boundaryIndex: index - start,
+        boundaryEnd: boundaryEnd - start,
+        profile,
+        includeWeakBreaks,
+      })
+    ) {
+      index = boundaryEnd - 1;
+      continue;
+    }
+
+    const unit = text.slice(start, boundaryEnd).trim();
+    if (unit) {
+      units.push(unit);
+    }
+    start = boundaryEnd;
+    index = boundaryEnd - 1;
+  }
+
+  const tail = text.slice(start).trim();
+  if (tail) {
+    units.push(tail);
+  }
+
+  return units.length > 0 ? units : [text.trim()];
+}
+
+function splitScriptTextUnits(
+  text,
+  profile,
+  { includeWeakBreaks = false } = {},
+) {
+  if (profile.family === 'latin') {
+    return splitLatinTextUnits(text, profile, { includeWeakBreaks });
+  }
+
+  const pattern = includeWeakBreaks
+    ? /[^。！？!?；;，,、]+[。！？!?；;，,、]?/gu
+    : /[^。！？!?]+[。！？!?]?/gu;
+  return text.match(pattern) || [text];
+}
+
+function resolveLineLengthConfig(limitOrOptions, sampleText = '') {
+  if (typeof limitOrOptions === 'number') {
+    const profile = resolveScriptSegmentationProfile('', sampleText);
+    return {
+      limit: Math.max(1, limitOrOptions),
+      profile,
+    };
+  }
+
+  const options =
+    limitOrOptions && typeof limitOrOptions === 'object' ? limitOrOptions : {};
+  const profile = resolveScriptSegmentationProfile(
+    options.languageCode,
+    options.sampleText || sampleText,
+  );
+  const limit = Number.isFinite(options.limit)
+    ? Math.max(1, options.limit)
+    : profile.maxLineWidthUnits;
+
+  return {
+    limit,
+    profile,
+  };
+}
+
+function scoreBreakCandidate(candidate, text, limit, profile) {
+  const leftRaw = text.slice(0, candidate.cut);
+  const rightRaw = text.slice(candidate.cut);
+  const left = sanitizeLineText(leftRaw);
+  const right = sanitizeLineText(rightRaw);
+  if (!left) return Number.NEGATIVE_INFINITY;
+  if (!right) return Number.POSITIVE_INFINITY;
+
+  let score = 0;
+  const overflow = Math.max(0, candidate.width - limit);
+  const underfill = Math.max(0, limit - candidate.width);
+
+  score -= overflow * 1.6;
+  score -= underfill * (profile.family === 'latin' ? 0.45 : 0.7);
+
+  if (candidate.kind === 'punctuation') {
+    if (profile.family === 'latin') {
+      if (LATIN_STRONG_BREAK_PUNCTUATION_PATTERN.test(candidate.char)) {
+        score += 4;
+      } else if (/[;:]/u.test(candidate.char)) {
+        score += 2.2;
+      } else if (/,/u.test(candidate.char)) {
+        score += 0.9;
+      }
+    } else if (/[。！？!?]/u.test(candidate.char)) {
+      score += 3.5;
+    } else {
+      score += 1.2;
+    }
+  } else if (candidate.kind === 'whitespace') {
+    score += profile.family === 'latin' ? 0.35 : 0.1;
+  }
+
+  if (profile.family === 'latin') {
+    const leftWord = getLastLatinWord(left);
+    const rightWord = getFirstLatinWord(right);
+
+    if (profile.avoidBoundarySuffixWords.has(leftWord)) {
+      score -= 4;
+    }
+    if (profile.avoidBoundaryPrefixWords.has(rightWord)) {
+      score -= 4;
+    }
+    if (/['’\-]\s*$/u.test(leftRaw) || /^\s*['’\-]/u.test(rightRaw)) {
+      score -= 6;
+    }
+    if (isLatinBoundaryAbbreviation(leftRaw, rightRaw, profile)) {
+      score -= 6;
+    }
+  }
+
+  return score;
 }
 
 function isLikelyDirection(text) {
@@ -1446,17 +2222,7 @@ function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
 }
 
 function isLatinHeavyText(text) {
-  const sanitized = sanitizeTranscriptionText(text);
-  if (!sanitized) return false;
-
-  const latinMatches = sanitized.match(/[A-Za-z]/g) || [];
-  if (latinMatches.length < 4) return false;
-  const cjkMatches =
-    sanitized.match(
-      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu,
-    ) || [];
-
-  return latinMatches.length >= cjkMatches.length;
+  return isLatinHeavyTextSample(text);
 }
 
 function normalizeScriptLines(entries, options = {}) {
@@ -1642,11 +2408,12 @@ function measureSubtitleTextWidth(text) {
   return width;
 }
 
-function enforceLineLengths(entries, limit = MAX_LINE_WIDTH_UNITS) {
+function enforceLineLengths(entries, limitOrOptions = MAX_LINE_WIDTH_UNITS) {
   const result = [];
 
   entries.forEach((entry) => {
     if (!entry || !entry.text) return;
+    const { limit, profile } = resolveLineLengthConfig(limitOrOptions, entry.text);
 
     if (
       entry.type === LINE_TYPES.DIRECTION ||
@@ -1656,7 +2423,10 @@ function enforceLineLengths(entries, limit = MAX_LINE_WIDTH_UNITS) {
       return;
     }
 
-    const chunks = chunkDialogueText(entry.text, limit);
+    const chunks = chunkDialogueText(entry.text, {
+      limit,
+      languageCode: profile.key,
+    });
     chunks.forEach((chunk) => {
       const text = sanitizeLineText(chunk);
       if (!text) return;
@@ -1679,9 +2449,11 @@ function enforceLineLengths(entries, limit = MAX_LINE_WIDTH_UNITS) {
   return result;
 }
 
-function chunkDialogueText(text, limit = MAX_LINE_WIDTH_UNITS) {
-  const sentences =
-    text.match(/[^。！？!?；;，,、]+[。！？!?；;，,、]?/gu) || [text];
+function chunkDialogueText(text, limitOrOptions = MAX_LINE_WIDTH_UNITS) {
+  const { limit, profile } = resolveLineLengthConfig(limitOrOptions, text);
+  const sentences = splitScriptTextUnits(text, profile, {
+    includeWeakBreaks: profile.family !== 'latin',
+  });
   const chunks = [];
 
   sentences.forEach((sentence) => {
@@ -1689,7 +2461,10 @@ function chunkDialogueText(text, limit = MAX_LINE_WIDTH_UNITS) {
     if (!remaining) return;
 
     while (measureSubtitleTextWidth(remaining) > limit) {
-      const cut = findBreakPosition(remaining, limit);
+      const cut = findBreakPosition(remaining, {
+        limit,
+        languageCode: profile.key,
+      });
       if (cut >= remaining.length) {
         break;
       }
@@ -1709,19 +2484,17 @@ function chunkDialogueText(text, limit = MAX_LINE_WIDTH_UNITS) {
   return chunks;
 }
 
-function findBreakPosition(text, limit) {
+function findBreakPosition(text, limitOrOptions = MAX_LINE_WIDTH_UNITS) {
+  const { limit, profile } = resolveLineLengthConfig(limitOrOptions, text);
+
   if (measureSubtitleTextWidth(text) <= limit) {
     return text.length;
   }
 
   let width = 0;
   let offset = 0;
-  let lastWhitespaceCut = 0;
-  let lastPunctuationCut = 0;
-  let overflowWhitespaceCut = 0;
-  let overflowPunctuationCut = 0;
   let hardCut = text.length;
-  let exceededLimit = false;
+  const candidates = [];
 
   for (const char of text) {
     const charWidth = getSubtitleCharWidth(char);
@@ -1729,50 +2502,55 @@ function findBreakPosition(text, limit) {
     width += charWidth;
 
     if (SUBTITLE_BREAK_WHITESPACE_PATTERN.test(char)) {
-      if (!exceededLimit) {
-        lastWhitespaceCut = nextOffset;
-      } else if (!overflowWhitespaceCut) {
-        overflowWhitespaceCut = nextOffset;
-      }
-    } else if (SUBTITLE_BREAK_PUNCTUATION_PATTERN.test(char)) {
-      if (!exceededLimit) {
-        lastPunctuationCut = nextOffset;
-      } else if (!overflowPunctuationCut) {
-        overflowPunctuationCut = nextOffset;
+      candidates.push({
+        cut: nextOffset,
+        width,
+        kind: 'whitespace',
+        char,
+      });
+    } else {
+      const punctuationPattern =
+        profile.family === 'latin'
+          ? LATIN_BREAK_PUNCTUATION_PATTERN
+          : SUBTITLE_BREAK_PUNCTUATION_PATTERN;
+      if (punctuationPattern.test(char)) {
+        candidates.push({
+          cut: nextOffset,
+          width,
+          kind: 'punctuation',
+          char,
+        });
       }
     }
 
-    if (!exceededLimit && width > limit) {
-      exceededLimit = true;
+    if (hardCut === text.length && width > limit) {
       hardCut = Math.max(offset, char.length);
-      if (lastWhitespaceCut > 0) {
-        return lastWhitespaceCut;
-      }
-      if (lastPunctuationCut > 0) {
-        return lastPunctuationCut;
-      }
     }
-
-    if (exceededLimit) {
-      if (overflowWhitespaceCut > 0) {
-        return overflowWhitespaceCut;
-      }
-      if (overflowPunctuationCut > 0) {
-        return overflowPunctuationCut;
-      }
-      if (width > limit + MAX_LINE_BREAK_OVERSHOOT) {
-        return hardCut;
-      }
+    if (width > limit + profile.maxLineBreakOvershoot) {
+      break;
     }
 
     offset = nextOffset;
   }
 
-  if (overflowWhitespaceCut > 0) {
-    return overflowWhitespaceCut;
-  }
-  if (overflowPunctuationCut > 0) {
-    return overflowPunctuationCut;
+  const bestCandidate = candidates.reduce((best, candidate) => {
+    if (candidate.cut <= 0 || candidate.cut >= text.length) {
+      return best;
+    }
+
+    const score = scoreBreakCandidate(candidate, text, limit, profile);
+    if (!best || score > best.score) {
+      return {
+        cut: candidate.cut,
+        score,
+      };
+    }
+
+    return best;
+  }, null);
+
+  if (bestCandidate?.cut > 0) {
+    return bestCandidate.cut;
   }
   return hardCut;
 }
@@ -1954,6 +2732,7 @@ function captureSessionSnapshot(session) {
       roleColorEnabled: session.roleColorEnabled,
       viewerDefaultLanguageId: session.viewerDefaultLanguageId,
       projectorDefaultLanguageId: session.projectorDefaultLanguageId,
+      projectorDisplayMode: session.projectorDisplayMode,
       status: session.status,
       endedAt: session.endedAt || null,
     }),
@@ -1992,6 +2771,9 @@ function restoreSessionSnapshot(session, snapshot) {
     typeof snapshot.projectorDefaultLanguageId === 'string'
       ? snapshot.projectorDefaultLanguageId
       : session.projectorDefaultLanguageId;
+  session.projectorDisplayMode = normalizeProjectorDisplayMode(
+    snapshot.projectorDisplayMode || session.projectorDisplayMode,
+  );
   session.status = snapshot.status === 'ended' ? 'ended' : 'active';
   session.endedAt =
     Number.isFinite(snapshot.endedAt) && snapshot.endedAt > 0
@@ -2067,6 +2849,10 @@ function ensureSessionStructure(session) {
   session.displayEnabled = session.displayEnabled !== false;
   session.roleColorEnabled = session.roleColorEnabled !== false;
   session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
+  session.projectorDisplayMode = normalizeProjectorDisplayMode(
+    session.projectorDisplayMode,
+  );
+  session.projectorRevision = normalizeProjectorRevision(session.projectorRevision);
 
   ensureSessionLanguages(session);
   session.viewerDefaultLanguageId = resolveSessionLanguageId(
@@ -2122,6 +2908,8 @@ function createSessionRecord(ownerUserId) {
     viewerDefaultLanguageId: 'primary',
     projectorDefaultLanguageId: 'primary',
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
+    projectorDisplayMode: PROJECTOR_DISPLAY_MODES.SCRIPT,
+    projectorRevision: 0,
     languages: [createLanguageDefinition({}, 0)],
     selectedCellId: null,
     currentIndex: 0,
@@ -2146,6 +2934,8 @@ function serializeSessionForStorage(session) {
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorLayout: normalized.projectorLayout,
+    projectorDisplayMode: normalized.projectorDisplayMode,
+    projectorRevision: normalized.projectorRevision,
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
     languages: normalized.languages.map((language) => ({
@@ -2349,7 +3139,11 @@ function hasMeaningfulOverlap(line, normalizedScript) {
   return false;
 }
 
-function fallbackSegmentScript(rawText) {
+function fallbackSegmentScript(rawText, options = {}) {
+  const profile = resolveScriptSegmentationProfile(
+    options.languageCode,
+    rawText,
+  );
   const lines = [];
   const paragraphs = rawText
     .split(/\r?\n+/)
@@ -2357,11 +3151,11 @@ function fallbackSegmentScript(rawText) {
     .filter(Boolean);
 
   paragraphs.forEach((paragraph) => {
-    const matches = paragraph.match(/[^。！？!?]+[。！？!?]?/gu);
-    const units =
-      matches && matches.length > 0
-        ? matches.map((sentence) => sentence.trim()).filter(Boolean)
-        : [paragraph];
+    const units = splitScriptTextUnits(paragraph, profile, {
+      includeWeakBreaks: false,
+    })
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
 
     units.forEach((unit) => {
       const text = sanitizeLineText(unit);
@@ -2378,9 +3172,12 @@ function fallbackSegmentScript(rawText) {
   return lines;
 }
 
-function sanitizeModelLines(parsed, sourceText) {
+function sanitizeModelLines(parsed, sourceText, options = {}) {
   const normalized = normalizeScriptLines(parsed);
-  const cleaned = enforceLineLengths(normalized);
+  const cleaned = enforceLineLengths(normalized, {
+    languageCode: options.languageCode,
+    sampleText: sourceText,
+  });
 
   if (cleaned.length === 0) {
     const error = new Error('OpenAI 未產生有效的字幕資料');
@@ -2427,7 +3224,12 @@ async function parseChunk({
   chunkText,
   chunkIndex,
   totalChunks,
+  languageCode = '',
 }) {
+  const profile = resolveScriptSegmentationProfile(languageCode, chunkText);
+  const lineWidthUnits = profile.maxLineWidthUnits;
+  const languagePrompt =
+    normalizeLanguageCode(languageCode) || profile.key || 'auto';
   const prompt = [
     {
       role: 'system',
@@ -2444,11 +3246,12 @@ async function parseChunk({
 如果能明確辨識台詞說話角色，請填入 role；若無法確定就填 null。
 若原文是「角色：台詞」，請把角色放進 role，text 只保留實際台詞。
 若文字過長，請以保留語意為優先切段。
-每段請控制在不超過 ${MAX_LINE_WIDTH_UNITS} 個全形字寬單位：
+劇本語言代碼（若可判斷）：${languagePrompt}
+每段請控制在不超過 ${lineWidthUnits} 個全形字寬單位：
 - 中文、日文、韓文與全形標點大約算 1 單位
 - 英文字母、數字與半形標點大約算 0.5 單位
 - 空白更少
-英文或其他拉丁語系請優先在單字邊界切開，不要為了湊長度把單字切碎。
+英文、法文、德文或其他拉丁語系請優先在單字邊界切開，不要為了湊長度把單字切碎，也不要因冠詞、介系詞、縮寫或撇號前後過早斷行。
 內容如下：
 ${chunkText}
       `.trim(),
@@ -2483,7 +3286,7 @@ ${chunkText}
     throw error;
   }
 
-  return sanitizeModelLines(parsed, chunkText);
+  return sanitizeModelLines(parsed, chunkText, { languageCode });
 }
 
 function sanitizeTranscriptionText(text) {
@@ -4388,6 +5191,8 @@ function getSessionSummary(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
+    projectorDisplayMode: normalized.projectorDisplayMode,
+    projectorRevision: normalized.projectorRevision,
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
@@ -4412,6 +5217,8 @@ function getControlPayload(session) {
     projector: {
       token: normalized.projectorToken,
       layout: normalized.projectorLayout,
+      displayMode: normalized.projectorDisplayMode,
+      revision: normalized.projectorRevision,
     },
     transcription: getPublicTranscriptionState(normalized),
     history: {
@@ -4557,6 +5364,9 @@ function getProjectorPayload(session) {
     musicText,
     transcription,
   } = getSessionDisplayState(session);
+  const projectorDisplayMode = normalizeProjectorDisplayMode(
+    normalized.projectorDisplayMode,
+  );
 
   if (!normalized.displayEnabled) {
     return {
@@ -4575,30 +5385,57 @@ function getProjectorPayload(session) {
       roleColorEnabled: normalized.roleColorEnabled,
       source: 'hidden',
       layout: normalized.projectorLayout,
+      displayMode: projectorDisplayMode,
+      revision: normalized.projectorRevision,
       transcription,
     };
   }
 
-  if (hasLiveText) {
+  if (projectorDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION) {
+    if (hasLiveText) {
+      return {
+        sessionId: normalized.id,
+        projectorToken: normalized.projectorToken,
+        status: normalized.status,
+        languages: normalized.languages,
+        defaultLanguageId: normalized.projectorDefaultLanguageId,
+        line: {
+          text: liveLines[liveLines.length - 1] || liveText,
+          type: LINE_TYPES.DIALOGUE,
+        },
+        text: liveText,
+        liveEntries,
+        liveLines,
+        musicActive: false,
+        musicText: '',
+        displayEnabled: true,
+        roleColorEnabled: normalized.roleColorEnabled,
+        source: 'transcription',
+        layout: normalized.projectorLayout,
+        displayMode: projectorDisplayMode,
+        revision: normalized.projectorRevision,
+        transcription,
+      };
+    }
+
     return {
       sessionId: normalized.id,
       projectorToken: normalized.projectorToken,
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.projectorDefaultLanguageId,
-      line: {
-        text: liveLines[liveLines.length - 1] || liveText,
-        type: LINE_TYPES.DIALOGUE,
-      },
-      text: liveText,
-      liveEntries,
-      liveLines,
-      musicActive,
-      musicText,
+      line: null,
+      text: '',
+      liveEntries: [],
+      liveLines: [],
+      musicActive: false,
+      musicText: '',
       displayEnabled: true,
       roleColorEnabled: normalized.roleColorEnabled,
       source: 'transcription',
       layout: normalized.projectorLayout,
+      displayMode: projectorDisplayMode,
+      revision: normalized.projectorRevision,
       transcription,
     };
   }
@@ -4622,7 +5459,18 @@ function getProjectorPayload(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     source: 'script',
     layout: normalized.projectorLayout,
+    displayMode: projectorDisplayMode,
+    revision: normalized.projectorRevision,
     transcription,
+  };
+}
+
+function getProjectorLayoutPayload(session) {
+  const normalized = ensureSessionStructure(session);
+  return {
+    sessionId: normalized.id,
+    layout: normalized.projectorLayout,
+    revision: normalized.projectorRevision,
   };
 }
 
@@ -4634,6 +5482,7 @@ function ensureSession(sessionId, ownerUserId = '') {
     const session = createSessionRecord(ownerUserId);
     session.id = sessionId;
     session.ownerUserId = ownerUserId || session.ownerUserId;
+    clearPublicSessionTombstones(session);
     sessions.set(sessionId, session);
   }
 
@@ -4682,6 +5531,7 @@ function touchSession(session) {
 function persistSession(session) {
   if (!session) return;
   touchSession(session);
+  clearPublicSessionTombstones(session);
   sessions.set(session.id, session);
   persistApplicationStore();
 }
@@ -4722,9 +5572,21 @@ function broadcastProjectorState(sessionId) {
   );
 }
 
-async function parseScriptWithOpenAI(rawText, apiKey) {
+function broadcastProjectorLayoutState(sessionId) {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  io.to(`projector:${sessionId}`).emit(
+    'projector:layout',
+    getProjectorLayoutPayload(session),
+  );
+}
+
+async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
+  const languageCode =
+    typeof options.languageCode === 'string' ? options.languageCode : '';
   const client = new OpenAI({ apiKey });
-  const chunks = chunkScript(rawText, MAX_CHUNK_LENGTH);
+  const chunks = chunkScript(rawText, MAX_CHUNK_LENGTH, { languageCode });
   const combined = [];
 
   for (let index = 0; index < chunks.length; index += 1) {
@@ -4736,6 +5598,7 @@ async function parseScriptWithOpenAI(rawText, apiKey) {
         chunkText,
         chunkIndex: index,
         totalChunks: chunks.length,
+        languageCode,
       });
       combined.push(...parsedLines);
     } catch (error) {
@@ -4745,7 +5608,10 @@ async function parseScriptWithOpenAI(rawText, apiKey) {
           error,
         );
         const fallbackLines = enforceLineLengths(
-          normalizeScriptLines(fallbackSegmentScript(chunkText)),
+          normalizeScriptLines(
+            fallbackSegmentScript(chunkText, { languageCode }),
+          ),
+          { languageCode },
         );
         combined.push(...fallbackLines);
         continue;
@@ -4761,15 +5627,17 @@ async function parseScriptWithOpenAI(rawText, apiKey) {
     throw error;
   }
 
-  return enforceLineLengths(combined);
+  return enforceLineLengths(combined, { languageCode, sampleText: rawText });
 }
 
-function buildFallbackAlignedTranslations(rawText, targetCount) {
+function buildFallbackAlignedTranslations(rawText, targetCount, options = {}) {
   if (!Number.isInteger(targetCount) || targetCount <= 0) {
     return [];
   }
 
-  const units = fallbackSegmentScript(rawText)
+  const units = fallbackSegmentScript(rawText, {
+    languageCode: options.languageCode,
+  })
     .map((entry) => sanitizeLineText(entry?.text || ''))
     .filter(Boolean);
 
@@ -5234,17 +6102,30 @@ app.get('/api/session/:sessionId/viewer', requireAuth, (req, res) => {
 });
 
 app.get('/api/viewer/:viewerToken', (req, res) => {
-  const session = getSessionByViewerToken(req.params.viewerToken);
+  const viewerToken =
+    typeof req.params.viewerToken === 'string' ? req.params.viewerToken.trim() : '';
+  const session = getSessionByViewerToken(viewerToken);
   if (!session || session.status === 'ended') {
-    return res.status(410).json({ error: '場次不存在或已結束' });
+    return res
+      .status(410)
+      .json(getPublicSessionUnavailablePayload('viewer', { session, token: viewerToken }));
   }
   res.json(getViewerPayload(session));
 });
 
 app.get('/api/projector/:projectorToken', (req, res) => {
-  const session = getSessionByProjectorToken(req.params.projectorToken);
+  const projectorToken =
+    typeof req.params.projectorToken === 'string'
+      ? req.params.projectorToken.trim()
+      : '';
+  const session = getSessionByProjectorToken(projectorToken);
   if (!session || session.status === 'ended') {
-    return res.status(410).json({ error: '場次不存在或已結束' });
+    return res.status(410).json(
+      getPublicSessionUnavailablePayload('projector', {
+        session,
+        token: projectorToken,
+      }),
+    );
   }
   res.json(getProjectorPayload(session));
 });
@@ -5263,12 +6144,14 @@ app.post('/api/session/:sessionId/end', requireAuth, (req, res) => {
     reason: 'session ended',
   });
   broadcastControlState(session.id);
-  io.to(`viewer:${session.id}`).emit('viewer:expired', {
-    message: '本場次已結束，檢視端已失效',
-  });
-  io.to(`projector:${session.id}`).emit('projector:expired', {
-    message: '本場次已結束，投影端已失效',
-  });
+  io.to(`viewer:${session.id}`).emit(
+    'viewer:expired',
+    getPublicSessionUnavailablePayload('viewer', { session }),
+  );
+  io.to(`projector:${session.id}`).emit(
+    'projector:expired',
+    getPublicSessionUnavailablePayload('projector', { session }),
+  );
 
   res.json(getControlPayload(session));
 });
@@ -5459,7 +6342,10 @@ app.post(
       return res.status(400).json({ error: '缺少目標語言文字內容' });
     }
 
-    const normalizedRawText = normalizePunctuation(stripBom(rawScriptText));
+    const normalizedRawText = normalizePunctuation(
+      stripBom(rawScriptText),
+      language.code,
+    );
 
     try {
       let alignedTexts;
@@ -5475,6 +6361,7 @@ app.post(
         alignedTexts = buildFallbackAlignedTranslations(
           normalizedRawText,
           cell.lines.length,
+          { languageCode: language.code },
         );
         warning = `多語對齊已改用保底分配：${error.message || 'OpenAI 對齊失敗'}`;
       }
@@ -5529,13 +6416,16 @@ app.post(
       return res.status(404).json({ error: '找不到儲存格' });
     }
 
-    const rawText = normalizePunctuation(stripBom(rawScriptText));
+    const primaryLanguageCode = session.languages?.[0]?.code || '';
+    const rawText = normalizePunctuation(stripBom(rawScriptText), primaryLanguageCode);
 
     try {
       let lines;
       let warning = '';
       try {
-        lines = await parseScriptWithOpenAI(rawText, apiKey);
+        lines = await parseScriptWithOpenAI(rawText, apiKey, {
+          languageCode: primaryLanguageCode,
+        });
       } catch (error) {
         console.error('Failed to parse script:', error);
         if (!fallbackCodes.has(error?.code)) {
@@ -5543,9 +6433,11 @@ app.post(
         }
 
         const fallbackNormalized = normalizeScriptLines(
-          fallbackSegmentScript(rawText),
+          fallbackSegmentScript(rawText, { languageCode: primaryLanguageCode }),
         );
-        lines = enforceLineLengths(fallbackNormalized);
+        lines = enforceLineLengths(fallbackNormalized, {
+          languageCode: primaryLanguageCode,
+        });
         warning = error?.message
           ? `OpenAI 拆解失敗（${error.message}），已改用原稿分段結果`
           : 'OpenAI 拆解失敗，已改用原稿分段結果';
@@ -5992,9 +6884,13 @@ io.on('connection', (socket) => {
         ? getSessionByViewerToken(viewerToken)
         : getSession(sessionId);
       if (!viewerSession || viewerSession.status === 'ended') {
-        socket.emit('viewer:expired', {
-          message: '場次不存在或已結束',
-        });
+        socket.emit(
+          'viewer:expired',
+          getPublicSessionUnavailablePayload('viewer', {
+            session: viewerSession,
+            token: viewerToken,
+          }),
+        );
         return;
       }
       socket.join(`viewer:${viewerSession.id}`);
@@ -6007,9 +6903,13 @@ io.on('connection', (socket) => {
         ? getSessionByProjectorToken(projectorToken)
         : getSession(sessionId);
       if (!projectorSession || projectorSession.status === 'ended') {
-        socket.emit('projector:expired', {
-          message: '場次不存在或已結束',
-        });
+        socket.emit(
+          'projector:expired',
+          getPublicSessionUnavailablePayload('projector', {
+            session: projectorSession,
+            token: projectorToken,
+          }),
+        );
         return;
       }
       socket.join(`projector:${projectorSession.id}`);
@@ -6249,18 +7149,44 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
+  socket.on('setProjectorDisplayMode', ({ sessionId, displayMode }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    const nextDisplayMode = normalizeProjectorDisplayMode(displayMode);
+    if (session.projectorDisplayMode === nextDisplayMode) {
+      return;
+    }
+
+    pushSessionHistory(session);
+    session.projectorDisplayMode = nextDisplayMode;
+    session.projectorRevision = normalizeProjectorRevision(
+      session.projectorRevision + 1,
+    );
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastProjectorState(sessionId);
+  });
+
   socket.on('updateProjectorLayout', ({ sessionId, layout }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
+    const previousLayout = normalizeProjectorLayout(session.projectorLayout);
     const nextLayout = normalizeProjectorLayout({
-      ...session.projectorLayout,
+      ...previousLayout,
       ...(layout && typeof layout === 'object' ? layout : {}),
     });
+    if (projectorLayoutsEqual(previousLayout, nextLayout)) {
+      return;
+    }
     session.projectorLayout = nextLayout;
+    session.projectorRevision = normalizeProjectorRevision(
+      session.projectorRevision + 1,
+    );
     persistSession(session);
     broadcastControlState(sessionId);
-    broadcastProjectorState(sessionId);
+    broadcastProjectorLayoutState(sessionId);
   });
 
   socket.on('updateLine', ({ sessionId, index, text, type, music, languageId }) => {
