@@ -6377,6 +6377,38 @@ app.post('/api/session/:sessionId/languages', requireAuth, (req, res) => {
   ensureSessionLanguages(session);
   persistSession(session);
   broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.put('/api/session/:sessionId/languages/:languageId', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const languageIndex = session.languages.findIndex(
+    (entry) => entry.id === req.params.languageId,
+  );
+  if (languageIndex === -1) {
+    return res.status(404).json({ error: '找不到語言' });
+  }
+
+  const name = sanitizeLineText(req.body?.name || '').slice(0, 40);
+  if (!name) {
+    return res.status(400).json({ error: '請輸入語言名稱' });
+  }
+
+  pushSessionHistory(session);
+  session.languages[languageIndex] = createLanguageDefinition(
+    {
+      ...session.languages[languageIndex],
+      name,
+    },
+    languageIndex,
+  );
+  ensureSessionLanguages(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
   res.json(getControlPayload(session));
 });
 
@@ -7494,7 +7526,7 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('splitLine', ({ sessionId, index, beforeText, afterText }) => {
+  socket.on('splitLine', ({ sessionId, index, beforeText, afterText, languageId }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
@@ -7511,9 +7543,56 @@ io.on('connection', (socket) => {
     const before = sanitizeLineText(beforeText);
     const after = sanitizeLineText(afterText);
     if (!before || !after) return;
-    pushSessionHistory(session);
+    const targetLanguageId = resolveSessionLanguageId(session, languageId);
 
     const existing = session.lines[index];
+    const existingTranslations = normalizeTranslationsMap(
+      existing?.translations,
+      'primary',
+      existing?.text || '',
+    );
+
+    if (targetLanguageId !== 'primary') {
+      if (index >= session.lines.length - 1) {
+        return;
+      }
+      pushSessionHistory(session);
+
+      const next = session.lines[index + 1];
+      const nextTranslations = normalizeTranslationsMap(
+        next?.translations,
+        'primary',
+        next?.text || '',
+      );
+
+      existingTranslations[targetLanguageId] = before;
+      nextTranslations[targetLanguageId] = joinTranscriptionTexts(
+        after,
+        nextTranslations[targetLanguageId] || '',
+      );
+
+      session.lines[index] = createLineRecord(
+        {
+          ...existing,
+          translations: existingTranslations,
+        },
+        'primary',
+      );
+      session.lines[index + 1] = createLineRecord(
+        {
+          ...next,
+          translations: nextTranslations,
+        },
+        'primary',
+      );
+
+      persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+      return;
+    }
+
+    pushSessionHistory(session);
     const type =
       existing && typeof existing === 'object'
         ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
@@ -7561,11 +7640,16 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('insertLineAfter', ({ sessionId, index, type }) => {
+  socket.on('insertLineAfter', ({ sessionId, index, type, languageId }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
+      return;
+    }
+
+    const targetLanguageId = resolveSessionLanguageId(session, languageId);
+    if (targetLanguageId !== 'primary') {
       return;
     }
 
@@ -7602,7 +7686,7 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('mergeLineIntoPrevious', ({ sessionId, index, currentText }) => {
+  socket.on('mergeLineIntoPrevious', ({ sessionId, index, currentText, languageId }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
@@ -7617,6 +7701,7 @@ io.on('connection', (socket) => {
     const previous = session.lines[index - 1];
     const current = session.lines[index];
     if (!previous || !current) return;
+    const targetLanguageId = resolveSessionLanguageId(session, languageId);
     pushSessionHistory(session);
 
     const previousText = sanitizeLineText(
@@ -7644,6 +7729,39 @@ io.on('connection', (socket) => {
       'primary',
       nextCurrentText,
     );
+
+    if (targetLanguageId !== 'primary') {
+      previousTranslations[targetLanguageId] = joinTranscriptionTexts(
+        previousTranslations[targetLanguageId] || '',
+        currentTranslations[targetLanguageId] || nextCurrentText,
+      );
+      currentTranslations[targetLanguageId] = '';
+
+      session.lines[index - 1] = createLineRecord(
+        {
+          ...previous,
+          translations: previousTranslations,
+        },
+        'primary',
+      );
+      session.lines[index] = createLineRecord(
+        {
+          ...current,
+          translations: currentTranslations,
+        },
+        'primary',
+      );
+
+      if (session.currentIndex === index) {
+        session.currentIndex = index - 1;
+      }
+
+      persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+      return;
+    }
+
     const mergedTranslationIds = new Set([
       ...Object.keys(blankTranslations),
       ...Object.keys(previousTranslations),

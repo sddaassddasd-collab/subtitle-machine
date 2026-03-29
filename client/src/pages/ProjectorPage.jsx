@@ -26,17 +26,17 @@ const ProjectorPage = () => {
   const [line, setLine] = useState(null)
   const [liveEntries, setLiveEntries] = useState([])
   const [liveLines, setLiveLines] = useState([])
-  const [musicActive, setMusicActive] = useState(false)
-  const [musicText, setMusicText] = useState('此處有音樂')
+  const [, setMusicActive] = useState(false)
+  const [, setMusicText] = useState('此處有音樂')
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
   const [languages, setLanguages] = useState([])
   const [projectorLanguageId, setProjectorLanguageId] = useState('primary')
   const [layout, setLayout] = useState(DEFAULT_PROJECTOR_LAYOUT)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
-  const [fatalError, setFatalError] = useState('')
-  const [connectionIssue, setConnectionIssue] = useState('')
-  const [hasLoadedState, setHasLoadedState] = useState(false)
+  const [, setFatalError] = useState('')
+  const [, setConnectionIssue] = useState('')
+  const [, setHasLoadedState] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const layoutRevisionRef = useRef(0)
@@ -337,28 +337,6 @@ const ProjectorPage = () => {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [toggleFullscreen])
 
-  if (fatalError) {
-    return (
-      <div className="projector-page">
-        <div className="no-session">
-          <h2>無法載入投影字幕</h2>
-          <p>{fatalError}</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!hasLoadedState && connectionIssue) {
-    return (
-      <div className="projector-page">
-        <div className="no-session">
-          <h2>正在重新連線</h2>
-          <p>{connectionIssue}</p>
-        </div>
-      </div>
-    )
-  }
-
   const resolvedLayout = normalizeProjectorLayout(layout)
   const projectorStyle = {
     '--projector-font-scale': Math.max(resolvedLayout.fontSizePercent, 0) / 100,
@@ -396,24 +374,6 @@ const ProjectorPage = () => {
         onClick={toggleFullscreen}
         aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
       />
-
-      {displayEnabled && musicActive && (
-        <div className="viewer-music-banner projector-music-banner" role="status" aria-live="polite">
-          <div className="viewer-music-banner-inner">
-            <span className="viewer-music-label">音樂提示</span>
-            <span className="viewer-music-text">{musicText}</span>
-          </div>
-        </div>
-      )}
-
-      {connectionIssue && hasLoadedState && (
-        <div className="viewer-music-banner projector-music-banner" role="status" aria-live="polite">
-          <div className="viewer-music-banner-inner">
-            <span className="viewer-music-label">連線狀態</span>
-            <span className="viewer-music-text">{connectionIssue}</span>
-          </div>
-        </div>
-      )}
 
       <div className="projector-stage">
         <div className="projector-subtitle-block">

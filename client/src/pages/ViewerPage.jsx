@@ -307,7 +307,7 @@ const ViewerPage = () => {
     ? isStageDirection
       ? '\u00a0'
       : resolveLineText(line, selectedLanguageId)
-    : '字幕暫停中'
+    : '\u00a0'
 
   const textClass = `viewer-text${
     displayEnabled ? '' : ' viewer-muted'
@@ -321,6 +321,8 @@ const ViewerPage = () => {
     musicActive ? ' with-music-banner' : ''
   }`
   const viewerFontScale = viewerFontPercent / 100
+  const selectedLanguageName =
+    languages.find((language) => language.id === selectedLanguageId)?.name || '語言'
 
   return (
     <div
@@ -350,14 +352,19 @@ const ViewerPage = () => {
         </div>
 
         {languages.length > 1 && (
-          <label className="viewer-toolbar-group">
-            <span>語言</span>
+          <label
+            className="viewer-language-menu"
+            title={selectedLanguageName}
+            aria-label="切換語言"
+          >
+            <span aria-hidden="true">▾</span>
             <select
               value={selectedLanguageId}
               onChange={(event) => {
                 setSelectedLanguageId(event.target.value)
                 setHasLanguageOverride(true)
               }}
+              aria-label="切換語言"
             >
               {languages.map((language) => (
                 <option key={language.id} value={language.id}>

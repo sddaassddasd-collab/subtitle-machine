@@ -471,6 +471,43 @@
   flex-wrap: wrap;
 }
 
+.script-line-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.2rem;
+}
+
+.script-line-columns.single-column {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.script-line-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.34);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.script-line-column-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.script-line-column-label small {
+  color: #94a3b8;
+  font-weight: 500;
+}
+
 .line-music-toggle {
   display: inline-flex;
   align-items: center;
@@ -518,12 +555,16 @@
 
 .script-line-text {
   min-height: 1.4rem;
-  padding: 0.2rem 0;
+  padding: 0.15rem 0;
   white-space: pre-wrap;
   word-break: normal;
   overflow-wrap: break-word;
   cursor: text;
   color: inherit;
+}
+
+.script-line-text.translation {
+  color: #e0e7ff;
 }
 
 .script-line-text.editing {
@@ -1589,12 +1630,21 @@
   border: 1px solid rgba(96, 165, 250, 0.3);
 }
 
+.language-pill-rename,
 .language-pill-delete {
   border: none;
   background: transparent;
-  color: #fda4af;
   padding: 0;
   font-size: 0.8rem;
+}
+
+.language-pill-rename {
+  color: #bfdbfe;
+}
+
+.language-pill-delete {
+  color: #fda4af;
+  padding: 0;
 }
 
 .language-parse-card {
@@ -1658,6 +1708,29 @@
   color: #a7f3d0;
 }
 
+.script-compare-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+.script-compare-select span {
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.script-compare-select select {
+  border: none;
+  background: transparent;
+  color: #f8fafc;
+  font: inherit;
+}
+
 .viewer-toolbar {
   position: absolute;
   top: 4.4rem;
@@ -1685,6 +1758,29 @@
   border: none;
   background: transparent;
   color: inherit;
+}
+
+.viewer-language-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.54);
+  color: #e2e8f0;
+  backdrop-filter: blur(8px);
+  font-size: 1.15rem;
+  line-height: 1;
+  overflow: hidden;
+}
+
+.viewer-language-menu select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .viewer-font-controls {
@@ -1753,5 +1849,9 @@
 
   .projector-link-actions {
     flex-direction: column;
+  }
+
+  .script-line-columns {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
