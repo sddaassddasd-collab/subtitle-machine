@@ -293,7 +293,7 @@ const ProjectorPage = () => {
     return Promise.reject(new Error('Exit fullscreen not supported'))
   }
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = useCallback(() => {
     const container = containerRef.current
     if (!container) return
 
@@ -308,7 +308,34 @@ const ProjectorPage = () => {
     } else {
       exitFullscreen().catch(() => {})
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const activeElement = document.activeElement
+      const editingField =
+        activeElement &&
+        (activeElement.isContentEditable ||
+          ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName))
+
+      if (
+        editingField ||
+        event.isComposing ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      ) {
+        return
+      }
+
+      if (event.key.toLowerCase() !== 'f') return
+      event.preventDefault()
+      toggleFullscreen()
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [toggleFullscreen])
 
   if (fatalError) {
     return (
