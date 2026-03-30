@@ -97,10 +97,13 @@ const authSessions = new Map();
 const viewerSessionTombstones = new Map();
 const projectorSessionTombstones = new Map();
 const projectorConnections = new Map();
+const projectorPresence = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
+const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
+const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
 const USER_ROLES = {
   ADMIN: 'admin',
@@ -123,6 +126,7 @@ const SHARED_ACCESS_PASSWORD = normalizePassword(
 );
 const SHARED_ACCESS_USER_ID = 'shared_access_user';
 const SHARED_ACCESS_USERNAME = '控制端';
+let projectorPresenceSweepTimer = null;
 const SHARED_ACCESS_COOKIE_VALUE = hashToken(
   `shared-access:${SHARED_ACCESS_PASSWORD}`,
 );
@@ -190,6 +194,7 @@ const MAX_CHUNK_LENGTH = 2500;
 const MAX_PENDING_AUDIO_CHUNKS = 400;
 const MAX_TRANSCRIPTION_DISPLAY_LINES = 8;
 const MAX_TRANSCRIPTION_CONTEXT_CHARS = 600;
+const SECONDARY_ALIGNMENT_DP_MAX_COMPLEXITY = 45000;
 const LATIN_SCRIPT_LANGUAGE_CODES = new Set([
   'ca',
   'cs',
@@ -1521,6 +1526,8 @@ function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
     io.to(`viewer:${session.id}`).emit('viewer:expired', viewerPayload);
     io.to(`projector:${session.id}`).emit('projector:expired', projectorPayload);
     rememberPublicSessionTombstones(session, 'deleted');
+    clearProjectorPresence(session.id);
+    projectorConnections.delete(session.id);
     sessions.delete(session.id);
   });
 
@@ -2774,6 +2781,94 @@ function removeProjectorConnection(sessionId, socketId) {
 
   projectorConnections.set(normalizedSessionId, connections);
   return connections.size;
+}
+
+function getProjectorPresenceLastSeenAt(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) return null;
+  const presence = projectorPresence.get(sessionId.trim());
+  if (
+    !presence ||
+    typeof presence.lastSeenAt !== 'number' ||
+    !Number.isFinite(presence.lastSeenAt)
+  ) {
+    return null;
+  }
+
+  return presence.lastSeenAt;
+}
+
+function isProjectorRecentlySeen(sessionId, now = Date.now()) {
+  const lastSeenAt = getProjectorPresenceLastSeenAt(sessionId);
+  if (!lastSeenAt) return false;
+  return now - lastSeenAt <= PROJECTOR_PRESENCE_TTL_MS;
+}
+
+function isProjectorAvailable(sessionId, now = Date.now()) {
+  return (
+    getProjectorConnectionCount(sessionId) > 0 ||
+    isProjectorRecentlySeen(sessionId, now)
+  );
+}
+
+function markProjectorPresence(sessionId, occurredAt = Date.now()) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    return { becameAvailable: false, lastSeenAt: null };
+  }
+
+  const normalizedSessionId = sessionId.trim();
+  const normalizedOccurredAt =
+    typeof occurredAt === 'number' && Number.isFinite(occurredAt)
+      ? occurredAt
+      : Date.now();
+  const wasAvailable = isProjectorAvailable(normalizedSessionId, normalizedOccurredAt);
+
+  projectorPresence.set(normalizedSessionId, {
+    lastSeenAt: normalizedOccurredAt,
+  });
+
+  return {
+    becameAvailable: !wasAvailable,
+    lastSeenAt: normalizedOccurredAt,
+  };
+}
+
+function clearProjectorPresence(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) return;
+  projectorPresence.delete(sessionId.trim());
+}
+
+function sweepProjectorPresence() {
+  const now = Date.now();
+
+  sessions.forEach((session, sessionId) => {
+    if (getProjectorConnectionCount(sessionId) > 0) {
+      return;
+    }
+
+    const lastSeenAt = getProjectorPresenceLastSeenAt(sessionId);
+    if (!lastSeenAt) {
+      return;
+    }
+
+    if (now - lastSeenAt <= PROJECTOR_PRESENCE_TTL_MS) {
+      return;
+    }
+
+    clearProjectorPresence(sessionId);
+
+    const projectorSession = getSession(sessionId);
+    if (!projectorSession) {
+      return;
+    }
+
+    setProjectorStatus(projectorSession, {
+      level: PROJECTOR_STATUS_LEVELS.WARNING,
+      code: 'disconnected',
+      message: '投影端已斷線',
+    });
+    persistSession(projectorSession);
+    broadcastControlState(sessionId);
+  });
 }
 
 function ensureSessionLanguages(session) {
@@ -5342,10 +5437,14 @@ function getPublicProjectorStatus(session) {
   const normalized = ensureSessionStructure(session);
   const status = ensureProjectorStatus(normalized);
   const connectionCount = getProjectorConnectionCount(normalized.id);
+  const lastSeenAt = getProjectorPresenceLastSeenAt(normalized.id);
+  const realtimeConnected = connectionCount > 0;
   return {
     ...status,
-    connected: connectionCount > 0,
+    connected: realtimeConnected || isProjectorRecentlySeen(normalized.id),
+    realtimeConnected,
     connectionCount,
+    lastSeenAt,
   };
 }
 
@@ -5596,27 +5695,6 @@ function getProjectorPayload(session) {
         transcription,
       };
     }
-
-    return {
-      sessionId: normalized.id,
-      projectorToken: normalized.projectorToken,
-      status: normalized.status,
-      languages: normalized.languages,
-      defaultLanguageId: normalized.projectorDefaultLanguageId,
-      line: null,
-      text: '',
-      liveEntries: [],
-      liveLines: [],
-      musicActive: false,
-      musicText: '',
-      displayEnabled: true,
-      roleColorEnabled: normalized.roleColorEnabled,
-      source: 'transcription',
-      layout: normalized.projectorLayout,
-      displayMode: projectorDisplayMode,
-      revision: normalized.projectorRevision,
-      transcription,
-    };
   }
 
   return {
@@ -5837,36 +5915,236 @@ async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
   return enforceLineLengths(combined, { languageCode, sampleText: rawText });
 }
 
-function buildSecondaryAlignmentUnits(rawText, options = {}) {
-  const profile = resolveScriptSegmentationProfile(
-    options.languageCode,
-    rawText,
+function getSecondaryAlignmentLineWeight(line) {
+  const text = sanitizeLineText(line?.text || '');
+  const baseWeight = measureSubtitleTextWidth(text);
+  const type =
+    line?.type === LINE_TYPES.DIRECTION
+      ? LINE_TYPES.DIRECTION
+      : LINE_TYPES.DIALOGUE;
+
+  if (baseWeight > 0) {
+    return type === LINE_TYPES.DIRECTION
+      ? Math.max(0.7, baseWeight * 0.9)
+      : Math.max(0.9, baseWeight);
+  }
+
+  return type === LINE_TYPES.DIRECTION ? 0.7 : 0.9;
+}
+
+function getSecondaryAlignmentUnitWeight(text) {
+  const width = measureSubtitleTextWidth(sanitizeLineText(text || ''));
+  return Math.max(width, 0.75);
+}
+
+function computeSecondaryAlignmentSegmentCost(
+  line,
+  expectedWeight,
+  assignedWeight,
+  isEmpty,
+) {
+  const type =
+    line?.type === LINE_TYPES.DIRECTION
+      ? LINE_TYPES.DIRECTION
+      : LINE_TYPES.DIALOGUE;
+  let cost = ((assignedWeight - expectedWeight) ** 2) / Math.max(1, expectedWeight);
+
+  if (isEmpty) {
+    cost += expectedWeight * (type === LINE_TYPES.DIRECTION ? 0.55 : 1.1);
+    return cost;
+  }
+
+  if (assignedWeight < expectedWeight * 0.45) {
+    cost +=
+      (expectedWeight * 0.45 - assignedWeight) *
+      (type === LINE_TYPES.DIRECTION ? 0.25 : 0.45);
+  }
+
+  if (assignedWeight > expectedWeight * 2.6) {
+    cost += (assignedWeight - expectedWeight * 2.6) * 0.12;
+  }
+
+  return cost;
+}
+
+function buildGreedySecondaryAlignmentRanges(baseLines, unitTexts) {
+  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
+  if (targetCount === 0) {
+    return [];
+  }
+
+  if (!Array.isArray(unitTexts) || unitTexts.length === 0) {
+    return Array.from({ length: targetCount }, () => ({
+      startUnit: null,
+      endUnit: null,
+    }));
+  }
+
+  const lineWeights = baseLines.map((line) =>
+    getSecondaryAlignmentLineWeight(line),
   );
-  const units = [];
+  const unitWeights = unitTexts.map((text) =>
+    getSecondaryAlignmentUnitWeight(text),
+  );
+  const totalLineWeight = lineWeights.reduce((sum, value) => sum + value, 0) || 1;
+  const unitPrefix = new Float64Array(unitWeights.length + 1);
+  const linePrefix = new Float64Array(lineWeights.length + 1);
 
-  fallbackSegmentScript(rawText, {
-    languageCode: options.languageCode,
-  }).forEach((entry) => {
-    const text = sanitizeLineText(entry?.text || '');
-    if (!text) return;
+  for (let index = 0; index < unitWeights.length; index += 1) {
+    unitPrefix[index + 1] = unitPrefix[index] + unitWeights[index];
+  }
+  for (let index = 0; index < lineWeights.length; index += 1) {
+    linePrefix[index + 1] = linePrefix[index] + lineWeights[index];
+  }
 
-    const segments =
-      measureSubtitleTextWidth(text) > profile.maxLineWidthUnits * 1.25
-        ? chunkDialogueText(text, {
-            languageCode: profile.key,
-            limit: profile.maxLineWidthUnits,
-          })
-        : [text];
+  const totalUnitWeight = unitPrefix[unitWeights.length] || 1;
+  const boundaries = new Int32Array(targetCount + 1);
+  let previousBoundary = 0;
 
-    segments.forEach((segment) => {
-      const sanitized = sanitizeLineText(segment);
-      if (sanitized) {
-        units.push(sanitized);
+  for (let lineIndex = 1; lineIndex < targetCount; lineIndex += 1) {
+    const targetWeight =
+      (totalUnitWeight * linePrefix[lineIndex]) / totalLineWeight;
+    let bestBoundary = previousBoundary;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (
+      let candidateBoundary = previousBoundary;
+      candidateBoundary <= unitWeights.length;
+      candidateBoundary += 1
+    ) {
+      let score = Math.abs(unitPrefix[candidateBoundary] - targetWeight);
+      if (candidateBoundary === previousBoundary) {
+        score += lineWeights[lineIndex - 1] * 0.35;
       }
-    });
-  });
+      if (score < bestScore) {
+        bestScore = score;
+        bestBoundary = candidateBoundary;
+      }
+    }
 
-  return units;
+    boundaries[lineIndex] = bestBoundary;
+    previousBoundary = bestBoundary;
+  }
+
+  boundaries[targetCount] = unitWeights.length;
+
+  return Array.from({ length: targetCount }, (_value, index) => {
+    const startUnit = boundaries[index];
+    const endUnitExclusive = boundaries[index + 1];
+    if (endUnitExclusive <= startUnit) {
+      return { startUnit: null, endUnit: null };
+    }
+    return {
+      startUnit,
+      endUnit: endUnitExclusive - 1,
+    };
+  });
+}
+
+function buildHeuristicSecondaryAlignmentRanges(baseLines, unitTexts) {
+  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
+  const unitCount = Array.isArray(unitTexts) ? unitTexts.length : 0;
+
+  if (targetCount === 0) {
+    return [];
+  }
+
+  if (unitCount === 0) {
+    return Array.from({ length: targetCount }, () => ({
+      startUnit: null,
+      endUnit: null,
+    }));
+  }
+
+  if (targetCount * unitCount > SECONDARY_ALIGNMENT_DP_MAX_COMPLEXITY) {
+    return buildGreedySecondaryAlignmentRanges(baseLines, unitTexts);
+  }
+
+  const lineWeights = baseLines.map((line) =>
+    getSecondaryAlignmentLineWeight(line),
+  );
+  const unitWeights = unitTexts.map((text) =>
+    getSecondaryAlignmentUnitWeight(text),
+  );
+  const totalLineWeight = lineWeights.reduce((sum, value) => sum + value, 0) || 1;
+  const unitPrefix = new Float64Array(unitCount + 1);
+
+  for (let index = 0; index < unitCount; index += 1) {
+    unitPrefix[index + 1] = unitPrefix[index] + unitWeights[index];
+  }
+
+  const totalUnitWeight = unitPrefix[unitCount] || 1;
+  let previousCosts = new Float64Array(unitCount + 1);
+  previousCosts.fill(Number.POSITIVE_INFINITY);
+  previousCosts[0] = 0;
+  const backtrack = Array.from(
+    { length: targetCount + 1 },
+    () => new Int32Array(unitCount + 1),
+  );
+
+  for (let lineIndex = 1; lineIndex <= targetCount; lineIndex += 1) {
+    const currentCosts = new Float64Array(unitCount + 1);
+    currentCosts.fill(Number.POSITIVE_INFINITY);
+    const expectedWeight =
+      (totalUnitWeight * lineWeights[lineIndex - 1]) / totalLineWeight;
+
+    for (let unitIndex = 0; unitIndex <= unitCount; unitIndex += 1) {
+      let bestCost = Number.POSITIVE_INFINITY;
+      let bestStart = 0;
+
+      for (
+        let previousUnitIndex = 0;
+        previousUnitIndex <= unitIndex;
+        previousUnitIndex += 1
+      ) {
+        const previousCost = previousCosts[previousUnitIndex];
+        if (!Number.isFinite(previousCost)) continue;
+
+        const assignedWeight =
+          unitPrefix[unitIndex] - unitPrefix[previousUnitIndex];
+        const candidateCost =
+          previousCost +
+          computeSecondaryAlignmentSegmentCost(
+            baseLines[lineIndex - 1],
+            expectedWeight,
+            assignedWeight,
+            unitIndex === previousUnitIndex,
+          );
+
+        if (candidateCost < bestCost) {
+          bestCost = candidateCost;
+          bestStart = previousUnitIndex;
+        }
+      }
+
+      currentCosts[unitIndex] = bestCost;
+      backtrack[lineIndex][unitIndex] = bestStart;
+    }
+
+    previousCosts = currentCosts;
+  }
+
+  const boundaries = new Int32Array(targetCount + 1);
+  boundaries[targetCount] = unitCount;
+  let unitIndex = unitCount;
+
+  for (let lineIndex = targetCount; lineIndex >= 1; lineIndex -= 1) {
+    const previousUnitIndex = backtrack[lineIndex][unitIndex];
+    boundaries[lineIndex - 1] = previousUnitIndex;
+    unitIndex = previousUnitIndex;
+  }
+
+  return Array.from({ length: targetCount }, (_value, index) => {
+    const startUnit = boundaries[index];
+    const endUnitExclusive = boundaries[index + 1];
+    if (endUnitExclusive <= startUnit) {
+      return { startUnit: null, endUnit: null };
+    }
+    return {
+      startUnit,
+      endUnit: endUnitExclusive - 1,
+    };
+  });
 }
 
 function joinSecondaryAlignmentUnits(unitTexts, options = {}) {
@@ -5910,8 +6188,11 @@ function inferAlignmentUnitIndexBase(entries) {
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
 
-    const unitIndexes = Array.isArray(entry.unitIndexes) ? entry.unitIndexes : [];
-    for (const value of unitIndexes) {
+    const rangeIndexes = [
+      ...(Array.isArray(entry.unitIndexes) ? entry.unitIndexes : []),
+      ...(Array.isArray(entry.lineIndexes) ? entry.lineIndexes : []),
+    ];
+    for (const value of rangeIndexes) {
       if (parseAlignmentUnitIndex(value) === 0) {
         return 0;
       }
@@ -5920,12 +6201,16 @@ function inferAlignmentUnitIndexBase(entries) {
     const indexValues = [
       entry.startUnit,
       entry.endUnit,
+      entry.startLine,
+      entry.endLine,
       entry.start,
       entry.end,
       entry.from,
       entry.to,
       entry.unitStart,
       entry.unitEnd,
+      entry.lineStart,
+      entry.lineEnd,
     ];
     for (const value of indexValues) {
       if (parseAlignmentUnitIndex(value) === 0) {
@@ -5948,7 +6233,10 @@ function normalizeAlignmentRangeEntry(entry, indexBase, rowIndex) {
     throw error;
   }
 
-  const rawUnitIndexes = Array.isArray(entry.unitIndexes) ? entry.unitIndexes : [];
+  const rawUnitIndexes = [
+    ...(Array.isArray(entry.unitIndexes) ? entry.unitIndexes : []),
+    ...(Array.isArray(entry.lineIndexes) ? entry.lineIndexes : []),
+  ];
   const unitIndexes = rawUnitIndexes
     .map((value) => parseAlignmentUnitIndex(value))
     .filter(Number.isInteger);
@@ -5958,14 +6246,14 @@ function normalizeAlignmentRangeEntry(entry, indexBase, rowIndex) {
 
   if (rawUnitIndexes.length > 0) {
     if (unitIndexes.length !== rawUnitIndexes.length) {
-      const error = new Error(`第 ${rowIndex + 1} 行 unitIndexes 格式錯誤`);
+      const error = new Error(`第 ${rowIndex + 1} 行索引格式錯誤`);
       error.code = 'INVALID_ALIGNMENT_RANGE';
       throw error;
     }
 
     for (let index = 1; index < unitIndexes.length; index += 1) {
       if (unitIndexes[index] !== unitIndexes[index - 1] + 1) {
-        const error = new Error(`第 ${rowIndex + 1} 行 unitIndexes 必須連續`);
+        const error = new Error(`第 ${rowIndex + 1} 行索引必須連續`);
         error.code = 'INVALID_ALIGNMENT_RANGE';
         throw error;
       }
@@ -5975,10 +6263,20 @@ function normalizeAlignmentRangeEntry(entry, indexBase, rowIndex) {
     endUnitRaw = unitIndexes[unitIndexes.length - 1];
   } else {
     startUnitRaw = parseAlignmentUnitIndex(
-      entry.startUnit ?? entry.start ?? entry.from ?? entry.unitStart,
+      entry.startUnit ??
+        entry.startLine ??
+        entry.start ??
+        entry.from ??
+        entry.unitStart ??
+        entry.lineStart,
     );
     endUnitRaw = parseAlignmentUnitIndex(
-      entry.endUnit ?? entry.end ?? entry.to ?? entry.unitEnd,
+      entry.endUnit ??
+        entry.endLine ??
+        entry.end ??
+        entry.to ??
+        entry.unitEnd ??
+        entry.lineEnd,
     );
   }
 
@@ -5987,7 +6285,7 @@ function normalizeAlignmentRangeEntry(entry, indexBase, rowIndex) {
   }
 
   if (!Number.isInteger(startUnitRaw) || !Number.isInteger(endUnitRaw)) {
-    const error = new Error(`第 ${rowIndex + 1} 行缺少有效的 startUnit / endUnit`);
+    const error = new Error(`第 ${rowIndex + 1} 行缺少有效的起訖範圍`);
     error.code = 'INVALID_ALIGNMENT_RANGE';
     throw error;
   }
@@ -6029,26 +6327,26 @@ function validateSecondaryAlignmentRanges(ranges, unitCount, targetCount) {
       !Number.isInteger(range.startUnit) ||
       !Number.isInteger(range.endUnit)
     ) {
-      const error = new Error(`第 ${index + 1} 行缺少有效的 unit 範圍`);
+      const error = new Error(`第 ${index + 1} 行缺少有效的對齊範圍`);
       error.code = 'INVALID_ALIGNMENT_RANGE';
       throw error;
     }
 
     if (range.startUnit < 0 || range.endUnit < range.startUnit) {
-      const error = new Error(`第 ${index + 1} 行 unit 範圍無效`);
+      const error = new Error(`第 ${index + 1} 行對齊範圍無效`);
       error.code = 'INVALID_ALIGNMENT_RANGE';
       throw error;
     }
 
     if (range.endUnit >= unitCount) {
-      const error = new Error(`第 ${index + 1} 行 unit 範圍超出上限`);
+      const error = new Error(`第 ${index + 1} 行對齊範圍超出上限`);
       error.code = 'INVALID_ALIGNMENT_RANGE';
       throw error;
     }
 
     if (range.startUnit !== nextExpectedUnit) {
       const error = new Error(
-        `第 ${index + 1} 行未依序承接 unit ${nextExpectedUnit + 1}`,
+        `第 ${index + 1} 行未依序承接項目 ${nextExpectedUnit + 1}`,
       );
       error.code = 'INVALID_ALIGNMENT_ORDER';
       throw error;
@@ -6058,7 +6356,7 @@ function validateSecondaryAlignmentRanges(ranges, unitCount, targetCount) {
   });
 
   if (nextExpectedUnit !== unitCount) {
-    const error = new Error('第二語言 units 沒有被完整覆蓋');
+    const error = new Error('目標語言內容沒有被完整覆蓋');
     error.code = 'INVALID_ALIGNMENT_COVERAGE';
     throw error;
   }
@@ -6087,35 +6385,53 @@ function buildAlignedTextsFromRanges(unitTexts, ranges, options = {}) {
   });
 }
 
-function buildFallbackAlignedTranslations(rawText, targetCount, options = {}) {
-  if (!Number.isInteger(targetCount) || targetCount <= 0) {
+function normalizeLanguageAlignmentLines(lines) {
+  if (!Array.isArray(lines)) {
     return [];
   }
 
-  const units = buildSecondaryAlignmentUnits(rawText, options);
+  return lines
+    .map((line) => ({
+      text: sanitizeLineText(line?.text || ''),
+      type:
+        line?.type === LINE_TYPES.DIRECTION
+          ? LINE_TYPES.DIRECTION
+          : LINE_TYPES.DIALOGUE,
+    }))
+    .filter((line) => line.text);
+}
 
-  if (units.length === 0) {
+function formatLanguageAlignmentPromptLine(line, index) {
+  const text = sanitizeLineText(line?.text || '');
+  const prefix =
+    line?.type === LINE_TYPES.DIRECTION ? '[舞台指示] ' : '';
+  return `${index + 1}. ${prefix}${text}`;
+}
+
+function buildFallbackAlignedTranslationsFromParsedLines(
+  baseLines,
+  parsedLines,
+  options = {},
+) {
+  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
+  if (targetCount === 0) {
+    return [];
+  }
+
+  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+  const targetTexts = normalizedParsedLines.map((line) => line.text);
+  if (targetTexts.length === 0) {
     return Array.from({ length: targetCount }, () => '');
   }
 
-  if (targetCount === 1) {
-    return [joinSecondaryAlignmentUnits(units, options)];
-  }
-
-  return Array.from({ length: targetCount }, (_value, index) => {
-    const start = Math.floor((index * units.length) / targetCount);
-    const end = Math.floor(((index + 1) * units.length) / targetCount);
-    if (end <= start) {
-      return '';
-    }
-    return joinSecondaryAlignmentUnits(units.slice(start, end), options);
-  });
+  const ranges = buildHeuristicSecondaryAlignmentRanges(baseLines, targetTexts);
+  return buildAlignedTextsFromRanges(targetTexts, ranges, options);
 }
 
-async function alignSecondaryLanguageWithOpenAI({
-  rawText,
+async function alignParsedLanguageLinesWithOpenAI({
   apiKey,
   baseLines,
+  parsedLines,
   languageName,
   languageCode,
 }) {
@@ -6124,8 +6440,9 @@ async function alignSecondaryLanguageWithOpenAI({
     return [];
   }
 
-  const unitTexts = buildSecondaryAlignmentUnits(rawText, { languageCode });
-  if (unitTexts.length === 0) {
+  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+  const targetTexts = normalizedParsedLines.map((line) => line.text);
+  if (targetTexts.length === 0) {
     return Array.from({ length: targetCount }, () => '');
   }
 
@@ -6134,39 +6451,47 @@ async function alignSecondaryLanguageWithOpenAI({
     {
       role: 'system',
       content:
-        'You align a translated theater script to an existing subtitle segmentation by assigning contiguous source-unit ranges while preserving the target language order.',
+        'You align a target-language subtitle segmentation to an existing subtitle segmentation by assigning contiguous target-line ranges while preserving order.',
     },
     {
       role: 'user',
       content: `
-請把以下目標語言 units，依照語意對齊到既有字幕分段。
+請把以下目標語言「已切好的字幕行」，依照語意對齊到既有字幕分段。
 
-規則：
+重要原則：
+1. 對齊必須以語意、事件順序、上下文承接、句意完成度、舞台指示對應為主。
+2. 不可只依照行數、字數、長度相近、標點位置或平均切分來對齊。
+3. 若目標語言某一句被切成多行，可以把多個連續目標行對齊到同一個既有字幕行。
+4. 若某一個既有字幕行在目標語言中沒有直接對應，才可輸出 null。
+5. 不可改寫、翻譯、摘要或重述內容，只做對齊。
+
+輸出規則：
 1. 一定要輸出 JSON array。
 2. array 長度一定要和既有字幕數量完全一致，共 ${targetCount} 筆。
-3. 每筆格式為 { "startUnit": 1, "endUnit": 3 }，使用 1-based 且含頭含尾。
-4. 若某一筆沒有合適內容可對應，請輸出 { "startUnit": null, "endUnit": null }。
+3. 每筆格式為 { "startLine": 1, "endLine": 3 }，使用 1-based 且含頭含尾。
+4. 若某一筆沒有合適內容可對應，請輸出 { "startLine": null, "endLine": null }。
 5. 必須依照目標語言原本順序往下分配，不可重排，不可重疊，不可跳號。
-6. 每一筆只能使用連續區間，不可挑零散 unit。
-7. 所有 unit 都必須剛好使用一次：第一個有內容的範圍必須從 unit 1 開始，最後一個有內容的範圍必須在 unit ${unitTexts.length} 結束。
-8. 只做語意對齊，不可改寫、翻譯、摘要或重述目標語言內容。
+6. 每一筆只能使用連續區間，不可挑零散 line。
+7. 所有目標語言 line 都必須剛好使用一次：第一個有內容的範圍必須從 line 1 開始，最後一個有內容的範圍必須在 line ${targetTexts.length} 結束。
 
 輸出範例：
 [
-  { "startUnit": 1, "endUnit": 2 },
-  { "startUnit": null, "endUnit": null },
-  { "startUnit": 3, "endUnit": 5 }
+  { "startLine": 1, "endLine": 2 },
+  { "startLine": null, "endLine": null },
+  { "startLine": 3, "endLine": 5 }
 ]
 
 既有字幕分段如下：
 ${baseLines
-  .map((line, index) => `${index + 1}. ${sanitizeLineText(line?.text || '')}`)
+  .map((line, index) => formatLanguageAlignmentPromptLine(line, index))
   .join('\n')}
 
-目標語言名稱：${sanitizeLineText(languageName || '第二語言')}
+目標語言名稱：${sanitizeLineText(languageName || '目標語言')}
 
-目標語言 units（共 ${unitTexts.length} 個）如下：
-${unitTexts.map((unit, index) => `${index + 1}. ${unit}`).join('\n')}
+目標語言已切好的字幕行如下：
+${normalizedParsedLines
+  .map((line, index) => formatLanguageAlignmentPromptLine(line, index))
+  .join('\n')}
       `.trim(),
     },
   ];
@@ -6180,7 +6505,7 @@ ${unitTexts.map((unit, index) => `${index + 1}. ${unit}`).join('\n')}
 
   const output = response.output_text?.trim();
   if (!output) {
-    throw new Error('未能取得對齊結果');
+    throw new Error('未能取得語意對齊結果');
   }
 
   const sanitized = output
@@ -6197,8 +6522,75 @@ ${unitTexts.map((unit, index) => `${index + 1}. ${unit}`).join('\n')}
   const ranges = parsed.map((entry, index) =>
     normalizeAlignmentRangeEntry(entry, indexBase, index),
   );
-  validateSecondaryAlignmentRanges(ranges, unitTexts.length, targetCount);
-  return buildAlignedTextsFromRanges(unitTexts, ranges, { languageCode });
+  validateSecondaryAlignmentRanges(ranges, targetTexts.length, targetCount);
+  return buildAlignedTextsFromRanges(targetTexts, ranges, { languageCode });
+}
+
+async function alignSecondaryLanguageWithOpenAI({
+  rawText,
+  apiKey,
+  baseLines,
+  languageName,
+  languageCode,
+}) {
+  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
+  if (targetCount === 0) {
+    return { alignedTexts: [], warning: '' };
+  }
+
+  const warningMessages = [];
+  let parsedLines;
+
+  try {
+    parsedLines = await parseScriptWithOpenAI(rawText, apiKey, {
+      languageCode,
+    });
+  } catch (error) {
+    console.error('Failed to parse target language script:', error);
+    if (!fallbackCodes.has(error?.code)) {
+      throw error;
+    }
+
+    const fallbackNormalized = normalizeScriptLines(
+      fallbackSegmentScript(rawText, { languageCode }),
+    );
+    parsedLines = enforceLineLengths(fallbackNormalized, {
+      languageCode,
+      sampleText: rawText,
+    });
+    warningMessages.push(
+      error?.message
+        ? `OpenAI 切段失敗（${error.message}），已改用原稿分段結果`
+        : 'OpenAI 切段失敗，已改用原稿分段結果',
+    );
+  }
+
+  let alignedTexts;
+  try {
+    alignedTexts = await alignParsedLanguageLinesWithOpenAI({
+      apiKey,
+      baseLines,
+      parsedLines,
+      languageName,
+      languageCode,
+    });
+  } catch (error) {
+    alignedTexts = buildFallbackAlignedTranslationsFromParsedLines(
+      baseLines,
+      parsedLines,
+      { languageCode },
+    );
+    warningMessages.push(
+      error?.message
+        ? `OpenAI 語意對齊失敗（${error.message}），已改用保底分配`
+        : 'OpenAI 語意對齊失敗，已改用保底分配',
+    );
+  }
+
+  return {
+    alignedTexts,
+    warning: warningMessages.join('；'),
+  };
 }
 
 function applyAlignedLanguageToLines(lines, languageId, alignedTexts) {
@@ -6614,6 +7006,10 @@ app.get('/api/projector/:projectorToken', (req, res) => {
       }),
     );
   }
+  const projectorPresenceUpdate = markProjectorPresence(session.id);
+  if (projectorPresenceUpdate.becameAvailable) {
+    broadcastControlState(session.id);
+  }
   res.json(getProjectorPayload(session));
 });
 
@@ -6891,24 +7287,15 @@ app.post(
     );
 
     try {
-      let alignedTexts;
-      let warning = '';
-      try {
-        alignedTexts = await alignSecondaryLanguageWithOpenAI({
-          rawText: normalizedRawText,
-          apiKey,
-          baseLines: cell.lines,
-          languageName: language.name,
-          languageCode: language.code,
-        });
-      } catch (error) {
-        alignedTexts = buildFallbackAlignedTranslations(
-          normalizedRawText,
-          cell.lines.length,
-          { languageCode: language.code },
-        );
-        warning = `多語對齊已改用保底分配：${error.message || 'OpenAI 對齊失敗'}`;
-      }
+      const alignmentResult = await alignSecondaryLanguageWithOpenAI({
+        rawText: normalizedRawText,
+        apiKey,
+        baseLines: cell.lines,
+        languageName: language.name,
+        languageCode: language.code,
+      });
+      const alignedTexts = alignmentResult.alignedTexts;
+      const warning = alignmentResult.warning || '';
 
       pushSessionHistory(session);
       cell.lines = applyAlignedLanguageToLines(
@@ -7469,6 +7856,7 @@ io.on('connection', (socket) => {
       socket.data.publicRole = 'projector';
       socket.data.projectorSessionId = projectorSession.id;
       addProjectorConnection(projectorSession.id, socket.id);
+      markProjectorPresence(projectorSession.id);
       setProjectorStatus(projectorSession, {
         level: PROJECTOR_STATUS_LEVELS.INFO,
         code: 'connected',
@@ -7515,6 +7903,12 @@ io.on('connection', (socket) => {
 
     if (!code && !message) return;
 
+    markProjectorPresence(
+      session.id,
+      typeof payload?.occurredAt === 'number' && Number.isFinite(payload.occurredAt)
+        ? payload.occurredAt
+        : Date.now(),
+    );
     setProjectorStatus(session, {
       level,
       code,
@@ -8307,18 +8701,21 @@ io.on('connection', (socket) => {
       const remainingConnections = removeProjectorConnection(projectorSessionId, socket.id);
       const projectorSession = getSession(projectorSessionId);
       if (projectorSession) {
-        setProjectorStatus(projectorSession, {
-          level:
-            remainingConnections > 0
-              ? PROJECTOR_STATUS_LEVELS.INFO
-              : PROJECTOR_STATUS_LEVELS.WARNING,
-          code: remainingConnections > 0 ? 'connected' : 'disconnected',
-          message:
-            remainingConnections > 0
-              ? `投影端仍有 ${remainingConnections} 個連線`
-              : '投影端已斷線',
-        });
-        persistSession(projectorSession);
+        if (remainingConnections > 0) {
+          setProjectorStatus(projectorSession, {
+            level: PROJECTOR_STATUS_LEVELS.INFO,
+            code: 'connected',
+            message: `投影端仍有 ${remainingConnections} 個連線`,
+          });
+          persistSession(projectorSession);
+        } else if (!isProjectorRecentlySeen(projectorSessionId)) {
+          setProjectorStatus(projectorSession, {
+            level: PROJECTOR_STATUS_LEVELS.WARNING,
+            code: 'disconnected',
+            message: '投影端已斷線',
+          });
+          persistSession(projectorSession);
+        }
         broadcastControlState(projectorSessionId);
       }
     }
@@ -8376,6 +8773,12 @@ if (fs.existsSync(clientDistPath)) {
 async function startServer() {
   try {
     await initializeApplicationStore();
+    if (!projectorPresenceSweepTimer) {
+      projectorPresenceSweepTimer = setInterval(
+        sweepProjectorPresence,
+        PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS,
+      );
+    }
     server.listen(PORT, () => {
       console.log(
         `Server listening on http://localhost:${PORT} using ${PERSISTENCE_BACKEND} persistence`,

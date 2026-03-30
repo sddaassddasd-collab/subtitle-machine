@@ -294,6 +294,7 @@ const ProjectorPage = () => {
           message: '投影端與伺服器連線中斷',
         })
         setConnectionIssue('與伺服器連線中斷，正在重新連線')
+        scheduleRecoveryFetch()
       }
     })
 

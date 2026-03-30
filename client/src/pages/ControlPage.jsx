@@ -2459,19 +2459,37 @@ const ControlPage = () => {
         ? '舞台指示不投影'
         : resolveLineText(currentLine, projectorDefaultLanguageId) || '尚未載入字幕'
   const projectorStatus = sessionMeta?.projectorStatus || null
-  const projectorStatusMessage = projectorStatus?.message
-    ? projectorStatus.message
-    : projectorStatus?.connected
-      ? '投影端正常'
-      : '尚未偵測到投影端連線'
-  const projectorStatusBadgeLabel = projectorStatus?.connected
-    ? projectorStatus?.connectionCount > 1
-      ? `已連線 ${projectorStatus.connectionCount}`
-      : '已連線'
-    : '未連線'
+  const projectorConnected = projectorStatus?.connected === true
+  const projectorRealtimeConnected = projectorStatus?.realtimeConnected === true
+  const projectorHealthMessage =
+    typeof projectorStatus?.message === 'string' ? projectorStatus.message.trim() : ''
+  const projectorStatusMessage = !projectorConnected
+    ? projectorHealthMessage || '尚未偵測到投影端連線'
+    : !projectorRealtimeConnected
+      ? projectorHealthMessage &&
+        projectorHealthMessage !== '投影端已斷線'
+        ? `${projectorHealthMessage}；目前即時連線已中斷，暫時改用定期同步`
+        : '投影端仍有回應，但即時連線已中斷，暫時改用定期同步'
+      : projectorHealthMessage || '投影端正常'
+  const projectorStatusBadgeLabel = !projectorConnected
+    ? '未連線'
+    : projectorRealtimeConnected
+      ? projectorStatus?.connectionCount > 1
+        ? `已連線 ${projectorStatus.connectionCount}`
+        : '已連線'
+      : '同步中'
   const projectorStatusUpdatedAtLabel = formatStatusTimestamp(
-    projectorStatus?.updatedAt,
+    projectorRealtimeConnected
+      ? projectorStatus?.updatedAt
+      : projectorStatus?.lastSeenAt || projectorStatus?.updatedAt,
   )
+  const projectorStatusLevel = !projectorConnected
+    ? projectorStatus?.level || 'warning'
+    : !projectorRealtimeConnected
+      ? projectorStatus?.level === 'error'
+        ? 'error'
+        : 'warning'
+      : projectorStatus?.level || 'idle'
   const projectorPreviewStyle = {
     '--projector-preview-scale': Math.max(projectorLayout.fontSizePercent, 0) / 100,
     '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
@@ -2943,7 +2961,7 @@ const ControlPage = () => {
                 </div>
               </div>
               <div
-                className={`projector-status-panel projector-status-${projectorStatus?.level || 'idle'}`}
+                className={`projector-status-panel projector-status-${projectorStatusLevel}`}
               >
                 <div className="projector-status-row">
                   <strong>投影端狀態</strong>
