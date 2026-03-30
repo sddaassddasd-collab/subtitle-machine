@@ -1237,6 +1237,26 @@ const ControlPage = () => {
     )
   }
 
+  const handleShiftCurrentIndex = useCallback(
+    (delta) => {
+      const normalizedDelta = Number(delta)
+      if (!Number.isFinite(normalizedDelta) || normalizedDelta === 0) return
+      if (!socketRef.current || !sessionId) return
+
+      clearPendingLineClick()
+      setEditingCell(null)
+      setCurrentIndex((prev) => {
+        const maxIndex = Math.max(lines.length - 1, 0)
+        return Math.min(Math.max(prev + normalizedDelta, 0), maxIndex)
+      })
+      socketRef.current.emit('shiftIndex', {
+        sessionId,
+        delta: normalizedDelta,
+      })
+    },
+    [clearPendingLineClick, lines.length, sessionId],
+  )
+
   useEffect(() => {
     if (!sessionId) return
 
@@ -1307,16 +1327,20 @@ const ControlPage = () => {
 
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
-        socketRef.current.emit('shiftIndex', {
-          sessionId,
-          delta: event.key === 'ArrowUp' ? -1 : 1,
-        })
+        handleShiftCurrentIndex(event.key === 'ArrowUp' ? -1 : 1)
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [sessionId, displayEnabled, historyState.canUndo, historyState.canRedo, applySessionPayload])
+  }, [
+    sessionId,
+    displayEnabled,
+    historyState.canUndo,
+    historyState.canRedo,
+    applySessionPayload,
+    handleShiftCurrentIndex,
+  ])
 
   const handleStartLiveTranscription = async () => {
     if (!socketRef.current || !sessionId) {
