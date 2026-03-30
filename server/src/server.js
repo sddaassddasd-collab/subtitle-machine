@@ -179,6 +179,7 @@ const LINE_TYPES = {
 };
 
 const MAX_LINE_WIDTH_UNITS = 20;
+const MAX_LATIN_LINE_WIDTH_UNITS = MAX_LINE_WIDTH_UNITS * 2;
 const MAX_LINE_BREAK_OVERSHOOT = 1.5;
 const FULL_WIDTH_SUBTITLE_CHAR_PATTERN =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6]/u;
@@ -489,7 +490,7 @@ const SCRIPT_SEGMENTATION_PROFILES = Object.freeze({
   latin: Object.freeze({
     key: 'latin',
     family: 'latin',
-    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS,
+    maxLineWidthUnits: MAX_LATIN_LINE_WIDTH_UNITS,
     maxLineBreakOvershoot: 3,
     avoidBoundarySuffixWords: mergeWordSets(LATIN_BASE_BOUNDARY_SUFFIX_WORDS),
     avoidBoundaryPrefixWords: mergeWordSets(LATIN_BASE_BOUNDARY_PREFIX_WORDS),
@@ -498,7 +499,7 @@ const SCRIPT_SEGMENTATION_PROFILES = Object.freeze({
   fr: Object.freeze({
     key: 'fr',
     family: 'latin',
-    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS,
+    maxLineWidthUnits: MAX_LATIN_LINE_WIDTH_UNITS,
     maxLineBreakOvershoot: 3.5,
     avoidBoundarySuffixWords: mergeWordSets(
       LATIN_BASE_BOUNDARY_SUFFIX_WORDS,
@@ -513,7 +514,7 @@ const SCRIPT_SEGMENTATION_PROFILES = Object.freeze({
   de: Object.freeze({
     key: 'de',
     family: 'latin',
-    maxLineWidthUnits: MAX_LINE_WIDTH_UNITS + 1,
+    maxLineWidthUnits: MAX_LATIN_LINE_WIDTH_UNITS,
     maxLineBreakOvershoot: 4,
     avoidBoundarySuffixWords: mergeWordSets(
       LATIN_BASE_BOUNDARY_SUFFIX_WORDS,
@@ -1557,7 +1558,7 @@ function normalizePunctuation(text, languageCode = '') {
   return text.replace(/[.,，。、]/g, ' ');
 }
 
-function normalizeSecondaryAlignmentText(text, languageCode = '') {
+function normalizeScriptPromptText(text, languageCode = '') {
   if (typeof text !== 'string') return '';
 
   const stripped = stripBom(text);
@@ -1569,6 +1570,10 @@ function normalizeSecondaryAlignmentText(text, languageCode = '') {
   }
 
   return stripped;
+}
+
+function normalizeSecondaryAlignmentText(text, languageCode = '') {
+  return normalizeScriptPromptText(text, languageCode);
 }
 
 function chunkLongUnit(unit, limit) {
@@ -6956,7 +6961,7 @@ app.post(
     }
 
     const primaryLanguageCode = session.languages?.[0]?.code || '';
-    const rawText = normalizePunctuation(stripBom(rawScriptText), primaryLanguageCode);
+    const rawText = normalizeScriptPromptText(rawScriptText, primaryLanguageCode);
 
     try {
       let lines;
@@ -6982,11 +6987,17 @@ app.post(
           : 'OpenAI 拆解失敗，已改用原稿分段結果';
       }
 
-      pushSessionHistory(session);
-      cell.lines = normalizeScriptLines(lines, {
-        keepEmpty: true,
+      const normalizedLines = normalizeScriptLines(lines, {
         primaryLanguageId: 'primary',
       });
+      if (normalizedLines.length === 0) {
+        const emptyLinesError = new Error('解析完成但沒有產生可用字幕');
+        emptyLinesError.code = 'EMPTY_PARSED_LINES';
+        throw emptyLinesError;
+      }
+
+      pushSessionHistory(session);
+      cell.lines = normalizedLines;
       session.selectedCellId = cell.id;
       session.currentIndex = 0;
       session.displayEnabled = true;
@@ -6997,6 +7008,7 @@ app.post(
 
       res.json({
         ...getControlPayload(session),
+        parsedLineCount: normalizedLines.length,
         ...(warning ? { warning } : {}),
       });
     } catch (error) {

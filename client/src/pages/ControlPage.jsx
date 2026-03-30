@@ -2065,9 +2065,21 @@ const ControlPage = () => {
           }),
         { successMessage: '第一語言字幕已更新', keepStatus: true },
       )
+      const parsedLineCount = Number.isInteger(data?.parsedLineCount)
+        ? data.parsedLineCount
+        : Array.isArray(data?.lines)
+          ? data.lines.filter(
+              (line) =>
+                typeof line?.text === 'string' && line.text.trim().length > 0,
+            ).length
+          : 0
       setStatus({
         kind: data?.warning ? 'info' : 'success',
-        message: data?.warning || '第一語言字幕已更新',
+        message:
+          data?.warning ||
+          (parsedLineCount > 0
+            ? `第一語言字幕已更新（${parsedLineCount} 行）`
+            : '第一語言字幕已更新'),
       })
       setAutoCenterEnabled(false)
     } finally {
