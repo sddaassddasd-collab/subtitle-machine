@@ -1557,6 +1557,20 @@ function normalizePunctuation(text, languageCode = '') {
   return text.replace(/[.,，。、]/g, ' ');
 }
 
+function normalizeSecondaryAlignmentText(text, languageCode = '') {
+  if (typeof text !== 'string') return '';
+
+  const stripped = stripBom(text);
+  if (!stripped) return '';
+
+  const profile = resolveScriptSegmentationProfile(languageCode, stripped);
+  if (profile.family === 'latin') {
+    return normalizePunctuation(stripped, languageCode);
+  }
+
+  return stripped;
+}
+
 function chunkLongUnit(unit, limit) {
   const chunks = [];
   let remaining = unit;
@@ -5818,23 +5832,269 @@ async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
   return enforceLineLengths(combined, { languageCode, sampleText: rawText });
 }
 
+function buildSecondaryAlignmentUnits(rawText, options = {}) {
+  const profile = resolveScriptSegmentationProfile(
+    options.languageCode,
+    rawText,
+  );
+  const units = [];
+
+  fallbackSegmentScript(rawText, {
+    languageCode: options.languageCode,
+  }).forEach((entry) => {
+    const text = sanitizeLineText(entry?.text || '');
+    if (!text) return;
+
+    const segments =
+      measureSubtitleTextWidth(text) > profile.maxLineWidthUnits * 1.25
+        ? chunkDialogueText(text, {
+            languageCode: profile.key,
+            limit: profile.maxLineWidthUnits,
+          })
+        : [text];
+
+    segments.forEach((segment) => {
+      const sanitized = sanitizeLineText(segment);
+      if (sanitized) {
+        units.push(sanitized);
+      }
+    });
+  });
+
+  return units;
+}
+
+function joinSecondaryAlignmentUnits(unitTexts, options = {}) {
+  if (!Array.isArray(unitTexts) || unitTexts.length === 0) {
+    return '';
+  }
+
+  const sanitizedUnits = unitTexts.map((unit) => sanitizeLineText(unit)).filter(Boolean);
+  if (sanitizedUnits.length === 0) {
+    return '';
+  }
+
+  const profile = resolveScriptSegmentationProfile(
+    options.languageCode,
+    sanitizedUnits.join(' '),
+  );
+  const separator = profile.family === 'latin' ? ' ' : '';
+  return sanitizeLineText(sanitizedUnits.join(separator));
+}
+
+function parseAlignmentUnitIndex(value) {
+  if (value == null) return null;
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? value : null;
+  }
+  if (typeof value !== 'string') return null;
+
+  const trimmed = value.trim();
+  if (!/^-?\d+$/u.test(trimmed)) {
+    return null;
+  }
+
+  return Number.parseInt(trimmed, 10);
+}
+
+function inferAlignmentUnitIndexBase(entries) {
+  if (!Array.isArray(entries)) {
+    return 1;
+  }
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    const unitIndexes = Array.isArray(entry.unitIndexes) ? entry.unitIndexes : [];
+    for (const value of unitIndexes) {
+      if (parseAlignmentUnitIndex(value) === 0) {
+        return 0;
+      }
+    }
+
+    const indexValues = [
+      entry.startUnit,
+      entry.endUnit,
+      entry.start,
+      entry.end,
+      entry.from,
+      entry.to,
+      entry.unitStart,
+      entry.unitEnd,
+    ];
+    for (const value of indexValues) {
+      if (parseAlignmentUnitIndex(value) === 0) {
+        return 0;
+      }
+    }
+  }
+
+  return 1;
+}
+
+function normalizeAlignmentRangeEntry(entry, indexBase, rowIndex) {
+  if (entry == null) {
+    return { startUnit: null, endUnit: null };
+  }
+
+  if (typeof entry !== 'object' || Array.isArray(entry)) {
+    const error = new Error(`第 ${rowIndex + 1} 行對齊格式錯誤`);
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
+  }
+
+  const rawUnitIndexes = Array.isArray(entry.unitIndexes) ? entry.unitIndexes : [];
+  const unitIndexes = rawUnitIndexes
+    .map((value) => parseAlignmentUnitIndex(value))
+    .filter(Number.isInteger);
+
+  let startUnitRaw = null;
+  let endUnitRaw = null;
+
+  if (rawUnitIndexes.length > 0) {
+    if (unitIndexes.length !== rawUnitIndexes.length) {
+      const error = new Error(`第 ${rowIndex + 1} 行 unitIndexes 格式錯誤`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    for (let index = 1; index < unitIndexes.length; index += 1) {
+      if (unitIndexes[index] !== unitIndexes[index - 1] + 1) {
+        const error = new Error(`第 ${rowIndex + 1} 行 unitIndexes 必須連續`);
+        error.code = 'INVALID_ALIGNMENT_RANGE';
+        throw error;
+      }
+    }
+
+    startUnitRaw = unitIndexes[0];
+    endUnitRaw = unitIndexes[unitIndexes.length - 1];
+  } else {
+    startUnitRaw = parseAlignmentUnitIndex(
+      entry.startUnit ?? entry.start ?? entry.from ?? entry.unitStart,
+    );
+    endUnitRaw = parseAlignmentUnitIndex(
+      entry.endUnit ?? entry.end ?? entry.to ?? entry.unitEnd,
+    );
+  }
+
+  if (startUnitRaw == null && endUnitRaw == null) {
+    return { startUnit: null, endUnit: null };
+  }
+
+  if (!Number.isInteger(startUnitRaw) || !Number.isInteger(endUnitRaw)) {
+    const error = new Error(`第 ${rowIndex + 1} 行缺少有效的 startUnit / endUnit`);
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
+  }
+
+  return {
+    startUnit: startUnitRaw - indexBase,
+    endUnit: endUnitRaw - indexBase,
+  };
+}
+
+function validateSecondaryAlignmentRanges(ranges, unitCount, targetCount) {
+  if (!Array.isArray(ranges)) {
+    const error = new Error('對齊結果格式錯誤');
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
+  }
+
+  if (ranges.length !== targetCount) {
+    const error = new Error('對齊筆數與主字幕不一致');
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
+  }
+
+  let nextExpectedUnit = 0;
+
+  ranges.forEach((range, index) => {
+    if (!range || typeof range !== 'object') {
+      const error = new Error(`第 ${index + 1} 行對齊格式錯誤`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    const isEmpty = range.startUnit == null && range.endUnit == null;
+    if (isEmpty) {
+      return;
+    }
+
+    if (
+      !Number.isInteger(range.startUnit) ||
+      !Number.isInteger(range.endUnit)
+    ) {
+      const error = new Error(`第 ${index + 1} 行缺少有效的 unit 範圍`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    if (range.startUnit < 0 || range.endUnit < range.startUnit) {
+      const error = new Error(`第 ${index + 1} 行 unit 範圍無效`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    if (range.endUnit >= unitCount) {
+      const error = new Error(`第 ${index + 1} 行 unit 範圍超出上限`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    if (range.startUnit !== nextExpectedUnit) {
+      const error = new Error(
+        `第 ${index + 1} 行未依序承接 unit ${nextExpectedUnit + 1}`,
+      );
+      error.code = 'INVALID_ALIGNMENT_ORDER';
+      throw error;
+    }
+
+    nextExpectedUnit = range.endUnit + 1;
+  });
+
+  if (nextExpectedUnit !== unitCount) {
+    const error = new Error('第二語言 units 沒有被完整覆蓋');
+    error.code = 'INVALID_ALIGNMENT_COVERAGE';
+    throw error;
+  }
+
+  return ranges;
+}
+
+function buildAlignedTextsFromRanges(unitTexts, ranges, options = {}) {
+  if (!Array.isArray(ranges) || ranges.length === 0) {
+    return [];
+  }
+
+  return ranges.map((range) => {
+    if (
+      !range ||
+      range.startUnit == null ||
+      range.endUnit == null
+    ) {
+      return '';
+    }
+
+    return joinSecondaryAlignmentUnits(
+      unitTexts.slice(range.startUnit, range.endUnit + 1),
+      options,
+    );
+  });
+}
+
 function buildFallbackAlignedTranslations(rawText, targetCount, options = {}) {
   if (!Number.isInteger(targetCount) || targetCount <= 0) {
     return [];
   }
 
-  const units = fallbackSegmentScript(rawText, {
-    languageCode: options.languageCode,
-  })
-    .map((entry) => sanitizeLineText(entry?.text || ''))
-    .filter(Boolean);
+  const units = buildSecondaryAlignmentUnits(rawText, options);
 
   if (units.length === 0) {
     return Array.from({ length: targetCount }, () => '');
   }
 
   if (targetCount === 1) {
-    return [units.join(' ')];
+    return [joinSecondaryAlignmentUnits(units, options)];
   }
 
   return Array.from({ length: targetCount }, (_value, index) => {
@@ -5843,7 +6103,7 @@ function buildFallbackAlignedTranslations(rawText, targetCount, options = {}) {
     if (end <= start) {
       return '';
     }
-    return units.slice(start, end).join(' ').trim();
+    return joinSecondaryAlignmentUnits(units.slice(start, end), options);
   });
 }
 
@@ -5852,10 +6112,16 @@ async function alignSecondaryLanguageWithOpenAI({
   apiKey,
   baseLines,
   languageName,
+  languageCode,
 }) {
   const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
   if (targetCount === 0) {
     return [];
+  }
+
+  const unitTexts = buildSecondaryAlignmentUnits(rawText, { languageCode });
+  if (unitTexts.length === 0) {
+    return Array.from({ length: targetCount }, () => '');
   }
 
   const client = new OpenAI({ apiKey });
@@ -5863,20 +6129,29 @@ async function alignSecondaryLanguageWithOpenAI({
     {
       role: 'system',
       content:
-        'You align a translated theater script to an existing subtitle segmentation and preserve the target language order.',
+        'You align a translated theater script to an existing subtitle segmentation by assigning contiguous source-unit ranges while preserving the target language order.',
     },
     {
       role: 'user',
       content: `
-請把以下目標語言劇本文字，對齊到既有字幕分段。
+請把以下目標語言 units，依照語意對齊到既有字幕分段。
 
 規則：
 1. 一定要輸出 JSON array。
 2. array 長度一定要和既有字幕數量完全一致，共 ${targetCount} 筆。
-3. 每筆格式為 { "text": "..." }。
-4. 必須依照目標語言原本順序往下分配，不可重排，不可跳號，不可改寫意思。
-5. 可以依據既有字幕的節奏切段，但不要把同一句目標語言打亂順序。
-6. 若某一筆沒有合適內容可對應，可輸出空字串。
+3. 每筆格式為 { "startUnit": 1, "endUnit": 3 }，使用 1-based 且含頭含尾。
+4. 若某一筆沒有合適內容可對應，請輸出 { "startUnit": null, "endUnit": null }。
+5. 必須依照目標語言原本順序往下分配，不可重排，不可重疊，不可跳號。
+6. 每一筆只能使用連續區間，不可挑零散 unit。
+7. 所有 unit 都必須剛好使用一次：第一個有內容的範圍必須從 unit 1 開始，最後一個有內容的範圍必須在 unit ${unitTexts.length} 結束。
+8. 只做語意對齊，不可改寫、翻譯、摘要或重述目標語言內容。
+
+輸出範例：
+[
+  { "startUnit": 1, "endUnit": 2 },
+  { "startUnit": null, "endUnit": null },
+  { "startUnit": 3, "endUnit": 5 }
+]
 
 既有字幕分段如下：
 ${baseLines
@@ -5885,8 +6160,8 @@ ${baseLines
 
 目標語言名稱：${sanitizeLineText(languageName || '第二語言')}
 
-目標語言全文如下：
-${rawText}
+目標語言 units（共 ${unitTexts.length} 個）如下：
+${unitTexts.map((unit, index) => `${index + 1}. ${unit}`).join('\n')}
       `.trim(),
     },
   ];
@@ -5913,12 +6188,12 @@ ${rawText}
     throw new Error('對齊結果格式錯誤');
   }
 
-  const aligned = parsed.map((entry) => sanitizeLineText(entry?.text || ''));
-  if (aligned.length !== targetCount) {
-    throw new Error('對齊筆數與主字幕不一致');
-  }
-
-  return aligned;
+  const indexBase = inferAlignmentUnitIndexBase(parsed);
+  const ranges = parsed.map((entry, index) =>
+    normalizeAlignmentRangeEntry(entry, indexBase, index),
+  );
+  validateSecondaryAlignmentRanges(ranges, unitTexts.length, targetCount);
+  return buildAlignedTextsFromRanges(unitTexts, ranges, { languageCode });
 }
 
 function applyAlignedLanguageToLines(lines, languageId, alignedTexts) {
@@ -6605,8 +6880,8 @@ app.post(
       return res.status(400).json({ error: '缺少目標語言文字內容' });
     }
 
-    const normalizedRawText = normalizePunctuation(
-      stripBom(rawScriptText),
+    const normalizedRawText = normalizeSecondaryAlignmentText(
+      rawScriptText,
       language.code,
     );
 
@@ -6619,6 +6894,7 @@ app.post(
           apiKey,
           baseLines: cell.lines,
           languageName: language.name,
+          languageCode: language.code,
         });
       } catch (error) {
         alignedTexts = buildFallbackAlignedTranslations(
