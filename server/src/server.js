@@ -183,7 +183,7 @@ const LINE_TYPES = {
 };
 
 const MAX_LINE_WIDTH_UNITS = 20;
-const MAX_LATIN_LINE_WIDTH_UNITS = MAX_LINE_WIDTH_UNITS * 2;
+const MAX_LATIN_LINE_WIDTH_UNITS = MAX_LINE_WIDTH_UNITS * 3;
 const MAX_LINE_BREAK_OVERSHOOT = 1.5;
 const FULL_WIDTH_SUBTITLE_CHAR_PATTERN =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6]/u;
@@ -2768,6 +2768,40 @@ function createBlankSessionLine(session, options = {}) {
     },
     'primary',
   );
+}
+
+function updateSessionLineLanguageText(line, languageId, text) {
+  const targetLanguageId = sanitizeLineText(languageId) || 'primary';
+  const currentPrimaryText = sanitizeLineText(line?.text || '');
+  const translations = normalizeTranslationsMap(
+    line?.translations,
+    'primary',
+    currentPrimaryText,
+  );
+  const nextText = sanitizeLineText(text);
+  translations[targetLanguageId] = nextText;
+
+  return createLineRecord(
+    {
+      ...(line && typeof line === 'object' ? line : {}),
+      text: targetLanguageId === 'primary' ? nextText : currentPrimaryText,
+      translations,
+    },
+    'primary',
+  );
+}
+
+function createBlankSessionLineLike(session, sourceLine, languageId, text = '') {
+  return createBlankSessionLine(session, {
+    type:
+      sourceLine?.type === LINE_TYPES.DIRECTION
+        ? LINE_TYPES.DIRECTION
+        : LINE_TYPES.DIALOGUE,
+    music: isLineMarkedMusic(sourceLine),
+    role: sourceLine?.role || null,
+    languageId,
+    text,
+  });
 }
 
 function normalizeProjectorStatus(rawStatus) {
@@ -8808,6 +8842,104 @@ io.on('connection', (socket) => {
         'primary',
       );
     }
+
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on(
+    'moveLanguageSuffixToNextLine',
+    ({ sessionId, index, beforeText, afterText, languageId }) => {
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) return;
+
+      if (
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= session.lines.length ||
+        typeof beforeText !== 'string' ||
+        typeof afterText !== 'string'
+      ) {
+        return;
+      }
+
+      const before = sanitizeLineText(beforeText);
+      const after = sanitizeLineText(afterText);
+      if (!before || !after) return;
+
+      const targetLanguageId = resolveSessionLanguageId(session, languageId);
+      if (targetLanguageId === 'primary') return;
+
+      const existing = session.lines[index];
+      if (!existing) return;
+
+      pushSessionHistory(session);
+      session.lines[index] = updateSessionLineLanguageText(
+        existing,
+        targetLanguageId,
+        before,
+      );
+
+      if (index + 1 < session.lines.length) {
+        const nextLine = session.lines[index + 1];
+        session.lines[index + 1] = updateSessionLineLanguageText(
+          nextLine,
+          targetLanguageId,
+          joinTranscriptionTexts(
+            after,
+            getLineLanguageText(nextLine, targetLanguageId),
+          ),
+        );
+      } else {
+        session.lines.push(
+          createBlankSessionLineLike(session, existing, targetLanguageId, after),
+        );
+      }
+
+      persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+    },
+  );
+
+  socket.on('shiftLanguageDown', ({ sessionId, index, languageId }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
+      return;
+    }
+
+    const targetLanguageId = resolveSessionLanguageId(session, languageId);
+    if (targetLanguageId === 'primary') return;
+
+    const currentLine = session.lines[index];
+    const tailSource = session.lines[session.lines.length - 1] || currentLine;
+    if (!currentLine) return;
+
+    pushSessionHistory(session);
+    session.lines.push(
+      createBlankSessionLineLike(session, tailSource, targetLanguageId, ''),
+    );
+
+    for (
+      let lineIndex = session.lines.length - 1;
+      lineIndex > index + 1;
+      lineIndex -= 1
+    ) {
+      session.lines[lineIndex] = updateSessionLineLanguageText(
+        session.lines[lineIndex],
+        targetLanguageId,
+        getLineLanguageText(session.lines[lineIndex - 1], targetLanguageId),
+      );
+    }
+
+    session.lines[index + 1] = updateSessionLineLanguageText(
+      session.lines[index + 1],
+      targetLanguageId,
+      '',
+    );
 
     persistSession(session);
     broadcastControlState(sessionId);

@@ -262,6 +262,11 @@ const getMusicRangeAroundIndex = (sourceLines, index) => {
   return { startIndex, endIndex }
 }
 
+const clampLineIndex = (index, lineCount) => {
+  if (!Number.isFinite(index) || lineCount <= 0) return 0
+  return Math.min(Math.max(Math.trunc(index), 0), lineCount - 1)
+}
+
 const normalizeEditableSegment = (text, { trim = true } = {}) => {
   const cleaned = (text ?? '')
     .replace(/\u00a0/g, ' ')
@@ -434,6 +439,18 @@ const createBlankLineRecord = (
   }
 }
 
+const createBlankLineLikeRecord = (languages, sourceLine, languageId, text = '') =>
+  createBlankLineRecord(languages, {
+    type:
+      sourceLine && typeof sourceLine === 'object' && sourceLine.type === 'direction'
+        ? 'direction'
+        : 'dialogue',
+    music: isLineMarkedMusic(sourceLine),
+    role: sourceLine?.role || null,
+    languageId,
+    text,
+  })
+
 const updateLineLanguageText = (line, languageId, nextText) => {
   const currentPrimaryText = getLineLanguageText(line, 'primary')
   const baseLine =
@@ -496,20 +513,18 @@ const applySecondaryLineSplitState = (
   const next = [...sourceLines]
   const currentLine = next[index]
   next[index] = updateLineLanguageText(next[index], languageId, beforeText)
-  next.splice(
-    index + 1,
-    0,
-    createBlankLineRecord(languages, {
-      type:
-        currentLine && typeof currentLine === 'object' && currentLine.type === 'direction'
-          ? 'direction'
-          : 'dialogue',
-      music: isLineMarkedMusic(currentLine),
-      role: currentLine?.role || null,
+
+  if (index + 1 < next.length) {
+    const nextText = getLineLanguageText(next[index + 1], languageId)
+    next[index + 1] = updateLineLanguageText(
+      next[index + 1],
       languageId,
-      text: afterText,
-    }),
-  )
+      joinLineTextFragments(afterText, nextText),
+    )
+    return next
+  }
+
+  next.push(createBlankLineLikeRecord(languages, currentLine, languageId, afterText))
   return next
 }
 
@@ -525,21 +540,18 @@ const applySecondaryLineInsertState = (sourceLines, index, languageId, languages
   }
 
   const next = [...sourceLines]
-  const currentLine = next[index]
-  next.splice(
-    index + 1,
-    0,
-    createBlankLineRecord(languages, {
-      type:
-        currentLine && typeof currentLine === 'object' && currentLine.type === 'direction'
-          ? 'direction'
-          : 'dialogue',
-      music: isLineMarkedMusic(currentLine),
-      role: currentLine?.role || null,
-      languageId,
-      text: '',
-    }),
-  )
+  const tailSource =
+    next[next.length - 1] ||
+    next[index] ||
+    createBlankLineLikeRecord(languages, null, languageId, '')
+  next.push(createBlankLineLikeRecord(languages, tailSource, languageId, ''))
+
+  for (let lineIndex = next.length - 1; lineIndex > index + 1; lineIndex -= 1) {
+    const carriedText = getLineLanguageText(next[lineIndex - 1], languageId)
+    next[lineIndex] = updateLineLanguageText(next[lineIndex], languageId, carriedText)
+  }
+
+  next[index + 1] = updateLineLanguageText(next[index + 1], languageId, '')
   return next
 }
 
@@ -644,9 +656,11 @@ const ControlPage = () => {
   const [parsingPrimary, setParsingPrimary] = useState(false)
   const [parsingLanguageId, setParsingLanguageId] = useState('')
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
+  const [editingModeEnabled, setEditingModeEnabled] = useState(false)
   const [editingCell, setEditingCell] = useState(null)
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
+  const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
@@ -826,10 +840,16 @@ const ControlPage = () => {
     (payload) => {
       const nextSession =
         payload && typeof payload.session === 'object' ? payload.session : null
-      setSessionMeta(nextSession)
-      setLines(Array.isArray(payload?.lines) ? payload.lines : [])
-      setCurrentIndex(
+      const nextLines = Array.isArray(payload?.lines) ? payload.lines : []
+      const nextLiveIndex = clampLineIndex(
         Number.isInteger(payload?.currentIndex) ? payload.currentIndex : 0,
+        nextLines.length,
+      )
+      setSessionMeta(nextSession)
+      setLines(nextLines)
+      setLiveCurrentIndex(nextLiveIndex)
+      setCurrentIndex((prev) =>
+        editingModeEnabled ? clampLineIndex(prev, nextLines.length) : nextLiveIndex,
       )
       setDisplayEnabled(
         typeof payload?.displayEnabled === 'boolean'
@@ -844,7 +864,7 @@ const ControlPage = () => {
         canRedo: payload?.history?.canRedo === true,
       })
     },
-    [applyProjectorSettingsPayload],
+    [applyProjectorSettingsPayload, editingModeEnabled],
   )
 
   const releaseMicrophoneCapture = () => {
@@ -922,6 +942,7 @@ const ControlPage = () => {
         if (!socketRef.current || !sessionId) return
         setEditingCell(null)
         socketRef.current.emit('setCurrentIndex', { sessionId, index })
+        setLiveCurrentIndex(index)
         setCurrentIndex(index)
       }, 180)
     },
@@ -1031,11 +1052,21 @@ const ControlPage = () => {
   }, [lines, editingCell])
 
   useEffect(() => {
+    setCurrentIndex((prev) => clampLineIndex(prev, lines.length))
+    setLiveCurrentIndex((prev) => clampLineIndex(prev, lines.length))
+  }, [lines.length])
+
+  useEffect(() => {
     if (!editingCell || editingCell.languageId === 'primary') return
     if (!languages.some((language) => language.id === editingCell.languageId)) {
       setEditingCell(null)
     }
   }, [editingCell, languages])
+
+  useEffect(() => {
+    if (editingModeEnabled) return
+    setCurrentIndex(liveCurrentIndex)
+  }, [editingModeEnabled, liveCurrentIndex])
 
   useEffect(() => {
     if (
@@ -1617,6 +1648,7 @@ const ControlPage = () => {
     if (!socketRef.current || !sessionId) return
     setEditingCell(null)
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
+    setLiveCurrentIndex(index)
     setCurrentIndex(index)
   }
 
@@ -1857,40 +1889,33 @@ const ControlPage = () => {
     event.preventDefault()
 
     if (languageId !== 'primary') {
-      if (!afterText) {
-        if (beforeText !== currentLanguageText) {
-          socketRef.current.emit('updateLine', {
-            sessionId,
-            index,
-            text: beforeText,
-            languageId,
-          })
-        }
-        skipBlurRef.current.add(cellKey)
-        if (node.textContent !== beforeText) {
-          node.textContent = beforeText
-        }
-        setLines((prev) =>
-          applySecondaryLineInsertState(prev, index, languageId, languages),
-        )
-        setCurrentIndex(index + 1)
-        setPendingMusicRangeStartIndex((prev) =>
-          prev != null && prev > index ? prev + 1 : prev,
-        )
-        setEditingCell({ index: index + 1, languageId })
-        setAutoCenterEnabled(true)
-        socketRef.current.emit('insertLineAfter', {
+      if (beforeText !== currentLanguageText) {
+        socketRef.current.emit('updateLine', {
           sessionId,
           index,
-          type: currentType,
+          text: beforeText,
           languageId,
         })
-        return
       }
 
       skipBlurRef.current.add(cellKey)
       if (node.textContent !== beforeText) {
         node.textContent = beforeText
+      }
+
+      if (!afterText) {
+        setLines((prev) =>
+          applySecondaryLineInsertState(prev, index, languageId, languages),
+        )
+        setCurrentIndex(index + 1)
+        setEditingCell({ index: index + 1, languageId })
+        setAutoCenterEnabled(true)
+        socketRef.current.emit('shiftLanguageDown', {
+          sessionId,
+          index,
+          languageId,
+        })
+        return
       }
 
       setLines((prev) =>
@@ -1904,12 +1929,9 @@ const ControlPage = () => {
         ),
       )
       setCurrentIndex(index + 1)
-      setPendingMusicRangeStartIndex((prev) =>
-        prev != null && prev > index ? prev + 1 : prev,
-      )
       setEditingCell({ index: index + 1, languageId })
       setAutoCenterEnabled(true)
-      socketRef.current.emit('splitLine', {
+      socketRef.current.emit('moveLanguageSuffixToNextLine', {
         sessionId,
         index,
         beforeText,
@@ -2619,7 +2641,12 @@ const ControlPage = () => {
     )
   }
 
-  const currentLine = lines[currentIndex] || null
+  const currentLine = lines[liveCurrentIndex] || null
+  const editingModeLabel = editingModeEnabled && lines.length > 0
+    ? currentIndex === liveCurrentIndex
+      ? '編輯模式已開啟，清單暫停跟隨 CUE。'
+      : `編輯模式：停留在第 ${currentIndex + 1} 行，直播 CUE 在第 ${liveCurrentIndex + 1} 行。`
+    : ''
   lineRefs.current = {}
   rowRefs.current = []
 
@@ -3357,9 +3384,12 @@ const ControlPage = () => {
             <div className="script-header-meta">
               <small>
                 {lines.length
-                  ? `目前進度：${currentIndex + 1} / ${lines.length}`
+                  ? `目前 CUE：${liveCurrentIndex + 1} / ${lines.length}`
                   : '尚未載入字幕'}
               </small>
+              {editingModeEnabled && editingModeLabel && (
+                <small className="script-edit-mode-note">{editingModeLabel}</small>
+              )}
               <small className="script-music-hint">{musicSelectionHint}</small>
             </div>
           </div>
@@ -3380,6 +3410,16 @@ const ControlPage = () => {
                   </option>
                 ))}
               </select>
+            </label>
+            <label
+              className={`script-edit-mode-toggle ${editingModeEnabled ? 'active' : ''}`}
+            >
+              <input
+                type="checkbox"
+                checked={editingModeEnabled}
+                onChange={(event) => setEditingModeEnabled(event.target.checked)}
+              />
+              <span>編輯模式</span>
             </label>
             <button type="button" className="subtle-button" onClick={handleAddLine}>
               新增字幕格
@@ -3445,7 +3485,9 @@ const ControlPage = () => {
                 }}
                 className={`script-line ${
                   currentIndex === index ? 'active' : ''
-                } ${lineType === 'direction' ? 'direction' : ''} ${
+                } ${liveCurrentIndex === index ? 'live' : ''} ${
+                  lineType === 'direction' ? 'direction' : ''
+                } ${
                   musicActive ? 'music' : ''
                 } ${musicActive && !previousMusicActive ? 'music-start' : ''} ${
                   musicActive && !nextMusicActive ? 'music-end' : ''
@@ -3472,6 +3514,9 @@ const ControlPage = () => {
                       <span className="script-line-type type-language">
                         {translatedCount} 語已對齊
                       </span>
+                    )}
+                    {liveCurrentIndex === index && (
+                      <span className="script-line-type type-live">播出中</span>
                     )}
                     {musicBoundaryLabel && (
                       <span className="script-line-type type-music">
