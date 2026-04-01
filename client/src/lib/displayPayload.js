@@ -145,15 +145,17 @@ export const resolveAvailableLanguageId = (languages, preferredLanguageId) => {
 
 export const resolveLineText = (line, languageId) => {
   if (!line) return ''
+  if (languageId === 'primary') {
+    return line.text || ''
+  }
   if (
     languageId &&
     line.translations &&
-    typeof line.translations[languageId] === 'string' &&
-    line.translations[languageId].trim().length > 0
+    typeof line.translations[languageId] === 'string'
   ) {
     return line.translations[languageId]
   }
-  return line.text || ''
+  return ''
 }
 
 export const roleToColor = (role) => {

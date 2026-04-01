@@ -2682,6 +2682,94 @@ function buildBlankTranslationsForSession(session) {
   return translations;
 }
 
+function getLineLanguageText(line, languageId = 'primary') {
+  if (!line || typeof line !== 'object') return '';
+  if (languageId === 'primary') {
+    return sanitizeLineText(line.text || '');
+  }
+  if (
+    line.translations &&
+    typeof line.translations[languageId] === 'string'
+  ) {
+    return sanitizeLineText(line.translations[languageId]);
+  }
+  return '';
+}
+
+function lineHasAnyLanguageText(line) {
+  if (!line || typeof line !== 'object') return false;
+  if (sanitizeLineText(line.text || '')) {
+    return true;
+  }
+
+  return Object.values(line.translations || {}).some(
+    (value) => typeof value === 'string' && sanitizeLineText(value),
+  );
+}
+
+function clearLineLanguageText(line, languageId) {
+  if (!line || typeof line !== 'object') {
+    return createLineRecord(
+      {
+        text: languageId === 'primary' ? '' : '',
+        type: LINE_TYPES.DIALOGUE,
+        music: false,
+        role: null,
+        translations: { primary: '', [languageId]: '' },
+      },
+      'primary',
+    );
+  }
+
+  const translations = normalizeTranslationsMap(
+    line.translations,
+    'primary',
+    line.text || '',
+  );
+  translations[languageId] = '';
+
+  return createLineRecord(
+    {
+      ...line,
+      text:
+        languageId === 'primary'
+          ? ''
+          : sanitizeLineText(line.text || ''),
+      translations,
+    },
+    'primary',
+  );
+}
+
+function createBlankSessionLine(session, options = {}) {
+  const targetLanguageId = resolveSessionLanguageId(session, options.languageId);
+  const targetText = sanitizeLineText(options.text || '');
+  const primaryText = targetLanguageId === 'primary' ? targetText : '';
+  const translations = {
+    ...buildBlankTranslationsForSession(session),
+    primary: primaryText,
+  };
+  translations[targetLanguageId] = targetText;
+
+  return createLineRecord(
+    {
+      id: options.id || generateId('line'),
+      text: primaryText,
+      type:
+        options.type === LINE_TYPES.DIRECTION
+          ? LINE_TYPES.DIRECTION
+          : LINE_TYPES.DIALOGUE,
+      music: normalizeLineMusic(options.music),
+      role:
+        options.type === LINE_TYPES.DIRECTION
+          ? null
+          : normalizeRoleName(options.role) || null,
+      translations,
+    },
+    'primary',
+  );
+}
+
 function normalizeProjectorStatus(rawStatus) {
   const source = rawStatus && typeof rawStatus === 'object' ? rawStatus : {};
   const level =
@@ -6199,6 +6287,11 @@ function inferAlignmentUnitIndexBase(entries) {
     }
 
     const indexValues = [
+      entry.existingRow,
+      entry.baseRow,
+      entry.timelineRow,
+      entry.rowIndex,
+      entry.row,
       entry.startUnit,
       entry.endUnit,
       entry.startLine,
@@ -6397,6 +6490,7 @@ function normalizeLanguageAlignmentLines(lines) {
         line?.type === LINE_TYPES.DIRECTION
           ? LINE_TYPES.DIRECTION
           : LINE_TYPES.DIALOGUE,
+      role: normalizeRoleName(line?.role ?? line?.speaker ?? line?.character),
     }))
     .filter((line) => line.text);
 }
@@ -6408,42 +6502,343 @@ function formatLanguageAlignmentPromptLine(line, index) {
   return `${index + 1}. ${prefix}${text}`;
 }
 
-function buildFallbackAlignedTranslationsFromParsedLines(
-  baseLines,
-  parsedLines,
-  options = {},
+function formatTimelineAlignmentBaseLine(
+  line,
+  index,
+  languages,
+  excludedLanguageId,
 ) {
-  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
-  if (targetCount === 0) {
+  const entries = [];
+  const languageList = Array.isArray(languages) ? languages : [];
+
+  languageList.forEach((language) => {
+    const languageId =
+      typeof language?.id === 'string' && language.id.trim()
+        ? language.id.trim()
+        : '';
+    if (!languageId || languageId === excludedLanguageId) return;
+
+    const text = getLineLanguageText(line, languageId);
+    if (!text) return;
+
+    const languageName =
+      sanitizeLineText(language?.name || languageId) || languageId;
+    entries.push(`[${languageName}] ${text}`);
+  });
+
+  const content = entries.length > 0 ? entries.join(' | ') : '[空白列]';
+  const prefix =
+    line?.type === LINE_TYPES.DIRECTION ? '[舞台指示] ' : '';
+  return `${index + 1}. ${prefix}${content}`;
+}
+
+function buildLanguageAlignmentBaseLines(lines, languages, targetLanguageId) {
+  if (!Array.isArray(lines)) {
     return [];
   }
 
-  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
-  const targetTexts = normalizedParsedLines.map((line) => line.text);
-  if (targetTexts.length === 0) {
-    return Array.from({ length: targetCount }, () => '');
+  return lines
+    .map((line) => clearLineLanguageText(line, targetLanguageId))
+    .filter((line) =>
+      Array.isArray(languages) && languages.length > 0
+        ? languages.some(
+            (language) =>
+              language?.id &&
+              language.id !== targetLanguageId &&
+              getLineLanguageText(line, language.id),
+          )
+        : lineHasAnyLanguageText(line),
+    );
+}
+
+function normalizeTimelineAlignmentPlanEntry(entry, indexBase, rowIndex) {
+  if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) {
+    const error = new Error(`第 ${rowIndex + 1} 行對齊格式錯誤`);
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
   }
 
-  const ranges = buildHeuristicSecondaryAlignmentRanges(baseLines, targetTexts);
-  return buildAlignedTextsFromRanges(targetTexts, ranges, options);
+  const existingRowRaw = parseAlignmentUnitIndex(
+    entry.existingRow ??
+      entry.baseRow ??
+      entry.timelineRow ??
+      entry.rowIndex ??
+      entry.row,
+  );
+  const targetRange = normalizeAlignmentRangeEntry(entry, indexBase, rowIndex);
+  const existingRow =
+    existingRowRaw == null ? null : existingRowRaw - indexBase;
+
+  if (existingRow == null && targetRange.startUnit == null && targetRange.endUnit == null) {
+    const error = new Error(`第 ${rowIndex + 1} 行至少要對應一側內容`);
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
+  }
+
+  return {
+    existingRow,
+    startLine: targetRange.startUnit,
+    endLine: targetRange.endUnit,
+  };
+}
+
+function validateTimelineAlignmentPlan(plan, existingCount, targetCount) {
+  if (!Array.isArray(plan)) {
+    const error = new Error('對齊結果格式錯誤');
+    error.code = 'INVALID_ALIGNMENT_RANGE';
+    throw error;
+  }
+
+  let nextExistingRow = 0;
+  let nextTargetLine = 0;
+
+  plan.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object') {
+      const error = new Error(`第 ${index + 1} 行對齊格式錯誤`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    const hasExistingRow = entry.existingRow != null;
+    const hasTargetLines = entry.startLine != null && entry.endLine != null;
+
+    if (!hasExistingRow && !hasTargetLines) {
+      const error = new Error(`第 ${index + 1} 行至少要對應一側內容`);
+      error.code = 'INVALID_ALIGNMENT_RANGE';
+      throw error;
+    }
+
+    if (hasExistingRow) {
+      if (!Number.isInteger(entry.existingRow)) {
+        const error = new Error(`第 ${index + 1} 行既有列索引無效`);
+        error.code = 'INVALID_ALIGNMENT_RANGE';
+        throw error;
+      }
+      if (entry.existingRow < 0 || entry.existingRow >= existingCount) {
+        const error = new Error(`第 ${index + 1} 行既有列索引超出上限`);
+        error.code = 'INVALID_ALIGNMENT_RANGE';
+        throw error;
+      }
+      if (entry.existingRow !== nextExistingRow) {
+        const error = new Error(
+          `第 ${index + 1} 行未依序承接既有列 ${nextExistingRow + 1}`,
+        );
+        error.code = 'INVALID_ALIGNMENT_ORDER';
+        throw error;
+      }
+      nextExistingRow += 1;
+    }
+
+    if (hasTargetLines) {
+      if (
+        !Number.isInteger(entry.startLine) ||
+        !Number.isInteger(entry.endLine)
+      ) {
+        const error = new Error(`第 ${index + 1} 行目標語言範圍無效`);
+        error.code = 'INVALID_ALIGNMENT_RANGE';
+        throw error;
+      }
+      if (entry.startLine < 0 || entry.endLine < entry.startLine) {
+        const error = new Error(`第 ${index + 1} 行目標語言範圍無效`);
+        error.code = 'INVALID_ALIGNMENT_RANGE';
+        throw error;
+      }
+      if (entry.endLine >= targetCount) {
+        const error = new Error(`第 ${index + 1} 行目標語言範圍超出上限`);
+        error.code = 'INVALID_ALIGNMENT_RANGE';
+        throw error;
+      }
+      if (entry.startLine !== nextTargetLine) {
+        const error = new Error(
+          `第 ${index + 1} 行未依序承接目標語言第 ${nextTargetLine + 1} 行`,
+        );
+        error.code = 'INVALID_ALIGNMENT_ORDER';
+        throw error;
+      }
+      nextTargetLine = entry.endLine + 1;
+    }
+  });
+
+  if (nextExistingRow !== existingCount) {
+    const error = new Error('既有字幕列沒有被完整覆蓋');
+    error.code = 'INVALID_ALIGNMENT_COVERAGE';
+    throw error;
+  }
+  if (nextTargetLine !== targetCount) {
+    const error = new Error('目標語言內容沒有被完整覆蓋');
+    error.code = 'INVALID_ALIGNMENT_COVERAGE';
+    throw error;
+  }
+
+  return plan;
+}
+
+function detectParsedLineRangeType(parsedLines, startLine, endLine) {
+  if (
+    !Array.isArray(parsedLines) ||
+    startLine == null ||
+    endLine == null ||
+    startLine < 0 ||
+    endLine < startLine
+  ) {
+    return LINE_TYPES.DIALOGUE;
+  }
+
+  const slice = parsedLines.slice(startLine, endLine + 1);
+  if (
+    slice.length > 0 &&
+    slice.every((line) => line?.type === LINE_TYPES.DIRECTION)
+  ) {
+    return LINE_TYPES.DIRECTION;
+  }
+
+  return LINE_TYPES.DIALOGUE;
+}
+
+function detectParsedLineRangeRole(parsedLines, startLine, endLine) {
+  if (
+    !Array.isArray(parsedLines) ||
+    startLine == null ||
+    endLine == null ||
+    startLine < 0 ||
+    endLine < startLine
+  ) {
+    return null;
+  }
+
+  for (const line of parsedLines.slice(startLine, endLine + 1)) {
+    const role = normalizeRoleName(line?.role);
+    if (role) {
+      return role;
+    }
+  }
+
+  return null;
+}
+
+function buildTargetOnlyAlignmentPlan(parsedLines) {
+  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+  return normalizedParsedLines.map((_line, index) => ({
+    existingRow: null,
+    startLine: index,
+    endLine: index,
+  }));
+}
+
+function buildFallbackTimelineAlignmentPlan(
+  baseLines,
+  parsedLines,
+) {
+  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+  const targetTexts = normalizedParsedLines.map((line) => line.text);
+  const existingCount = Array.isArray(baseLines) ? baseLines.length : 0;
+
+  if (existingCount === 0) {
+    return buildTargetOnlyAlignmentPlan(normalizedParsedLines);
+  }
+
+  const ranges =
+    targetTexts.length > 0
+      ? buildHeuristicSecondaryAlignmentRanges(baseLines, targetTexts)
+      : Array.from({ length: existingCount }, () => ({
+          startUnit: null,
+          endUnit: null,
+        }));
+
+  return Array.from({ length: existingCount }, (_value, index) => ({
+    existingRow: index,
+    startLine: ranges[index]?.startUnit ?? null,
+    endLine: ranges[index]?.endUnit ?? null,
+  }));
+}
+
+function buildAlignedLanguageTimelineFromPlan({
+  session,
+  baseLines,
+  parsedLines,
+  languageId,
+  languageCode,
+  plan,
+}) {
+  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+
+  return plan.map((entry) => {
+    const targetText =
+      entry.startLine == null || entry.endLine == null
+        ? ''
+        : joinSecondaryAlignmentUnits(
+            normalizedParsedLines
+              .slice(entry.startLine, entry.endLine + 1)
+              .map((line) => line.text),
+            { languageCode },
+          );
+
+    if (entry.existingRow != null) {
+      const existingLine = baseLines[entry.existingRow];
+      const translations = normalizeTranslationsMap(
+        existingLine?.translations,
+        'primary',
+        existingLine?.text || '',
+      );
+      translations[languageId] = targetText;
+
+      return createLineRecord(
+        {
+          ...existingLine,
+          text: sanitizeLineText(existingLine?.text || ''),
+          translations,
+        },
+        'primary',
+      );
+    }
+
+    const type = detectParsedLineRangeType(
+      normalizedParsedLines,
+      entry.startLine,
+      entry.endLine,
+    );
+    const role =
+      type === LINE_TYPES.DIALOGUE
+        ? detectParsedLineRangeRole(
+            normalizedParsedLines,
+            entry.startLine,
+            entry.endLine,
+          )
+        : null;
+
+    return createBlankSessionLine(session, {
+      type,
+      music: false,
+      role,
+      languageId,
+      text: targetText,
+    });
+  });
 }
 
 async function alignParsedLanguageLinesWithOpenAI({
   apiKey,
   baseLines,
   parsedLines,
+  languages,
+  targetLanguageId,
   languageName,
   languageCode,
 }) {
-  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
-  if (targetCount === 0) {
-    return [];
+  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+  const existingCount = Array.isArray(baseLines) ? baseLines.length : 0;
+  const targetCount = normalizedParsedLines.length;
+
+  if (existingCount === 0) {
+    return buildTargetOnlyAlignmentPlan(normalizedParsedLines);
   }
 
-  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
-  const targetTexts = normalizedParsedLines.map((line) => line.text);
-  if (targetTexts.length === 0) {
-    return Array.from({ length: targetCount }, () => '');
+  if (targetCount === 0) {
+    return Array.from({ length: existingCount }, (_value, index) => ({
+      existingRow: index,
+      startLine: null,
+      endLine: null,
+    }));
   }
 
   const client = new OpenAI({ apiKey });
@@ -6451,39 +6846,49 @@ async function alignParsedLanguageLinesWithOpenAI({
     {
       role: 'system',
       content:
-        'You align a target-language subtitle segmentation to an existing subtitle segmentation by assigning contiguous target-line ranges while preserving order.',
+        'You semantically align a target-language subtitle sequence to an existing multilingual subtitle timeline by producing a merged ordered plan.',
     },
     {
       role: 'user',
       content: `
-請把以下目標語言「已切好的字幕行」，依照語意對齊到既有字幕分段。
+請把以下目標語言「已切好的字幕行」，依照語意對齊到既有多語字幕時間線。
 
 重要原則：
 1. 對齊必須以語意、事件順序、上下文承接、句意完成度、舞台指示對應為主。
 2. 不可只依照行數、字數、長度相近、標點位置或平均切分來對齊。
-3. 若目標語言某一句被切成多行，可以把多個連續目標行對齊到同一個既有字幕行。
-4. 若某一個既有字幕行在目標語言中沒有直接對應，才可輸出 null。
-5. 不可改寫、翻譯、摘要或重述內容，只做對齊。
+3. 若目標語言某一句被切成多行，可以把多個連續目標行對齊到同一個既有字幕列。
+4. 若某個既有字幕列在目標語言中沒有直接對應，可以保留該列並讓目標語言為 null。
+5. 若某個目標語言片段沒有對應的既有字幕列，可以新增一列 target-only row，讓 existingRow 為 null。
+6. 不可改寫、翻譯、摘要或重述內容，只做對齊。
 
 輸出規則：
 1. 一定要輸出 JSON array。
-2. array 長度一定要和既有字幕數量完全一致，共 ${targetCount} 筆。
-3. 每筆格式為 { "startLine": 1, "endLine": 3 }，使用 1-based 且含頭含尾。
-4. 若某一筆沒有合適內容可對應，請輸出 { "startLine": null, "endLine": null }。
-5. 必須依照目標語言原本順序往下分配，不可重排，不可重疊，不可跳號。
-6. 每一筆只能使用連續區間，不可挑零散 line。
-7. 所有目標語言 line 都必須剛好使用一次：第一個有內容的範圍必須從 line 1 開始，最後一個有內容的範圍必須在 line ${targetTexts.length} 結束。
+2. 每筆格式為 { "existingRow": 1, "startLine": 1, "endLine": 3 }。
+3. existingRow 使用 1-based；若該列是只屬於目標語言的新列，existingRow 請輸出 null。
+4. startLine / endLine 使用 1-based 且含頭含尾；若該既有列在目標語言中沒有直接對應，請輸出 null。
+5. 每個既有字幕列都必須剛好出現一次，而且必須依照既有順序往下。
+6. 所有目標語言 line 都必須剛好使用一次，而且必須依照原順序往下，不可重排、不可重疊、不可跳號。
+7. 只有在語意上真的沒有對應既有列時，才可以建立 existingRow = null 的 target-only row。
+8. 不可以把語意不對的內容硬塞到長度接近的列裡。
 
 輸出範例：
 [
-  { "startLine": 1, "endLine": 2 },
-  { "startLine": null, "endLine": null },
-  { "startLine": 3, "endLine": 5 }
+  { "existingRow": 1, "startLine": 1, "endLine": 1 },
+  { "existingRow": null, "startLine": 2, "endLine": 2 },
+  { "existingRow": 2, "startLine": null, "endLine": null },
+  { "existingRow": 3, "startLine": 3, "endLine": 4 }
 ]
 
-既有字幕分段如下：
+既有多語字幕時間線如下：
 ${baseLines
-  .map((line, index) => formatLanguageAlignmentPromptLine(line, index))
+  .map((line, index) =>
+    formatTimelineAlignmentBaseLine(
+      line,
+      index,
+      languages,
+      targetLanguageId,
+    ),
+  )
   .join('\n')}
 
 目標語言名稱：${sanitizeLineText(languageName || '目標語言')}
@@ -6519,26 +6924,28 @@ ${normalizedParsedLines
   }
 
   const indexBase = inferAlignmentUnitIndexBase(parsed);
-  const ranges = parsed.map((entry, index) =>
-    normalizeAlignmentRangeEntry(entry, indexBase, index),
+  const plan = parsed.map((entry, index) =>
+    normalizeTimelineAlignmentPlanEntry(entry, indexBase, index),
   );
-  validateSecondaryAlignmentRanges(ranges, targetTexts.length, targetCount);
-  return buildAlignedTextsFromRanges(targetTexts, ranges, { languageCode });
+  validateTimelineAlignmentPlan(plan, existingCount, targetCount);
+  return plan;
 }
 
 async function alignSecondaryLanguageWithOpenAI({
+  session,
   rawText,
   apiKey,
-  baseLines,
+  timelineLines,
+  languageId,
   languageName,
   languageCode,
 }) {
-  const targetCount = Array.isArray(baseLines) ? baseLines.length : 0;
-  if (targetCount === 0) {
-    return { alignedTexts: [], warning: '' };
-  }
-
   const warningMessages = [];
+  const baseLines = buildLanguageAlignmentBaseLines(
+    timelineLines,
+    session?.languages,
+    languageId,
+  );
   let parsedLines;
 
   try {
@@ -6565,21 +6972,38 @@ async function alignSecondaryLanguageWithOpenAI({
     );
   }
 
-  let alignedTexts;
+  let mergedLines;
   try {
-    alignedTexts = await alignParsedLanguageLinesWithOpenAI({
+    const alignmentPlan = await alignParsedLanguageLinesWithOpenAI({
       apiKey,
       baseLines,
       parsedLines,
+      languages: session?.languages,
+      targetLanguageId: languageId,
       languageName,
       languageCode,
     });
-  } catch (error) {
-    alignedTexts = buildFallbackAlignedTranslationsFromParsedLines(
+    mergedLines = buildAlignedLanguageTimelineFromPlan({
+      session,
       baseLines,
       parsedLines,
-      { languageCode },
+      languageId,
+      languageCode,
+      plan: alignmentPlan,
+    });
+  } catch (error) {
+    const fallbackPlan = buildFallbackTimelineAlignmentPlan(
+      baseLines,
+      parsedLines,
     );
+    mergedLines = buildAlignedLanguageTimelineFromPlan({
+      session,
+      baseLines,
+      parsedLines,
+      languageId,
+      languageCode,
+      plan: fallbackPlan,
+    });
     warningMessages.push(
       error?.message
         ? `OpenAI 語意對齊失敗（${error.message}），已改用保底分配`
@@ -6588,29 +7012,9 @@ async function alignSecondaryLanguageWithOpenAI({
   }
 
   return {
-    alignedTexts,
+    lines: mergedLines,
     warning: warningMessages.join('；'),
   };
-}
-
-function applyAlignedLanguageToLines(lines, languageId, alignedTexts) {
-  if (!Array.isArray(lines)) {
-    return [];
-  }
-
-  return lines.map((line, index) => {
-    if (!line || typeof line !== 'object') return line;
-    const translations = normalizeTranslationsMap(
-      line.translations,
-      'primary',
-      line.text || '',
-    );
-    translations[languageId] = sanitizeLineText(alignedTexts[index] || '');
-    return {
-      ...line,
-      translations,
-    };
-  });
 }
 
 function getOwnedSessionFromRequest(req, res) {
@@ -7234,11 +7638,19 @@ app.delete('/api/session/:sessionId/languages/:languageId', requireAuth, (req, r
   session.languages.splice(languageIndex, 1);
   session.cells = session.cells.map((cell) => ({
     ...cell,
-    lines: cell.lines.map((line) => {
-      const translations = { ...(line.translations || {}) };
-      delete translations[languageId];
-      return { ...line, translations };
-    }),
+    lines: cell.lines
+      .map((line) => {
+        const translations = { ...(line.translations || {}) };
+        delete translations[languageId];
+        return createLineRecord(
+          {
+            ...line,
+            translations,
+          },
+          'primary',
+        );
+      })
+      .filter((line) => lineHasAnyLanguageText(line)),
   }));
   syncSelectedCellLines(session);
   persistSession(session);
@@ -7265,6 +7677,9 @@ app.post(
     if (!language) {
       return res.status(404).json({ error: '找不到語言' });
     }
+    if (language.id === 'primary') {
+      return res.status(400).json({ error: '第一語言請使用劇本解析功能' });
+    }
 
     if (!cell.lines.length) {
       return res.status(400).json({ error: '請先建立第一語言字幕' });
@@ -7288,21 +7703,22 @@ app.post(
 
     try {
       const alignmentResult = await alignSecondaryLanguageWithOpenAI({
+        session,
         rawText: normalizedRawText,
         apiKey,
-        baseLines: cell.lines,
+        timelineLines: cell.lines,
+        languageId: language.id,
         languageName: language.name,
         languageCode: language.code,
       });
-      const alignedTexts = alignmentResult.alignedTexts;
+      const nextLines = alignmentResult.lines;
       const warning = alignmentResult.warning || '';
 
       pushSessionHistory(session);
-      cell.lines = applyAlignedLanguageToLines(
-        cell.lines,
-        language.id,
-        alignedTexts,
-      );
+      cell.lines = normalizeScriptLines(nextLines, {
+        keepEmpty: true,
+        primaryLanguageId: 'primary',
+      });
       session.selectedCellId = cell.id;
       syncSelectedCellLines(session);
       persistSession(session);
@@ -8227,7 +8643,7 @@ io.on('connection', (socket) => {
           ? sanitized
           : sanitizeLineText(existingRaw?.text || '');
 
-      session.lines[index] = createLineRecord(
+      const nextLine = createLineRecord(
         existingRaw && typeof existingRaw === 'object'
           ? {
               ...existingRaw,
@@ -8247,6 +8663,18 @@ io.on('connection', (socket) => {
             },
         'primary',
       );
+      if (lineHasAnyLanguageText(nextLine)) {
+        session.lines[index] = nextLine;
+      } else {
+        session.lines.splice(index, 1);
+        if (session.currentIndex >= session.lines.length) {
+          session.currentIndex = Math.max(session.lines.length - 1, 0);
+        } else if (session.currentIndex > index) {
+          session.currentIndex -= 1;
+        } else if (session.currentIndex === index) {
+          session.currentIndex = Math.max(index - 1, 0);
+        }
+      }
 
       persistSession(session);
       broadcastControlState(sessionId);
@@ -8413,23 +8841,8 @@ io.on('connection', (socket) => {
     );
 
     if (targetLanguageId !== 'primary') {
-      if (index >= session.lines.length - 1) {
-        return;
-      }
       pushSessionHistory(session);
-
-      const next = session.lines[index + 1];
-      const nextTranslations = normalizeTranslationsMap(
-        next?.translations,
-        'primary',
-        next?.text || '',
-      );
-
       existingTranslations[targetLanguageId] = before;
-      nextTranslations[targetLanguageId] = joinTranscriptionTexts(
-        after,
-        nextTranslations[targetLanguageId] || '',
-      );
 
       session.lines[index] = createLineRecord(
         {
@@ -8438,13 +8851,24 @@ io.on('connection', (socket) => {
         },
         'primary',
       );
-      session.lines[index + 1] = createLineRecord(
-        {
-          ...next,
-          translations: nextTranslations,
-        },
-        'primary',
+      session.lines.splice(
+        index + 1,
+        0,
+        createBlankSessionLine(session, {
+          type:
+            existing?.type === LINE_TYPES.DIRECTION
+              ? LINE_TYPES.DIRECTION
+              : LINE_TYPES.DIALOGUE,
+          music: isLineMarkedMusic(existing),
+          role: existing?.role || null,
+          languageId: targetLanguageId,
+          text: after,
+        }),
       );
+
+      if (session.currentIndex > index) {
+        session.currentIndex += 1;
+      }
 
       persistSession(session);
       broadcastControlState(sessionId);
@@ -8509,10 +8933,6 @@ io.on('connection', (socket) => {
     }
 
     const targetLanguageId = resolveSessionLanguageId(session, languageId);
-    if (targetLanguageId !== 'primary') {
-      return;
-    }
-
     const existing = session.lines[index];
     const baseType =
       clampLineType(type) ||
@@ -8525,16 +8945,13 @@ io.on('connection', (socket) => {
     session.lines.splice(
       index + 1,
       0,
-      createLineRecord(
-        {
-          text: '',
-          type: baseType,
-          music: isLineMarkedMusic(existing),
-          role: existing?.role || null,
-          translations: buildBlankTranslationsForSession(session),
-        },
-        'primary',
-      ),
+      createBlankSessionLine(session, {
+        type: baseType,
+        music: isLineMarkedMusic(existing),
+        role: existing?.role || null,
+        languageId: targetLanguageId,
+        text: '',
+      }),
     );
 
     if (session.currentIndex > index) {
@@ -8604,15 +9021,22 @@ io.on('connection', (socket) => {
         },
         'primary',
       );
-      session.lines[index] = createLineRecord(
+      const nextCurrentLine = createLineRecord(
         {
           ...current,
           translations: currentTranslations,
         },
         'primary',
       );
+      if (lineHasAnyLanguageText(nextCurrentLine)) {
+        session.lines[index] = nextCurrentLine;
+      } else {
+        session.lines.splice(index, 1);
+      }
 
-      if (session.currentIndex === index) {
+      if (session.currentIndex > index) {
+        session.currentIndex -= 1;
+      } else if (session.currentIndex === index) {
         session.currentIndex = index - 1;
       }
 

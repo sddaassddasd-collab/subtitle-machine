@@ -402,6 +402,38 @@ const getLineLanguageText = (line, languageId = 'primary') => {
   return ''
 }
 
+const lineHasAnyLanguageText = (line) => {
+  if (!line || typeof line !== 'object') return false
+  if (typeof line.text === 'string' && line.text.trim().length > 0) {
+    return true
+  }
+
+  return Object.values(line.translations || {}).some(
+    (value) => typeof value === 'string' && value.trim().length > 0,
+  )
+}
+
+const createBlankLineRecord = (
+  languages,
+  { type = 'dialogue', music = false, role = null, languageId = 'primary', text = '' } = {},
+) => {
+  const normalizedText = typeof text === 'string' ? text : ''
+  const primaryText = languageId === 'primary' ? normalizedText : ''
+
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    text: primaryText,
+    type,
+    music,
+    role: type === 'direction' ? null : role,
+    translations: {
+      ...buildBlankTranslations(languages),
+      primary: primaryText,
+      [languageId]: normalizedText,
+    },
+  }
+}
+
 const updateLineLanguageText = (line, languageId, nextText) => {
   const currentPrimaryText = getLineLanguageText(line, 'primary')
   const baseLine =
@@ -437,11 +469,24 @@ const applyLineLanguageTextUpdate = (sourceLines, index, languageId, nextText) =
   return next
 }
 
-const applySecondaryLineSplitState = (sourceLines, index, languageId, beforeText, afterText) => {
+const shouldRemoveLineAfterLanguageUpdate = (line, languageId, nextText) => {
+  if (!line || typeof line !== 'object') return false
+  const nextLine = updateLineLanguageText(line, languageId, nextText)
+  return !lineHasAnyLanguageText(nextLine)
+}
+
+const applySecondaryLineSplitState = (
+  sourceLines,
+  index,
+  languageId,
+  beforeText,
+  afterText,
+  languages,
+) => {
   if (
     !Array.isArray(sourceLines) ||
     index < 0 ||
-    index >= sourceLines.length - 1 ||
+    index >= sourceLines.length ||
     !languageId ||
     languageId === 'primary'
   ) {
@@ -449,12 +494,51 @@ const applySecondaryLineSplitState = (sourceLines, index, languageId, beforeText
   }
 
   const next = [...sourceLines]
-  const nextLineText = getLineLanguageText(next[index + 1], languageId)
+  const currentLine = next[index]
   next[index] = updateLineLanguageText(next[index], languageId, beforeText)
-  next[index + 1] = updateLineLanguageText(
-    next[index + 1],
-    languageId,
-    joinLineTextFragments(afterText, nextLineText),
+  next.splice(
+    index + 1,
+    0,
+    createBlankLineRecord(languages, {
+      type:
+        currentLine && typeof currentLine === 'object' && currentLine.type === 'direction'
+          ? 'direction'
+          : 'dialogue',
+      music: isLineMarkedMusic(currentLine),
+      role: currentLine?.role || null,
+      languageId,
+      text: afterText,
+    }),
+  )
+  return next
+}
+
+const applySecondaryLineInsertState = (sourceLines, index, languageId, languages) => {
+  if (
+    !Array.isArray(sourceLines) ||
+    index < 0 ||
+    index >= sourceLines.length ||
+    !languageId ||
+    languageId === 'primary'
+  ) {
+    return sourceLines
+  }
+
+  const next = [...sourceLines]
+  const currentLine = next[index]
+  next.splice(
+    index + 1,
+    0,
+    createBlankLineRecord(languages, {
+      type:
+        currentLine && typeof currentLine === 'object' && currentLine.type === 'direction'
+          ? 'direction'
+          : 'dialogue',
+      music: isLineMarkedMusic(currentLine),
+      role: currentLine?.role || null,
+      languageId,
+      text: '',
+    }),
   )
   return next
 }
@@ -486,7 +570,12 @@ const applySecondaryLineMergeState = (
     languageId,
     joinLineTextFragments(previousText, currentText),
   )
-  next[index] = updateLineLanguageText(next[index], languageId, '')
+  const clearedCurrentLine = updateLineLanguageText(next[index], languageId, '')
+  if (lineHasAnyLanguageText(clearedCurrentLine)) {
+    next[index] = clearedCurrentLine
+  } else {
+    next.splice(index, 1)
+  }
   return next
 }
 
@@ -1565,6 +1654,11 @@ const ControlPage = () => {
     const currentLine = lines[index]
     const currentText = getLineLanguageText(currentLine, languageId)
     if (newText === currentText || !socketRef.current || !sessionId) return
+    const shouldRemoveLine = shouldRemoveLineAfterLanguageUpdate(
+      currentLine,
+      languageId,
+      newText,
+    )
 
     socketRef.current.emit('updateLine', {
       sessionId,
@@ -1572,7 +1666,26 @@ const ControlPage = () => {
       text: newText,
       languageId,
     })
-    setLines((prev) => applyLineLanguageTextUpdate(prev, index, languageId, newText))
+    setLines((prev) => {
+      const next = applyLineLanguageTextUpdate(prev, index, languageId, newText)
+      if (!shouldRemoveLine || index < 0 || index >= next.length) {
+        return next
+      }
+      return next.filter((_, lineIndex) => lineIndex !== index)
+    })
+    if (shouldRemoveLine) {
+      setCurrentIndex((prev) => {
+        if (prev > index) return Math.max(prev - 1, 0)
+        if (prev === index) return Math.max(index - 1, 0)
+        return prev
+      })
+      setPendingMusicRangeStartIndex((prev) => {
+        if (prev == null) return prev
+        if (prev === index) return null
+        if (prev > index) return prev - 1
+        return prev
+      })
+    }
     setStatus({ kind: 'success', message: '字幕內容已更新' })
   }
 
@@ -1742,22 +1855,6 @@ const ControlPage = () => {
     event.preventDefault()
 
     if (languageId !== 'primary') {
-      if (index >= lines.length - 1) {
-        if (normalizedFull !== currentLanguageText) {
-          socketRef.current.emit('updateLine', {
-            sessionId,
-            index,
-            text: normalizedFull,
-            languageId,
-          })
-        }
-        setStatus({
-          kind: 'info',
-          message: '非第一語言在最後一行不能再往後切分',
-        })
-        return
-      }
-
       if (!afterText) {
         if (beforeText !== currentLanguageText) {
           socketRef.current.emit('updateLine', {
@@ -1771,9 +1868,21 @@ const ControlPage = () => {
         if (node.textContent !== beforeText) {
           node.textContent = beforeText
         }
+        setLines((prev) =>
+          applySecondaryLineInsertState(prev, index, languageId, languages),
+        )
         setCurrentIndex(index + 1)
+        setPendingMusicRangeStartIndex((prev) =>
+          prev != null && prev > index ? prev + 1 : prev,
+        )
         setEditingCell({ index: index + 1, languageId })
         setAutoCenterEnabled(true)
+        socketRef.current.emit('insertLineAfter', {
+          sessionId,
+          index,
+          type: currentType,
+          languageId,
+        })
         return
       }
 
@@ -1783,9 +1892,19 @@ const ControlPage = () => {
       }
 
       setLines((prev) =>
-        applySecondaryLineSplitState(prev, index, languageId, beforeText, afterText),
+        applySecondaryLineSplitState(
+          prev,
+          index,
+          languageId,
+          beforeText,
+          afterText,
+          languages,
+        ),
       )
       setCurrentIndex(index + 1)
+      setPendingMusicRangeStartIndex((prev) =>
+        prev != null && prev > index ? prev + 1 : prev,
+      )
       setEditingCell({ index: index + 1, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('splitLine', {
@@ -1823,14 +1942,17 @@ const ControlPage = () => {
             primary: beforeText,
           },
         }
-        next.splice(index + 1, 0, {
-          id: `${Date.now()}-${index + 1}`,
-          text: '',
-          type: currentType,
-          music: currentMusic,
-          role: currentLine?.role || null,
-          translations: { primary: '' },
-        })
+        next.splice(
+          index + 1,
+          0,
+          createBlankLineRecord(languages, {
+            type: currentType,
+            music: currentMusic,
+            role: currentLine?.role || null,
+            languageId: 'primary',
+            text: '',
+          }),
+        )
         return next
       })
       setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
@@ -1863,14 +1985,17 @@ const ControlPage = () => {
           primary: beforeText,
         },
       }
-      next.splice(index + 1, 0, {
-        id: `${Date.now()}-${index + 1}`,
-        text: afterText,
-        type: currentType,
-        music: currentMusic,
-        role: currentLine?.role || null,
-        translations: { primary: afterText },
-      })
+      next.splice(
+        index + 1,
+        0,
+        createBlankLineRecord(languages, {
+          type: currentType,
+          music: currentMusic,
+          role: currentLine?.role || null,
+          languageId: 'primary',
+          text: afterText,
+        }),
+      )
       return next
     })
     setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
@@ -2481,7 +2606,9 @@ const ControlPage = () => {
       ? '\u00a0'
       : currentLine?.type === 'direction'
         ? '舞台指示不投影'
-        : resolveLineText(currentLine, projectorDefaultLanguageId) || '尚未載入字幕'
+        : currentLine
+          ? resolveLineText(currentLine, projectorDefaultLanguageId)
+          : '尚未載入字幕'
   const projectorStatus = sessionMeta?.projectorStatus || null
   const projectorConnected = projectorStatus?.connected === true
   const projectorRealtimeConnected = projectorStatus?.realtimeConnected === true
