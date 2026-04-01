@@ -651,8 +651,10 @@ const ControlPage = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
   const [viewerAliasInput, setViewerAliasInput] = useState('')
+  const [importingSessionBackup, setImportingSessionBackup] = useState(false)
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
+  const sessionBackupInputRef = useRef(null)
   const lineRefs = useRef({})
   const rowRefs = useRef([])
   const pendingLineClickTimeoutRef = useRef(null)
@@ -2186,6 +2188,50 @@ const ControlPage = () => {
     }
   }
 
+  const handleImportSessionBackup = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setImportingSessionBackup(true)
+
+    try {
+      const content = await file.text()
+      const parsed = JSON.parse(content)
+      const response = await fetch('/api/session/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(parsed),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '匯入場次備份失敗')
+      }
+
+      const nextSessionId = data?.sessionId || data?.session?.id
+      if (!nextSessionId) {
+        throw new Error('匯入完成，但無法取得場次 ID')
+      }
+
+      setStatus({
+        kind: 'success',
+        message: `場次備份已匯入：${nextSessionId}`,
+      })
+      navigate(`/control?session=${encodeURIComponent(nextSessionId)}`)
+    } catch (error) {
+      setStatus({
+        kind: 'error',
+        message: error.message || '匯入場次備份失敗',
+      })
+    } finally {
+      setImportingSessionBackup(false)
+      if (sessionBackupInputRef.current) {
+        sessionBackupInputRef.current.value = ''
+      }
+    }
+  }
+
   const handleParsePrimaryScript = async (event) => {
     event.preventDefault()
     if (!sessionId || !selectedCellId) return
@@ -2980,12 +3026,26 @@ const ControlPage = () => {
             <div className="input-group">
               <label>場次備份 JSON</label>
               <div className="json-actions">
+                <button
+                  type="button"
+                  onClick={() => sessionBackupInputRef.current?.click()}
+                  disabled={importingSessionBackup}
+                >
+                  {importingSessionBackup ? '匯入中…' : '匯入場次備份 JSON'}
+                </button>
                 <button type="button" onClick={handleExportSessionBackup}>
                   匯出場次備份 JSON
                 </button>
+                <input
+                  ref={sessionBackupInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={handleImportSessionBackup}
+                />
               </div>
               <span className="input-note">
-                會匯出整個場次的語言、所有儲存格、字幕內容、投影設定與原本場次 ID，可到首頁再匯入還原。
+                可直接在控制端匯入或匯出整個場次的語言、所有儲存格、字幕內容、投影設定與原本場次 ID。
               </span>
             </div>
 
