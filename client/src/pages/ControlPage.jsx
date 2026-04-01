@@ -19,6 +19,7 @@ const storageKeys = {
 
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
 const PRIMARY_ONLY_OPTION_ID = '__primary_only__'
+const NEW_ROLE_OPTION_ID = '__new_role__'
 const ALLOWED_TRANSCRIPTION_MODELS = new Set([
   'gpt-4o-transcribe',
   'gpt-4o-transcribe-latest',
@@ -275,6 +276,13 @@ const normalizeEditableSegment = (text, { trim = true } = {}) => {
   return trim ? cleaned.trim() : cleaned
 }
 
+const normalizeRoleInput = (text) => {
+  const normalized = normalizeEditableSegment(text)
+    .replace(/[：:]$/u, '')
+    .trim()
+  return normalized ? normalized.slice(0, 48) : ''
+}
+
 const getCollapsedLineSelectionContext = (node) => {
   if (!node || !window.getSelection) return null
   const selection = window.getSelection()
@@ -477,6 +485,29 @@ const updateLineLanguageText = (line, languageId, nextText) => {
   }
 }
 
+const updateLineRole = (line, nextRole) => {
+  if (!line || typeof line !== 'object') return line
+  if (line.type === 'direction') {
+    return { ...line, role: null }
+  }
+
+  const normalizedRole = normalizeRoleInput(nextRole)
+  return {
+    ...line,
+    role: normalizedRole || null,
+  }
+}
+
+const applyLineRoleUpdate = (sourceLines, index, nextRole) => {
+  if (!Array.isArray(sourceLines) || index < 0 || index >= sourceLines.length) {
+    return sourceLines
+  }
+
+  const next = [...sourceLines]
+  next[index] = updateLineRole(next[index], nextRole)
+  return next
+}
+
 const applyLineLanguageTextUpdate = (sourceLines, index, languageId, nextText) => {
   if (!Array.isArray(sourceLines) || index < 0 || index >= sourceLines.length) {
     return sourceLines
@@ -658,6 +689,7 @@ const ControlPage = () => {
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
   const [editingCell, setEditingCell] = useState(null)
+  const [roleEditor, setRoleEditor] = useState(null)
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
@@ -727,6 +759,17 @@ const ControlPage = () => {
   const projectorDefaultLanguageId =
     sessionMeta?.projectorDefaultLanguageId || languages[0]?.id || 'primary'
   const musicEffectEnabled = sessionMeta?.musicEffectEnabled !== false
+  const existingRoleOptions = useMemo(() => {
+    const roles = new Set()
+    lines.forEach((line) => {
+      if (!line || typeof line !== 'object' || line.type === 'direction') return
+      const role = normalizeRoleInput(line.role)
+      if (role) {
+        roles.add(role)
+      }
+    })
+    return Array.from(roles).sort((left, right) => left.localeCompare(right, 'zh-Hant'))
+  }, [lines])
 
   const setDraftInputValue = (cellId, languageId, value) => {
     if (!cellId || !languageId) return
@@ -1064,6 +1107,18 @@ const ControlPage = () => {
   }, [editingCell, languages])
 
   useEffect(() => {
+    if (!roleEditor) return
+    if (roleEditor.index < 0 || roleEditor.index >= lines.length) {
+      setRoleEditor(null)
+      return
+    }
+    const targetLine = lines[roleEditor.index]
+    if (!targetLine || targetLine.type === 'direction') {
+      setRoleEditor(null)
+    }
+  }, [lines, roleEditor])
+
+  useEffect(() => {
     if (editingModeEnabled) return
     setCurrentIndex(liveCurrentIndex)
   }, [editingModeEnabled, liveCurrentIndex])
@@ -1219,7 +1274,7 @@ const ControlPage = () => {
       const response = await request()
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '操作失敗')
+        throw new Error(data.details || data.error || '操作失敗')
       }
       if (data && typeof data === 'object' && data.session) {
         applySessionPayload(data)
@@ -1647,9 +1702,109 @@ const ControlPage = () => {
     clearPendingLineClick()
     if (!socketRef.current || !sessionId) return
     setEditingCell(null)
+    setRoleEditor(null)
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
     setLiveCurrentIndex(index)
     setCurrentIndex(index)
+  }
+
+  const handleOpenRoleEditor = (event, index) => {
+    event.stopPropagation()
+    clearPendingLineClick()
+    setEditingCell(null)
+    const currentRole = normalizeRoleInput(lines[index]?.role)
+    const shouldUseCustomOption =
+      Boolean(currentRole) && !existingRoleOptions.includes(currentRole)
+    setRoleEditor({
+      index,
+      selection: currentRole
+        ? shouldUseCustomOption
+          ? NEW_ROLE_OPTION_ID
+          : currentRole
+        : '',
+      customRole: shouldUseCustomOption ? currentRole : '',
+    })
+  }
+
+  const handleRoleEditorSelectionChange = (event) => {
+    const nextSelection = event.target.value
+    setRoleEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            selection: nextSelection,
+          }
+        : prev,
+    )
+  }
+
+  const handleRoleEditorCustomRoleChange = (event) => {
+    const nextRole = event.target.value
+    setRoleEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            customRole: nextRole,
+          }
+        : prev,
+    )
+  }
+
+  const handleCloseRoleEditor = (event) => {
+    event?.stopPropagation?.()
+    setRoleEditor(null)
+  }
+
+  const handleSaveLineRole = (event, index) => {
+    event?.stopPropagation?.()
+    if (!socketRef.current || !sessionId) return
+    if (!roleEditor || roleEditor.index !== index) return
+
+    const line = lines[index]
+    if (!line || line.type === 'direction') {
+      setRoleEditor(null)
+      return
+    }
+
+    const nextRole =
+      roleEditor.selection === NEW_ROLE_OPTION_ID
+        ? normalizeRoleInput(roleEditor.customRole)
+        : normalizeRoleInput(roleEditor.selection)
+    if (roleEditor.selection === NEW_ROLE_OPTION_ID && !nextRole) {
+      setStatus({ kind: 'error', message: '請輸入新角色名稱' })
+      return
+    }
+
+    const currentRole = normalizeRoleInput(line.role)
+    if (currentRole === nextRole) {
+      setRoleEditor(null)
+      return
+    }
+
+    setLines((prev) => applyLineRoleUpdate(prev, index, nextRole))
+    socketRef.current.emit('setLineRole', {
+      sessionId,
+      index,
+      role: nextRole,
+    })
+    setRoleEditor(null)
+    setStatus({
+      kind: 'success',
+      message: nextRole ? `已設定角色：${nextRole}` : '已清除角色',
+    })
+  }
+
+  const handleRoleEditorKeyDown = (event, index) => {
+    event.stopPropagation()
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setRoleEditor(null)
+      return
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      handleSaveLineRole(event, index)
+    }
   }
 
   const handleLineTextClick = (event, index, languageId) => {
@@ -1661,12 +1816,14 @@ const ControlPage = () => {
     ) {
       return
     }
+    setRoleEditor(null)
     queueLineSelection(index)
   }
 
   const handleLineTextDoubleClick = (event, index, languageId) => {
     event.stopPropagation()
     clearPendingLineClick()
+    setRoleEditor(null)
     setEditingCell({ index, languageId })
   }
 
@@ -2061,6 +2218,7 @@ const ControlPage = () => {
       if (prev > index) return prev - 1
       return prev
     })
+    setRoleEditor(null)
     socketRef.current.emit('deleteLine', { sessionId, index })
     setStatus({ kind: 'info', message: '字幕已刪除' })
   }
@@ -2085,6 +2243,7 @@ const ControlPage = () => {
 
     const nextIndex = lines.length
     const draftLine = createDraftLine(lines[nextIndex - 1] || null)
+    setRoleEditor(null)
 
     if (nextIndex === 0 || !socketRef.current?.connected) {
       try {
@@ -3545,9 +3704,20 @@ const ControlPage = () => {
                       onClick={(lineEvent) =>
                         handleToggleLineType(lineEvent, index)
                       }
-                    >
-                      {lineType === 'direction' ? '改成台詞' : '改成舞台'}
-                    </button>
+                      >
+                        {lineType === 'direction' ? '改成台詞' : '改成舞台'}
+                      </button>
+                    {lineType !== 'direction' && (
+                      <button
+                        type="button"
+                        className="line-action role"
+                        onClick={(lineEvent) =>
+                          handleOpenRoleEditor(lineEvent, index)
+                        }
+                      >
+                        {line.role ? '改角色' : '設定角色'}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="line-action delete"
@@ -3609,6 +3779,57 @@ const ControlPage = () => {
                     )
                   })}
                 </div>
+                {lineType !== 'direction' && roleEditor?.index === index && (
+                  <div
+                    className="script-line-role-editor"
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => handleRoleEditorKeyDown(event, index)}
+                  >
+                    <label className="script-line-role-field">
+                      <span>角色</span>
+                      <select
+                        value={roleEditor.selection}
+                        onChange={handleRoleEditorSelectionChange}
+                      >
+                        <option value="">無角色</option>
+                        {existingRoleOptions.map((roleName) => (
+                          <option key={roleName} value={roleName}>
+                            {roleName}
+                          </option>
+                        ))}
+                        <option value={NEW_ROLE_OPTION_ID}>新增角色…</option>
+                      </select>
+                    </label>
+                    {roleEditor.selection === NEW_ROLE_OPTION_ID && (
+                      <label className="script-line-role-field">
+                        <span>新角色名</span>
+                        <input
+                          type="text"
+                          value={roleEditor.customRole}
+                          onChange={handleRoleEditorCustomRoleChange}
+                          placeholder="輸入角色名"
+                          maxLength={48}
+                        />
+                      </label>
+                    )}
+                    <div className="script-line-role-actions">
+                      <button
+                        type="button"
+                        className="line-action role-save"
+                        onClick={(event) => handleSaveLineRole(event, index)}
+                      >
+                        儲存角色
+                      </button>
+                      <button
+                        type="button"
+                        className="line-action role-cancel"
+                        onClick={handleCloseRoleEditor}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           })}

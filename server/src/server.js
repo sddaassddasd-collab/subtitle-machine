@@ -554,6 +554,9 @@ const MIN_COMMIT_AUDIO_MS = Number.isFinite(parsedMinCommitAudioMs)
   : 400;
 const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
+const SECONDARY_ALIGNMENT_MODEL =
+  process.env.SECONDARY_ALIGNMENT_MODEL || 'gpt-4o';
+const SECONDARY_ALIGNMENT_PARSE_LIMIT_MULTIPLIER = 3;
 const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
 const DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED =
@@ -3556,6 +3559,9 @@ function sanitizeModelLines(parsed, sourceText, options = {}) {
   const cleaned = enforceLineLengths(normalized, {
     languageCode: options.languageCode,
     sampleText: sourceText,
+    ...(Number.isFinite(options.lineLimit)
+      ? { limit: Math.max(1, options.lineLimit) }
+      : {}),
   });
 
   if (cleaned.length === 0) {
@@ -3604,16 +3610,23 @@ async function parseChunk({
   chunkIndex,
   totalChunks,
   languageCode = '',
+  mode = 'subtitle',
+  lineLimit = null,
 }) {
   const profile = resolveScriptSegmentationProfile(languageCode, chunkText);
-  const lineWidthUnits = profile.maxLineWidthUnits;
+  const lineWidthUnits = Number.isFinite(lineLimit)
+    ? Math.max(1, Math.trunc(lineLimit))
+    : profile.maxLineWidthUnits;
   const languagePrompt =
     normalizeLanguageCode(languageCode) || profile.key || 'auto';
+  const isAlignmentMode = mode === 'alignment';
   const prompt = [
     {
       role: 'system',
       content:
-        'You split theater scripts into concise subtitle lines for live performances.',
+        isAlignmentMode
+          ? 'You segment theater scripts into ordered semantic units for multilingual alignment.'
+          : 'You split theater scripts into concise subtitle lines for live performances.',
     },
     {
       role: 'user',
@@ -3624,7 +3637,7 @@ async function parseChunk({
 請保持原始順序與文字，不新增或刪除任何內容，也不要重複前面處理過的段落。
 如果能明確辨識台詞說話角色，請填入 role；若無法確定就填 null。
 若原文是「角色：台詞」，請把角色放進 role，text 只保留實際台詞。
-若文字過長，請以保留語意為優先切段。
+${isAlignmentMode ? '你現在切的是多語對齊用的語意單位，不是最終字幕行。請盡量保留完整句意，不要為了字幕長度過度切碎。只有在角色切換、舞台指示獨立、句意完成、段落轉換或強標點斷點時才切開。' : '若文字過長，請以保留語意為優先切段。'}
 劇本語言代碼（若可判斷）：${languagePrompt}
 每段請控制在不超過 ${lineWidthUnits} 個全形字寬單位：
 - 中文、日文、韓文與全形標點大約算 1 單位
@@ -3665,7 +3678,74 @@ ${chunkText}
     throw error;
   }
 
-  return sanitizeModelLines(parsed, chunkText, { languageCode });
+  return sanitizeModelLines(parsed, chunkText, {
+    languageCode,
+    lineLimit: lineWidthUnits,
+  });
+}
+
+function getSecondaryAlignmentParseLimit(languageCode = '', sampleText = '') {
+  const profile = resolveScriptSegmentationProfile(languageCode, sampleText);
+  return Math.max(
+    Math.round(profile.maxLineWidthUnits * SECONDARY_ALIGNMENT_PARSE_LIMIT_MULTIPLIER),
+    profile.family === 'latin' ? 72 : 30,
+  );
+}
+
+async function parseAlignmentScriptWithOpenAI(rawText, apiKey, options = {}) {
+  const languageCode =
+    typeof options.languageCode === 'string' ? options.languageCode : '';
+  const client = new OpenAI({ apiKey });
+  const chunks = chunkScript(rawText, MAX_CHUNK_LENGTH, { languageCode });
+  const combined = [];
+  const lineLimit = getSecondaryAlignmentParseLimit(languageCode, rawText);
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunkText = chunks[index];
+
+    try {
+      const parsedLines = await parseChunk({
+        client,
+        chunkText,
+        chunkIndex: index,
+        totalChunks: chunks.length,
+        languageCode,
+        mode: 'alignment',
+        lineLimit,
+      });
+      combined.push(...parsedLines);
+    } catch (error) {
+      if (fallbackCodes.has(error?.code)) {
+        console.warn(
+          `Alignment chunk ${index + 1}/${chunks.length} failed validation, using fallback.`,
+          error,
+        );
+        combined.push(
+          ...normalizeScriptLines(
+            fallbackSegmentScript(chunkText, { languageCode }),
+          ),
+        );
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  if (combined.length === 0) {
+    const error = new Error('OpenAI 未產生可對齊的語意單位');
+    error.code = 'EMPTY_OUTPUT';
+    throw error;
+  }
+
+  const normalized = normalizeScriptLines(combined);
+  if (normalized.length === 0) {
+    const error = new Error('OpenAI 未產生可對齊的語意單位');
+    error.code = 'EMPTY_OUTPUT';
+    throw error;
+  }
+
+  return normalized;
 }
 
 function sanitizeTranscriptionText(text) {
@@ -6529,60 +6609,128 @@ function normalizeLanguageAlignmentLines(lines) {
     .filter((line) => line.text);
 }
 
+function formatAlignmentContextPrefix(line) {
+  const tags = [];
+  const type =
+    line?.type === LINE_TYPES.DIRECTION
+      ? LINE_TYPES.DIRECTION
+      : LINE_TYPES.DIALOGUE;
+
+  if (type === LINE_TYPES.DIRECTION) {
+    tags.push('舞台指示');
+  } else {
+    tags.push('台詞');
+    const role = normalizeRoleName(line?.role);
+    if (role) {
+      tags.push(`角色：${role}`);
+    }
+  }
+
+  return tags.map((tag) => `[${tag}]`).join('');
+}
+
 function formatLanguageAlignmentPromptLine(line, index) {
   const text = sanitizeLineText(line?.text || '');
-  const prefix =
-    line?.type === LINE_TYPES.DIRECTION ? '[舞台指示] ' : '';
-  return `${index + 1}. ${prefix}${text}`;
+  const prefix = formatAlignmentContextPrefix(line);
+  return `${index + 1}. ${prefix}${prefix ? ' ' : ''}${text}`;
 }
 
-function formatTimelineAlignmentBaseLine(
-  line,
-  index,
-  languages,
-  excludedLanguageId,
-) {
-  const entries = [];
-  const languageList = Array.isArray(languages) ? languages : [];
-
-  languageList.forEach((language) => {
-    const languageId =
-      typeof language?.id === 'string' && language.id.trim()
-        ? language.id.trim()
-        : '';
-    if (!languageId || languageId === excludedLanguageId) return;
-
-    const text = getLineLanguageText(line, languageId);
-    if (!text) return;
-
-    const languageName =
-      sanitizeLineText(language?.name || languageId) || languageId;
-    entries.push(`[${languageName}] ${text}`);
-  });
-
-  const content = entries.length > 0 ? entries.join(' | ') : '[空白列]';
-  const prefix =
-    line?.type === LINE_TYPES.DIRECTION ? '[舞台指示] ' : '';
-  return `${index + 1}. ${prefix}${content}`;
+function formatTimelineAlignmentBaseLine(line, index) {
+  const text = sanitizeLineText(line?.text || '') || '[空白列]';
+  const prefix = formatAlignmentContextPrefix(line);
+  return `${index + 1}. ${prefix}${prefix ? ' ' : ''}${text}`;
 }
 
-function buildLanguageAlignmentBaseLines(lines, languages, targetLanguageId) {
+function buildLanguageAlignmentBaseLines(lines, targetLanguageId) {
   if (!Array.isArray(lines)) {
     return [];
   }
 
-  return lines
-    .map((line) => clearLineLanguageText(line, targetLanguageId))
-    .filter((line) =>
-      Array.isArray(languages) && languages.length > 0
-        ? languages.some(
-            (language) =>
-              language?.id &&
-              language.id !== targetLanguageId &&
-              getLineLanguageText(line, language.id),
-          )
-        : lineHasAnyLanguageText(line),
+  return lines.flatMap((line, index) => {
+    const primaryText = sanitizeLineText(line?.text || '');
+    if (!primaryText) {
+      return [];
+    }
+
+    const translations = normalizeTranslationsMap(
+      line?.translations,
+      'primary',
+      primaryText,
     );
+    translations.primary = primaryText;
+    if (targetLanguageId) {
+      translations[targetLanguageId] = '';
+    }
+
+    return [
+      {
+        ...createLineRecord(
+          {
+            ...line,
+            text: primaryText,
+            translations,
+          },
+          'primary',
+        ),
+        sourceIndex: index,
+      },
+    ];
+  });
+}
+
+function buildPreservedSupplementalAlignmentBuckets(
+  lines,
+  targetLanguageId,
+  baseLineCount,
+) {
+  const bucketCount = Math.max(
+    Number.isInteger(baseLineCount) ? baseLineCount : 0,
+    0,
+  );
+  const buckets = Array.from({ length: bucketCount + 1 }, () => []);
+  if (!Array.isArray(lines)) {
+    return buckets;
+  }
+
+  let seenPrimaryRows = 0;
+  lines.forEach((line) => {
+    const primaryText = sanitizeLineText(line?.text || '');
+    if (primaryText) {
+      seenPrimaryRows += 1;
+      return;
+    }
+
+    const translations = normalizeTranslationsMap(
+      line?.translations,
+      'primary',
+      '',
+    );
+    translations.primary = '';
+
+    const shouldPreserve = Object.entries(translations).some(
+      ([languageId, value]) =>
+        languageId !== 'primary' &&
+        languageId !== targetLanguageId &&
+        sanitizeLineText(value),
+    );
+    if (!shouldPreserve) {
+      return;
+    }
+
+    const bucketIndex = Math.min(seenPrimaryRows, buckets.length - 1);
+    buckets[bucketIndex].push(
+      createLineRecord(
+        {
+          ...line,
+          text: '',
+          translations,
+        },
+        'primary',
+      ),
+    );
+  });
+
+  return buckets;
 }
 
 function normalizeTimelineAlignmentPlanEntry(entry, indexBase, rowIndex) {
@@ -6759,33 +6907,6 @@ function buildTargetOnlyAlignmentPlan(parsedLines) {
   }));
 }
 
-function buildFallbackTimelineAlignmentPlan(
-  baseLines,
-  parsedLines,
-) {
-  const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
-  const targetTexts = normalizedParsedLines.map((line) => line.text);
-  const existingCount = Array.isArray(baseLines) ? baseLines.length : 0;
-
-  if (existingCount === 0) {
-    return buildTargetOnlyAlignmentPlan(normalizedParsedLines);
-  }
-
-  const ranges =
-    targetTexts.length > 0
-      ? buildHeuristicSecondaryAlignmentRanges(baseLines, targetTexts)
-      : Array.from({ length: existingCount }, () => ({
-          startUnit: null,
-          endUnit: null,
-        }));
-
-  return Array.from({ length: existingCount }, (_value, index) => ({
-    existingRow: index,
-    startLine: ranges[index]?.startUnit ?? null,
-    endLine: ranges[index]?.endUnit ?? null,
-  }));
-}
-
 function buildAlignedLanguageTimelineFromPlan({
   session,
   baseLines,
@@ -6793,10 +6914,23 @@ function buildAlignedLanguageTimelineFromPlan({
   languageId,
   languageCode,
   plan,
+  supplementalBuckets = [],
 }) {
   const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
+  const mergedLines = [];
+  const appendSupplementalBucket = (bucketIndex) => {
+    const bucket = Array.isArray(supplementalBuckets[bucketIndex])
+      ? supplementalBuckets[bucketIndex]
+      : [];
+    bucket.forEach((line) => {
+      mergedLines.push(createLineRecord(line, 'primary'));
+    });
+  };
 
-  return plan.map((entry) => {
+  appendSupplementalBucket(0);
+  let emittedBaseRows = 0;
+
+  plan.forEach((entry) => {
     const targetText =
       entry.startLine == null || entry.endLine == null
         ? ''
@@ -6809,21 +6943,30 @@ function buildAlignedLanguageTimelineFromPlan({
 
     if (entry.existingRow != null) {
       const existingLine = baseLines[entry.existingRow];
+      const sourceLine =
+        existingLine?.sourceLine && typeof existingLine.sourceLine === 'object'
+          ? existingLine.sourceLine
+          : existingLine;
       const translations = normalizeTranslationsMap(
-        existingLine?.translations,
+        sourceLine?.translations,
         'primary',
-        existingLine?.text || '',
+        sourceLine?.text || existingLine?.text || '',
       );
       translations[languageId] = targetText;
 
-      return createLineRecord(
-        {
-          ...existingLine,
-          text: sanitizeLineText(existingLine?.text || ''),
-          translations,
-        },
-        'primary',
+      mergedLines.push(
+        createLineRecord(
+          {
+            ...sourceLine,
+            text: sanitizeLineText(sourceLine?.text || existingLine?.text || ''),
+            translations,
+          },
+          'primary',
+        ),
       );
+      emittedBaseRows += 1;
+      appendSupplementalBucket(emittedBaseRows);
+      return;
     }
 
     const type = detectParsedLineRangeType(
@@ -6840,21 +6983,24 @@ function buildAlignedLanguageTimelineFromPlan({
           )
         : null;
 
-    return createBlankSessionLine(session, {
-      type,
-      music: false,
-      role,
-      languageId,
-      text: targetText,
-    });
+    mergedLines.push(
+      createBlankSessionLine(session, {
+        type,
+        music: false,
+        role,
+        languageId,
+        text: targetText,
+      }),
+    );
   });
+
+  return mergedLines;
 }
 
 async function alignParsedLanguageLinesWithOpenAI({
   apiKey,
   baseLines,
   parsedLines,
-  languages,
   targetLanguageId,
   languageName,
   languageCode,
@@ -6880,12 +7026,17 @@ async function alignParsedLanguageLinesWithOpenAI({
     {
       role: 'system',
       content:
-        'You semantically align a target-language subtitle sequence to an existing multilingual subtitle timeline by producing a merged ordered plan.',
+        'You semantically align a target-language script sequence to an edited primary-language subtitle timeline by producing a merged ordered plan.',
     },
     {
       role: 'user',
       content: `
-請把以下目標語言「已切好的字幕行」，依照語意對齊到既有多語字幕時間線。
+請把以下目標語言「已切好的語意單位」，依照語意對齊到既有第一語言字幕時間線。
+
+重要背景：
+1. 既有第一語言字幕可能已被人工刪改、濃縮、合併，不等於原文逐句翻譯。
+2. 目標語言可能保留原文完整內容，所以有些片段可能完全無法對齊到第一語言任何一列。
+3. 遇到無法對齊的目標片段，寧可建立 existingRow = null 的 target-only row，也不要硬塞到相鄰列。
 
 重要原則：
 1. 對齊必須以語意、事件順序、上下文承接、句意完成度、舞台指示對應為主。
@@ -6894,6 +7045,8 @@ async function alignParsedLanguageLinesWithOpenAI({
 4. 若某個既有字幕列在目標語言中沒有直接對應，可以保留該列並讓目標語言為 null。
 5. 若某個目標語言片段沒有對應的既有字幕列，可以新增一列 target-only row，讓 existingRow 為 null。
 6. 不可改寫、翻譯、摘要或重述內容，只做對齊。
+7. 對齊時請優先參考舞台指示、角色、事件順序、情緒轉折、因果承接與場景切換。
+8. 若信心不足，優先保留 null 或 target-only row，不要勉強配對。
 
 輸出規則：
 1. 一定要輸出 JSON array。
@@ -6913,17 +7066,8 @@ async function alignParsedLanguageLinesWithOpenAI({
   { "existingRow": 3, "startLine": 3, "endLine": 4 }
 ]
 
-既有多語字幕時間線如下：
-${baseLines
-  .map((line, index) =>
-    formatTimelineAlignmentBaseLine(
-      line,
-      index,
-      languages,
-      targetLanguageId,
-    ),
-  )
-  .join('\n')}
+既有第一語言字幕時間線如下：
+${baseLines.map((line, index) => formatTimelineAlignmentBaseLine(line, index)).join('\n')}
 
 目標語言名稱：${sanitizeLineText(languageName || '目標語言')}
 
@@ -6936,7 +7080,7 @@ ${normalizedParsedLines
   ];
 
   const response = await client.responses.create({
-    model: 'gpt-4o-mini',
+    model: SECONDARY_ALIGNMENT_MODEL,
     input: prompt,
     temperature: 0.1,
     max_output_tokens: 5000,
@@ -6975,15 +7119,16 @@ async function alignSecondaryLanguageWithOpenAI({
   languageCode,
 }) {
   const warningMessages = [];
-  const baseLines = buildLanguageAlignmentBaseLines(
+  const baseLines = buildLanguageAlignmentBaseLines(timelineLines, languageId);
+  const supplementalBuckets = buildPreservedSupplementalAlignmentBuckets(
     timelineLines,
-    session?.languages,
     languageId,
+    baseLines.length,
   );
   let parsedLines;
 
   try {
-    parsedLines = await parseScriptWithOpenAI(rawText, apiKey, {
+    parsedLines = await parseAlignmentScriptWithOpenAI(rawText, apiKey, {
       languageCode,
     });
   } catch (error) {
@@ -6995,55 +7140,31 @@ async function alignSecondaryLanguageWithOpenAI({
     const fallbackNormalized = normalizeScriptLines(
       fallbackSegmentScript(rawText, { languageCode }),
     );
-    parsedLines = enforceLineLengths(fallbackNormalized, {
-      languageCode,
-      sampleText: rawText,
-    });
+    parsedLines = fallbackNormalized;
     warningMessages.push(
       error?.message
-        ? `OpenAI 切段失敗（${error.message}），已改用原稿分段結果`
-        : 'OpenAI 切段失敗，已改用原稿分段結果',
+        ? `OpenAI 對齊分段失敗（${error.message}），已改用原稿語意分段`
+        : 'OpenAI 對齊分段失敗，已改用原稿語意分段',
     );
   }
 
-  let mergedLines;
-  try {
-    const alignmentPlan = await alignParsedLanguageLinesWithOpenAI({
-      apiKey,
-      baseLines,
-      parsedLines,
-      languages: session?.languages,
-      targetLanguageId: languageId,
-      languageName,
-      languageCode,
-    });
-    mergedLines = buildAlignedLanguageTimelineFromPlan({
-      session,
-      baseLines,
-      parsedLines,
-      languageId,
-      languageCode,
-      plan: alignmentPlan,
-    });
-  } catch (error) {
-    const fallbackPlan = buildFallbackTimelineAlignmentPlan(
-      baseLines,
-      parsedLines,
-    );
-    mergedLines = buildAlignedLanguageTimelineFromPlan({
-      session,
-      baseLines,
-      parsedLines,
-      languageId,
-      languageCode,
-      plan: fallbackPlan,
-    });
-    warningMessages.push(
-      error?.message
-        ? `OpenAI 語意對齊失敗（${error.message}），已改用保底分配`
-        : 'OpenAI 語意對齊失敗，已改用保底分配',
-    );
-  }
+  const alignmentPlan = await alignParsedLanguageLinesWithOpenAI({
+    apiKey,
+    baseLines,
+    parsedLines,
+    targetLanguageId: languageId,
+    languageName,
+    languageCode,
+  });
+  const mergedLines = buildAlignedLanguageTimelineFromPlan({
+    session,
+    baseLines,
+    parsedLines,
+    languageId,
+    languageCode,
+    plan: alignmentPlan,
+    supplementalBuckets,
+  });
 
   return {
     lines: mergedLines,
@@ -8746,6 +8867,47 @@ io.on('connection', (socket) => {
         music: isLineMarkedMusic(existing),
         translations: existing.translations,
         role: existing.role,
+      },
+      'primary',
+    );
+
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setLineRole', ({ sessionId, index, role }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
+      return;
+    }
+
+    const existing = session.lines[index];
+    if (!existing) return;
+
+    const normalizedType =
+      clampLineType(existing?.type) || LINE_TYPES.DIALOGUE;
+    if (normalizedType === LINE_TYPES.DIRECTION) {
+      return;
+    }
+
+    const nextRole = normalizeRoleName(role);
+    const previousRole = normalizeRoleName(existing?.role);
+    if (nextRole === previousRole) {
+      return;
+    }
+
+    pushSessionHistory(session);
+    session.lines[index] = createLineRecord(
+      {
+        ...existing,
+        text: sanitizeLineText(existing?.text || ''),
+        type: normalizedType,
+        music: isLineMarkedMusic(existing),
+        translations: existing?.translations,
+        role: nextRole,
       },
       'primary',
     );
