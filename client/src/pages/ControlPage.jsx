@@ -2368,7 +2368,7 @@ const ControlPage = () => {
 
     try {
       setParsingLanguageId(languageId)
-      setStatus({ kind: 'info', message: '正在整理語意分段並更新播放預覽…' })
+      setStatus({ kind: 'info', message: '正在解析文本並更新字幕清單…' })
       const data = await performSessionMutation(
         () =>
           fetch(
@@ -2384,21 +2384,21 @@ const ControlPage = () => {
           ),
         { successMessage: '多語語意段落已更新', keepStatus: true },
       )
-      syncLanguageSourceDrafts(selectedCellId, data?.languageSources, {
-        forceLanguageId: languageId,
-      })
       const segmentCount = Number.isInteger(
         data?.languageSources?.[languageId]?.segmentCount,
       )
         ? data.languageSources[languageId].segmentCount
         : null
+      const parsedLineCount = Number.isInteger(data?.parsedLineCount)
+        ? data.parsedLineCount
+        : segmentCount
       setStatus({
         kind: data?.warning ? 'info' : 'success',
         message:
           data?.warning ||
-          (segmentCount && segmentCount > 0
-            ? `${languageName} 語意分段已更新（${segmentCount} 段），播放預覽已重編`
-            : `${languageName} 語意分段已更新，播放預覽已重編`),
+          (parsedLineCount && parsedLineCount > 0
+            ? `${languageName} 字幕清單已更新（${parsedLineCount} 行）`
+            : `${languageName} 字幕清單已更新`),
       })
     } finally {
       setParsingLanguageId('')
@@ -2708,7 +2708,7 @@ const ControlPage = () => {
       : `編輯模式：停留在第 ${currentIndex + 1} 行，直播 CUE 在第 ${liveCurrentIndex + 1} 行。`
     : ''
   const comparisonLanguagePreviewNote = comparisonLanguage
-    ? `${comparisonLanguage.name} 欄是播放對齊預覽；實際編輯請在左側輸入區調整語意分段。`
+    ? `${comparisonLanguage.name} 欄顯示目前字幕清單結果；要更新內容請在左側輸入區重新解析。`
     : ''
   lineRefs.current = {}
   rowRefs.current = []
@@ -3074,24 +3074,24 @@ const ControlPage = () => {
                 <textarea
                   id={`language-input-${language.id}`}
                   rows={5}
-                  placeholder={`貼上 ${language.name} 全文，系統會先整理成語意段落，再更新檢視端與投影端的播放對齊。`}
+                  placeholder={`貼上 ${language.name} 全文，系統會用和第一語言相同的方式拆解，並依序寫入右側字幕清單。`}
                   value={getDraftInputValue(selectedCellId, language.id)}
                   onChange={(event) =>
                     setDraftInputValue(selectedCellId, language.id, event.target.value)
                   }
                 />
                 <span className="input-note">
-                  這裡編輯的是未對齊語意段落；右側字幕清單只顯示播放時的對齊預覽。
+                  左邊保留原始輸入；右側字幕清單顯示拆解後寫入的結果。
                 </span>
                 <button
                   type="submit"
                   disabled={
-                    parsingLanguageId === language.id || !selectedCellId || !lines.length
+                    parsingLanguageId === language.id || !selectedCellId
                   }
                 >
                   {parsingLanguageId === language.id
                     ? '處理中…'
-                    : `更新 ${language.name} 播放預覽`}
+                    : `更新 ${language.name} 字幕清單`}
                 </button>
               </form>
             ))}
@@ -3583,7 +3583,7 @@ const ControlPage = () => {
                     )}
                     {translatedCount > 0 && (
                       <span className="script-line-type type-language">
-                        {translatedCount} 語已編譯
+                        {translatedCount} 語已填入
                       </span>
                     )}
                     {liveCurrentIndex === index && (
@@ -3658,7 +3658,7 @@ const ControlPage = () => {
                         <div className="script-line-column-label">
                           <span>{language.name}</span>
                           {language.id !== 'primary' && (
-                            <small>{text.trim() ? '播放預覽' : '尚未編譯'}</small>
+                            <small>{text.trim() ? '解析結果' : '尚未填入'}</small>
                           )}
                         </div>
                         <div

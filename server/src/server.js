@@ -3090,17 +3090,27 @@ function normalizeCellLanguageSources(rawSources, languages = []) {
     }
 
     let segments = [];
+    let sourceText = '';
     let updatedAt = null;
 
     if (Array.isArray(value)) {
       segments = normalizeSecondaryLanguageSourceSegments(value);
+      sourceText = buildSecondaryLanguageSourceText(segments);
     } else if (typeof value === 'string') {
-      segments = normalizeSecondaryLanguageSourceTextToSegments(value);
+      sourceText = sanitizeTranscriptionMultilineText(value);
+      segments = normalizeSecondaryLanguageSourceTextToSegments(sourceText);
     } else if (value && typeof value === 'object') {
       if (Array.isArray(value.segments)) {
         segments = normalizeSecondaryLanguageSourceSegments(value.segments);
-      } else if (typeof value.text === 'string') {
-        segments = normalizeSecondaryLanguageSourceTextToSegments(value.text);
+      }
+      if (typeof value.text === 'string') {
+        sourceText = sanitizeTranscriptionMultilineText(value.text);
+      }
+      if (!segments.length && sourceText) {
+        segments = normalizeSecondaryLanguageSourceTextToSegments(sourceText);
+      }
+      if (!sourceText && segments.length > 0) {
+        sourceText = buildSecondaryLanguageSourceText(segments);
       }
       updatedAt =
         Number.isFinite(value.updatedAt) && value.updatedAt > 0
@@ -3114,6 +3124,7 @@ function normalizeCellLanguageSources(rawSources, languages = []) {
 
     normalized[normalizedLanguageId] = {
       segments,
+      text: sourceText || buildSecondaryLanguageSourceText(segments),
       updatedAt,
     };
   });
@@ -3121,7 +3132,12 @@ function normalizeCellLanguageSources(rawSources, languages = []) {
   return normalized;
 }
 
-function setCellLanguageSource(cell, languageId, segments, updatedAt = Date.now()) {
+function setCellLanguageSource(
+  cell,
+  languageId,
+  segments,
+  options = {},
+) {
   if (!cell || typeof cell !== 'object') {
     return;
   }
@@ -3132,6 +3148,14 @@ function setCellLanguageSource(cell, languageId, segments, updatedAt = Date.now(
   }
 
   const normalizedSegments = normalizeSecondaryLanguageSourceSegments(segments);
+  const sourceText =
+    typeof options.text === 'string'
+      ? sanitizeTranscriptionMultilineText(options.text)
+      : buildSecondaryLanguageSourceText(normalizedSegments);
+  const updatedAt =
+    Number.isFinite(options.updatedAt) && options.updatedAt > 0
+      ? options.updatedAt
+      : Date.now();
   if (!cell.languageSources || typeof cell.languageSources !== 'object') {
     cell.languageSources = {};
   }
@@ -3143,8 +3167,8 @@ function setCellLanguageSource(cell, languageId, segments, updatedAt = Date.now(
 
   cell.languageSources[normalizedLanguageId] = {
     segments: normalizedSegments,
-    updatedAt:
-      Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
+    text: sourceText,
+    updatedAt,
   };
 }
 
@@ -3168,7 +3192,10 @@ function getPublicCellLanguageSources(cell, languages = []) {
     );
 
     publicSources[languageId] = {
-      text: buildSecondaryLanguageSourceText(segments),
+      text:
+        typeof sourceEntry?.text === 'string' && sourceEntry.text.trim()
+          ? sanitizeTranscriptionMultilineText(sourceEntry.text)
+          : buildSecondaryLanguageSourceText(segments),
       segmentCount: segments.length,
       updatedAt:
         Number.isFinite(sourceEntry?.updatedAt) && sourceEntry.updatedAt > 0
@@ -7103,6 +7130,55 @@ function detectParsedLineRangeRole(parsedLines, startLine, endLine) {
   return null;
 }
 
+function buildSequentialSecondaryLanguageTimeline({
+  session,
+  timelineLines,
+  parsedLines,
+  languageId,
+}) {
+  const existingLines = Array.isArray(timelineLines) ? timelineLines : [];
+  const normalizedParsedLines = normalizeScriptLines(parsedLines, {
+    primaryLanguageId: 'primary',
+  });
+  const nextLineCount = Math.max(
+    existingLines.length,
+    normalizedParsedLines.length,
+  );
+  const mergedLines = [];
+
+  for (let index = 0; index < nextLineCount; index += 1) {
+    const existingLine = existingLines[index] || null;
+    const parsedLine = normalizedParsedLines[index] || null;
+    const targetText = sanitizeLineText(parsedLine?.text || '');
+
+    if (existingLine) {
+      mergedLines.push(
+        updateSessionLineLanguageText(existingLine, languageId, targetText),
+      );
+      continue;
+    }
+
+    if (!parsedLine) {
+      continue;
+    }
+
+    mergedLines.push(
+      createBlankSessionLine(session, {
+        type:
+          parsedLine.type === LINE_TYPES.DIRECTION
+            ? LINE_TYPES.DIRECTION
+            : LINE_TYPES.DIALOGUE,
+        music: false,
+        role: parsedLine?.role || null,
+        languageId,
+        text: targetText,
+      }),
+    );
+  }
+
+  return mergedLines;
+}
+
 function buildTargetOnlyAlignmentPlan(parsedLines) {
   const normalizedParsedLines = normalizeLanguageAlignmentLines(parsedLines);
   return normalizedParsedLines.map((_line, index) => ({
@@ -8029,10 +8105,6 @@ app.post(
       return res.status(400).json({ error: '第一語言請使用劇本解析功能' });
     }
 
-    if (!cell.lines.length) {
-      return res.status(400).json({ error: '請先建立第一語言字幕' });
-    }
-
     const apiKey = sanitizeLineText(req.body?.apiKey || '');
     const rawScriptText =
       typeof req.body?.scriptText === 'string' ? req.body.scriptText : '';
@@ -8044,31 +8116,58 @@ app.post(
       return res.status(400).json({ error: '缺少目標語言文字內容' });
     }
 
-    const normalizedRawText = normalizeSecondaryAlignmentText(
-      rawScriptText,
-      language.code,
-    );
+    const normalizedRawText = normalizeScriptPromptText(rawScriptText, language.code);
 
     try {
-      const alignmentResult = await alignSecondaryLanguageWithOpenAI({
-        session,
-        rawText: normalizedRawText,
-        apiKey,
-        timelineLines: cell.lines,
-        languageId: language.id,
-        languageName: language.name,
-        languageCode: language.code,
+      let parsedLines;
+      let warning = '';
+      try {
+        parsedLines = await parseScriptWithOpenAI(normalizedRawText, apiKey, {
+          languageCode: language.code,
+        });
+      } catch (error) {
+        console.error('Failed to parse secondary language script:', error);
+        if (!fallbackCodes.has(error?.code)) {
+          throw error;
+        }
+
+        const fallbackNormalized = normalizeScriptLines(
+          fallbackSegmentScript(normalizedRawText, {
+            languageCode: language.code,
+          }),
+        );
+        parsedLines = enforceLineLengths(fallbackNormalized, {
+          languageCode: language.code,
+        });
+        warning = error?.message
+          ? `OpenAI 拆解失敗（${error.message}），已改用原稿分段結果`
+          : 'OpenAI 拆解失敗，已改用原稿分段結果';
+      }
+
+      const normalizedParsedLines = normalizeScriptLines(parsedLines, {
+        primaryLanguageId: 'primary',
       });
-      const nextLines = alignmentResult.lines;
-      const warning = alignmentResult.warning || '';
-      const sourceLines = alignmentResult.sourceLines || [];
+      if (normalizedParsedLines.length === 0) {
+        const emptyLinesError = new Error('解析完成但沒有產生可用字幕');
+        emptyLinesError.code = 'EMPTY_PARSED_LINES';
+        throw emptyLinesError;
+      }
+
+      const nextLines = buildSequentialSecondaryLanguageTimeline({
+        session,
+        timelineLines: cell.lines,
+        parsedLines: normalizedParsedLines,
+        languageId: language.id,
+      });
 
       pushSessionHistory(session);
-      setCellLanguageSource(cell, language.id, sourceLines);
+      setCellLanguageSource(cell, language.id, normalizedParsedLines, {
+        text: rawScriptText,
+      });
       cell.lines = normalizeScriptLines(nextLines, {
         keepEmpty: true,
         primaryLanguageId: 'primary',
-      });
+      }).filter((line) => lineHasAnyLanguageText(line));
       session.selectedCellId = cell.id;
       syncSelectedCellLines(session);
       persistSession(session);
@@ -8077,6 +8176,7 @@ app.post(
 
       res.json({
         ...getControlPayload(session),
+        parsedLineCount: normalizedParsedLines.length,
         ...(warning ? { warning } : {}),
       });
     } catch (error) {
