@@ -2807,6 +2807,47 @@ function createBlankSessionLineLike(session, sourceLine, languageId, text = '') 
   });
 }
 
+function clearSessionLineLanguageAndShiftUp(session, index, languageId) {
+  const targetLanguageId = resolveSessionLanguageId(session, languageId);
+  if (
+    !session ||
+    targetLanguageId === 'primary' ||
+    !Number.isInteger(index) ||
+    index < 0 ||
+    index >= session.lines.length
+  ) {
+    return { removedLineIndex: -1 };
+  }
+
+  for (let lineIndex = index; lineIndex < session.lines.length - 1; lineIndex += 1) {
+    session.lines[lineIndex] = updateSessionLineLanguageText(
+      session.lines[lineIndex],
+      targetLanguageId,
+      getLineLanguageText(session.lines[lineIndex + 1], targetLanguageId),
+    );
+  }
+
+  const lastIndex = session.lines.length - 1;
+  session.lines[lastIndex] = updateSessionLineLanguageText(
+    session.lines[lastIndex],
+    targetLanguageId,
+    '',
+  );
+
+  if (lineHasAnyLanguageText(session.lines[lastIndex])) {
+    return { removedLineIndex: -1 };
+  }
+
+  session.lines.splice(lastIndex, 1);
+  if (session.currentIndex >= session.lines.length) {
+    session.currentIndex = Math.max(session.lines.length - 1, 0);
+  } else if (session.currentIndex > lastIndex) {
+    session.currentIndex -= 1;
+  }
+
+  return { removedLineIndex: lastIndex };
+}
+
 function normalizeProjectorStatus(rawStatus) {
   const source = rawStatus && typeof rawStatus === 'object' ? rawStatus : {};
   const level =
@@ -9465,6 +9506,25 @@ io.on('connection', (socket) => {
       '',
     );
 
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('clearLanguageAndShiftUp', ({ sessionId, index, languageId }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
+      return;
+    }
+
+    const targetLanguageId = resolveSessionLanguageId(session, languageId);
+    if (targetLanguageId === 'primary') return;
+    if (!getLineLanguageText(session.lines[index], targetLanguageId)) return;
+
+    pushSessionHistory(session);
+    clearSessionLineLanguageAndShiftUp(session, index, targetLanguageId);
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);

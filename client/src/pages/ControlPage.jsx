@@ -621,6 +621,44 @@ const shouldRemoveLineAfterLanguageUpdate = (line, languageId, nextText) => {
   return !lineHasAnyLanguageText(nextLine)
 }
 
+const applyLineLanguageClearAndShiftUp = (sourceLines, index, languageId) => {
+  if (
+    !Array.isArray(sourceLines) ||
+    languageId === 'primary' ||
+    index < 0 ||
+    index >= sourceLines.length
+  ) {
+    return {
+      lines: sourceLines,
+      removedLineIndex: -1,
+    }
+  }
+
+  const next = [...sourceLines]
+  for (let lineIndex = index; lineIndex < next.length - 1; lineIndex += 1) {
+    next[lineIndex] = updateLineLanguageText(
+      next[lineIndex],
+      languageId,
+      getLineLanguageText(next[lineIndex + 1], languageId),
+    )
+  }
+
+  const lastIndex = next.length - 1
+  next[lastIndex] = updateLineLanguageText(next[lastIndex], languageId, '')
+  if (lineHasAnyLanguageText(next[lastIndex])) {
+    return {
+      lines: next,
+      removedLineIndex: -1,
+    }
+  }
+
+  next.pop()
+  return {
+    lines: next,
+    removedLineIndex: lastIndex,
+  }
+}
+
 const buildBlankTranslations = (languages) => {
   const entries = Array.isArray(languages) ? languages : []
   const blank = entries.reduce((accumulator, language) => {
@@ -2276,6 +2314,36 @@ const ControlPage = () => {
     const currentLine = lines[index]
     if (!socketRef.current || !sessionId || !currentLine) return
     if (!getLineLanguageText(currentLine, languageId).trim()) return
+
+    if (languageId !== 'primary') {
+      const shiftResult = applyLineLanguageClearAndShiftUp(lines, index, languageId)
+      setLines(shiftResult.lines)
+      if (shiftResult.removedLineIndex >= 0) {
+        shiftIndexesAfterLineRemoval(shiftResult.removedLineIndex)
+      } else {
+        setEditingCell((prev) => {
+          if (
+            prev &&
+            prev.index === index &&
+            prev.languageId === languageId
+          ) {
+            return null
+          }
+          return prev
+        })
+      }
+      setRoleEditor(null)
+      socketRef.current.emit('clearLanguageAndShiftUp', {
+        sessionId,
+        index,
+        languageId,
+      })
+      setStatus({
+        kind: 'info',
+        message: `已清除 ${language?.name || '語言'} 此行內容，後續字幕已上移`,
+      })
+      return
+    }
 
     const shouldRemoveLine = shouldRemoveLineAfterLanguageUpdate(
       currentLine,
