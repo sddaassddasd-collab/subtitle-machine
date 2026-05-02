@@ -9664,9 +9664,13 @@ io.on('connection', (socket) => {
     );
 
     if (targetLanguageId !== 'primary') {
+      const currentLanguageText =
+        typeof currentText === 'string'
+          ? nextCurrentText
+          : getLineLanguageText(current, targetLanguageId);
       previousTranslations[targetLanguageId] = joinTranscriptionTexts(
         previousTranslations[targetLanguageId] || '',
-        currentTranslations[targetLanguageId] || nextCurrentText,
+        currentLanguageText,
       );
       currentTranslations[targetLanguageId] = '';
 
@@ -9690,10 +9694,12 @@ io.on('connection', (socket) => {
         session.lines.splice(index, 1);
       }
 
-      if (session.currentIndex > index) {
-        session.currentIndex -= 1;
-      } else if (session.currentIndex === index) {
-        session.currentIndex = index - 1;
+      if (!lineHasAnyLanguageText(nextCurrentLine)) {
+        if (session.currentIndex > index) {
+          session.currentIndex -= 1;
+        } else if (session.currentIndex === index) {
+          session.currentIndex = index - 1;
+        }
       }
 
       persistSession(session);

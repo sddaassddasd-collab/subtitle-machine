@@ -506,6 +506,63 @@ const applyLineLanguageTextUpdate = (sourceLines, index, languageId, nextText) =
   return next
 }
 
+const applyLineLanguageMergeIntoPrevious = (
+  sourceLines,
+  index,
+  languageId,
+  currentTextOverride = null,
+) => {
+  if (!Array.isArray(sourceLines) || index <= 0 || index >= sourceLines.length) {
+    return {
+      lines: sourceLines,
+      removedCurrentLine: false,
+    }
+  }
+
+  if (languageId === 'primary') {
+    const next = [...sourceLines]
+    next.splice(
+      index - 1,
+      2,
+      mergeLineRecords(next[index - 1], next[index], currentTextOverride),
+    )
+    return {
+      lines: next,
+      removedCurrentLine: true,
+    }
+  }
+
+  const next = [...sourceLines]
+  const previousLine = next[index - 1]
+  const currentLine = next[index]
+  const previousText = getLineLanguageText(previousLine, languageId)
+  const currentText =
+    typeof currentTextOverride === 'string'
+      ? currentTextOverride
+      : getLineLanguageText(currentLine, languageId)
+
+  next[index - 1] = updateLineLanguageText(
+    previousLine,
+    languageId,
+    joinLineTextFragments(previousText, currentText),
+  )
+
+  const clearedCurrentLine = updateLineLanguageText(currentLine, languageId, '')
+  if (lineHasAnyLanguageText(clearedCurrentLine)) {
+    next[index] = clearedCurrentLine
+    return {
+      lines: next,
+      removedCurrentLine: false,
+    }
+  }
+
+  next.splice(index, 1)
+  return {
+    lines: next,
+    removedCurrentLine: true,
+  }
+}
+
 const shouldRemoveLineAfterLanguageUpdate = (line, languageId, nextText) => {
   if (!line || typeof line !== 'object') return false
   const nextLine = updateLineLanguageText(line, languageId, nextText)
@@ -1021,10 +1078,6 @@ const ControlPage = () => {
 
   useEffect(() => {
     if (!editingCell) return
-    if (editingCell.languageId !== 'primary') {
-      setEditingCell(null)
-      return
-    }
     if (!languages.some((language) => language.id === editingCell.languageId)) {
       setEditingCell(null)
     }
@@ -1731,6 +1784,39 @@ const ControlPage = () => {
     }
   }
 
+  const shiftIndexesAfterLineInsertion = (insertAfterIndex) => {
+    setCurrentIndex((prev) => (prev > insertAfterIndex ? prev + 1 : prev))
+    setEditingCell((prev) => {
+      if (!prev || prev.index <= insertAfterIndex) return prev
+      return { ...prev, index: prev.index + 1 }
+    })
+    setPendingMusicRangeStartIndex((prev) =>
+      prev != null && prev > insertAfterIndex ? prev + 1 : prev,
+    )
+  }
+
+  const shiftIndexesAfterLineRemoval = (removedIndex) => {
+    setCurrentIndex((prev) => {
+      if (prev > removedIndex) return Math.max(prev - 1, 0)
+      if (prev === removedIndex) return Math.max(removedIndex - 1, 0)
+      return prev
+    })
+    setEditingCell((prev) => {
+      if (!prev) return prev
+      if (prev.index === removedIndex) return null
+      if (prev.index > removedIndex) {
+        return { ...prev, index: prev.index - 1 }
+      }
+      return prev
+    })
+    setPendingMusicRangeStartIndex((prev) => {
+      if (prev == null) return prev
+      if (prev === removedIndex) return null
+      if (prev > removedIndex) return prev - 1
+      return prev
+    })
+  }
+
   const handleLineTextClick = (event, index, languageId) => {
     event.stopPropagation()
     if (
@@ -1748,16 +1834,10 @@ const ControlPage = () => {
     event.stopPropagation()
     clearPendingLineClick()
     setRoleEditor(null)
-    if (languageId !== 'primary') {
-      return
-    }
     setEditingCell({ index, languageId })
   }
 
   const handleLineBlur = (event, index, languageId) => {
-    if (languageId !== 'primary') {
-      return
-    }
     const cellKey = getEditingCellKey(index, languageId)
     if (skipBlurRef.current.has(cellKey)) {
       skipBlurRef.current.delete(cellKey)
@@ -1795,17 +1875,7 @@ const ControlPage = () => {
       return next.filter((_, lineIndex) => lineIndex !== index)
     })
     if (shouldRemoveLine) {
-      setCurrentIndex((prev) => {
-        if (prev > index) return Math.max(prev - 1, 0)
-        if (prev === index) return Math.max(index - 1, 0)
-        return prev
-      })
-      setPendingMusicRangeStartIndex((prev) => {
-        if (prev == null) return prev
-        if (prev === index) return null
-        if (prev > index) return prev - 1
-        return prev
-      })
+      shiftIndexesAfterLineRemoval(index)
     }
     setStatus({ kind: 'success', message: '字幕內容已更新' })
   }
@@ -1894,7 +1964,6 @@ const ControlPage = () => {
   }
 
   const handleLineKeyDown = (event, index, languageId) => {
-    if (languageId !== 'primary') return
     if (!socketRef.current || !sessionId || !window.getSelection) return
 
     const cellKey = getEditingCellKey(index, languageId)
@@ -1925,26 +1994,24 @@ const ControlPage = () => {
     ) {
       event.preventDefault()
       const currentText = normalizedFull
-      setLines((prev) => {
-        const next = [...prev]
-        next.splice(
-          index - 1,
-          2,
-          mergeLineRecords(next[index - 1], next[index], currentText),
-        )
-        return next
-      })
-      setCurrentIndex((prev) => {
-        if (prev > index) return Math.max(prev - 1, 0)
-        if (prev === index) return index - 1
-        return prev
-      })
-      setPendingMusicRangeStartIndex((prev) => {
-        if (prev == null) return prev
-        if (prev === index) return index - 1
-        if (prev > index) return prev - 1
-        return prev
-      })
+      const mergePreview = applyLineLanguageMergeIntoPrevious(
+        lines,
+        index,
+        languageId,
+        currentText,
+      )
+      setLines(
+        (prev) =>
+          applyLineLanguageMergeIntoPrevious(
+            prev,
+            index,
+            languageId,
+            currentText,
+          ).lines,
+      )
+      if (mergePreview.removedCurrentLine) {
+        shiftIndexesAfterLineRemoval(index)
+      }
       setEditingCell({ index: index - 1, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('mergeLineIntoPrevious', {
@@ -1986,14 +2053,7 @@ const ControlPage = () => {
 
       setLines((prev) => {
         const next = [...prev]
-        next[index] = {
-          ...next[index],
-          text: beforeText,
-          translations: {
-            ...(next[index]?.translations || {}),
-            primary: beforeText,
-          },
-        }
+        next[index] = updateLineLanguageText(next[index], languageId, beforeText)
         next.splice(
           index + 1,
           0,
@@ -2001,16 +2061,13 @@ const ControlPage = () => {
             type: currentType,
             music: currentMusic,
             role: currentLine?.role || null,
-            languageId: 'primary',
+            languageId,
             text: '',
           }),
         )
         return next
       })
-      setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
-      setPendingMusicRangeStartIndex((prev) =>
-        prev != null && prev > index ? prev + 1 : prev,
-      )
+      shiftIndexesAfterLineInsertion(index)
       setEditingCell({ index: index + 1, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('insertLineAfter', {
@@ -2029,14 +2086,7 @@ const ControlPage = () => {
 
     setLines((prev) => {
       const next = [...prev]
-      next[index] = {
-        ...next[index],
-        text: beforeText,
-        translations: {
-          ...(next[index]?.translations || {}),
-          primary: beforeText,
-        },
-      }
+      next[index] = updateLineLanguageText(next[index], languageId, beforeText)
       next.splice(
         index + 1,
         0,
@@ -2044,16 +2094,13 @@ const ControlPage = () => {
           type: currentType,
           music: currentMusic,
           role: currentLine?.role || null,
-          languageId: 'primary',
+          languageId,
           text: afterText,
         }),
       )
       return next
     })
-    setCurrentIndex((prev) => (prev > index ? prev + 1 : prev))
-    setPendingMusicRangeStartIndex((prev) =>
-      prev != null && prev > index ? prev + 1 : prev,
-    )
+    shiftIndexesAfterLineInsertion(index)
     setEditingCell({ index: index + 1, languageId })
     setAutoCenterEnabled(true)
     socketRef.current.emit('splitLine', {
@@ -2070,28 +2117,98 @@ const ControlPage = () => {
     if (!socketRef.current || !sessionId || !lines[index]) return
 
     setLines((prev) => prev.filter((_, lineIndex) => lineIndex !== index))
-    setCurrentIndex((prev) => {
-      if (prev > index) return Math.max(prev - 1, 0)
-      if (prev === index) return Math.max(index - 1, 0)
-      return prev
-    })
-    setEditingCell((prev) => {
-      if (!prev) return prev
-      if (prev.index === index) return null
-      if (prev.index > index) {
-        return { ...prev, index: prev.index - 1 }
-      }
-      return prev
-    })
-    setPendingMusicRangeStartIndex((prev) => {
-      if (prev == null) return prev
-      if (prev === index) return null
-      if (prev > index) return prev - 1
-      return prev
-    })
+    shiftIndexesAfterLineRemoval(index)
     setRoleEditor(null)
     socketRef.current.emit('deleteLine', { sessionId, index })
     setStatus({ kind: 'info', message: '字幕已刪除' })
+  }
+
+  const handleInsertLanguageLineAfter = (event, index, language) => {
+    event.stopPropagation()
+    clearPendingLineClick()
+    const languageId = language?.id || 'primary'
+    const currentLine = lines[index]
+    if (!socketRef.current || !sessionId || !currentLine) return
+
+    const currentType =
+      typeof currentLine === 'object' && currentLine?.type === 'direction'
+        ? 'direction'
+        : 'dialogue'
+    const draftLine = createBlankLineRecord(languages, {
+      type: currentType,
+      music: isLineMarkedMusic(currentLine),
+      role: currentLine?.role || null,
+      languageId,
+      text: '',
+    })
+
+    setRoleEditor(null)
+    setLines((prev) => {
+      if (!Array.isArray(prev) || index < 0 || index >= prev.length) return prev
+      const next = [...prev]
+      next.splice(index + 1, 0, draftLine)
+      return next
+    })
+    shiftIndexesAfterLineInsertion(index)
+    setEditingCell({ index: index + 1, languageId })
+    setAutoCenterEnabled(true)
+    socketRef.current.emit('insertLineAfter', {
+      sessionId,
+      index,
+      type: currentType,
+      languageId,
+    })
+    setStatus({
+      kind: 'success',
+      message: `已新增 ${language?.name || '語言'} 字幕格`,
+    })
+  }
+
+  const handleClearLineLanguage = (event, index, language) => {
+    event.stopPropagation()
+    clearPendingLineClick()
+    const languageId = language?.id || 'primary'
+    const currentLine = lines[index]
+    if (!socketRef.current || !sessionId || !currentLine) return
+    if (!getLineLanguageText(currentLine, languageId).trim()) return
+
+    const shouldRemoveLine = shouldRemoveLineAfterLanguageUpdate(
+      currentLine,
+      languageId,
+      '',
+    )
+    setLines((prev) => {
+      const next = applyLineLanguageTextUpdate(prev, index, languageId, '')
+      if (!shouldRemoveLine || index < 0 || index >= next.length) {
+        return next
+      }
+      return next.filter((_, lineIndex) => lineIndex !== index)
+    })
+    if (shouldRemoveLine) {
+      shiftIndexesAfterLineRemoval(index)
+    } else {
+      setEditingCell((prev) => {
+        if (
+          prev &&
+          prev.index === index &&
+          prev.languageId === languageId
+        ) {
+          return null
+        }
+        return prev
+      })
+    }
+    setRoleEditor(null)
+    socketRef.current.emit('updateLine', {
+      sessionId,
+      index,
+      text: '',
+      languageId,
+    })
+    setStatus({
+      kind: 'info',
+      message: `已清除 ${language?.name || '語言'} 此行內容`,
+    })
   }
 
   const createDraftLine = (baseLine = null) => ({
@@ -3635,10 +3752,37 @@ const ControlPage = () => {
                     return (
                       <div key={language.id} className="script-line-column">
                         <div className="script-line-column-label">
-                          <span>{language.name}</span>
-                          {language.id !== 'primary' && (
-                            <small>{text.trim() ? '解析結果' : '尚未填入'}</small>
-                          )}
+                          <div className="script-line-column-label-main">
+                            <span>{language.name}</span>
+                            {language.id !== 'primary' && (
+                              <small>{text.trim() ? '已填入' : '尚未填入'}</small>
+                            )}
+                          </div>
+                          <div className="script-line-language-actions">
+                            <button
+                              type="button"
+                              className="line-language-action add"
+                              aria-label={`在${language.name}下方新增字幕格`}
+                              title={`在${language.name}下方新增字幕格`}
+                              onClick={(event) =>
+                                handleInsertLanguageLineAfter(event, index, language)
+                              }
+                            >
+                              +
+                            </button>
+                            <button
+                              type="button"
+                              className="line-language-action delete"
+                              aria-label={`清除${language.name}此行內容`}
+                              title={`清除${language.name}此行內容`}
+                              disabled={!text.trim()}
+                              onClick={(event) =>
+                                handleClearLineLanguage(event, index, language)
+                              }
+                            >
+                              清
+                            </button>
+                          </div>
                         </div>
                         <div
                           ref={(node) => {
@@ -3646,11 +3790,11 @@ const ControlPage = () => {
                           }}
                           className={`script-line-text ${
                             isEditing ? 'editing' : ''
-                          } ${language.id !== 'primary' ? 'translation readonly' : ''}`}
-                          contentEditable={language.id === 'primary' && Boolean(isEditing)}
+                          } ${language.id !== 'primary' ? 'translation' : ''}`}
+                          contentEditable={Boolean(isEditing)}
                           suppressContentEditableWarning
                           spellCheck={false}
-                          tabIndex={language.id === 'primary' ? 0 : -1}
+                          tabIndex={0}
                           onClick={(event) =>
                             handleLineTextClick(event, index, language.id)
                           }

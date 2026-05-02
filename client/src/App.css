@@ -573,9 +573,65 @@
   font-weight: 700;
 }
 
+.script-line-column-label-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.script-line-column-label-main span,
+.script-line-column-label-main small {
+  overflow-wrap: anywhere;
+}
+
 .script-line-column-label small {
   color: #94a3b8;
   font-weight: 500;
+}
+
+.script-line-language-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.line-language-action {
+  min-width: 1.8rem;
+  height: 1.7rem;
+  padding: 0 0.45rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.line-language-action.add {
+  background: rgba(59, 130, 246, 0.16);
+  border-color: rgba(96, 165, 250, 0.28);
+  color: #bfdbfe;
+}
+
+.line-language-action.add:hover {
+  background: rgba(59, 130, 246, 0.28);
+}
+
+.line-language-action.delete {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.28);
+  color: #fecaca;
+}
+
+.line-language-action.delete:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.24);
+}
+
+.line-language-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .line-music-toggle {
@@ -654,6 +710,7 @@
 
 .script-line-text.editing {
   background-color: #fff;
+  color: #0f172a;
   border-radius: 6px;
   padding: 0.35rem 0.4rem;
   box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.2);
