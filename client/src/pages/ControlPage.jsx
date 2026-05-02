@@ -563,6 +563,56 @@ const applyLineLanguageMergeIntoPrevious = (
   }
 }
 
+const applyLineLanguageSuffixMoveToNext = (
+  sourceLines,
+  index,
+  languageId,
+  beforeText,
+  afterText,
+  languages,
+) => {
+  if (!Array.isArray(sourceLines) || index < 0 || index >= sourceLines.length) {
+    return {
+      lines: sourceLines,
+      insertedLine: false,
+    }
+  }
+
+  const next = [...sourceLines]
+  const currentLine = next[index]
+  next[index] = updateLineLanguageText(currentLine, languageId, beforeText)
+
+  if (index + 1 < next.length) {
+    const nextLine = next[index + 1]
+    next[index + 1] = updateLineLanguageText(
+      nextLine,
+      languageId,
+      joinLineTextFragments(afterText, getLineLanguageText(nextLine, languageId)),
+    )
+    return {
+      lines: next,
+      insertedLine: false,
+    }
+  }
+
+  next.push(
+    createBlankLineRecord(languages, {
+      type:
+        typeof currentLine === 'object' && currentLine?.type === 'direction'
+          ? 'direction'
+          : 'dialogue',
+      music: isLineMarkedMusic(currentLine),
+      role: currentLine?.role || null,
+      languageId,
+      text: afterText,
+    }),
+  )
+  return {
+    lines: next,
+    insertedLine: true,
+  }
+}
+
 const shouldRemoveLineAfterLanguageUpdate = (line, languageId, nextText) => {
   if (!line || typeof line !== 'object') return false
   const nextLine = updateLineLanguageText(line, languageId, nextText)
@@ -2082,6 +2132,41 @@ const ControlPage = () => {
     skipBlurRef.current.add(cellKey)
     if (node.textContent !== beforeText) {
       node.textContent = beforeText
+    }
+
+    if (languageId !== 'primary') {
+      const movePreview = applyLineLanguageSuffixMoveToNext(
+        lines,
+        index,
+        languageId,
+        beforeText,
+        afterText,
+        languages,
+      )
+      setLines(
+        (prev) =>
+          applyLineLanguageSuffixMoveToNext(
+            prev,
+            index,
+            languageId,
+            beforeText,
+            afterText,
+            languages,
+          ).lines,
+      )
+      if (movePreview.insertedLine) {
+        shiftIndexesAfterLineInsertion(index)
+      }
+      setEditingCell({ index: index + 1, languageId })
+      setAutoCenterEnabled(true)
+      socketRef.current.emit('moveLanguageSuffixToNextLine', {
+        sessionId,
+        index,
+        beforeText,
+        afterText,
+        languageId,
+      })
+      return
     }
 
     setLines((prev) => {
