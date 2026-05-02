@@ -45,6 +45,8 @@ const DEFAULT_TRANSCRIPTION_STATE = {
 
 const PROJECTOR_FONT_STEP = 5
 const PROJECTOR_POSITION_STEP = 1
+const PROJECTOR_REPEAT_START_DELAY_MS = 320
+const PROJECTOR_REPEAT_INTERVAL_MS = 85
 
 const TARGET_SAMPLE_RATE = 24000
 const GLOBAL_SESSION_ID = 'default'
@@ -703,6 +705,10 @@ const ControlPage = () => {
   const projectorLayoutDraftRef = useRef(normalizeProjectorLayout())
   const projectorDisplayModeDirtyRef = useRef(false)
   const projectorDisplayModeDraftRef = useRef(PROJECTOR_DISPLAY_MODES.SCRIPT)
+  const projectorRepeatRef = useRef({
+    startTimer: null,
+    repeatTimer: null,
+  })
   const captureStateRef = useRef({
     mediaStream: null,
     audioContext: null,
@@ -710,6 +716,18 @@ const ControlPage = () => {
     captureNode: null,
     silenceNode: null,
   })
+
+  const clearProjectorRepeat = useCallback(() => {
+    const repeatState = projectorRepeatRef.current
+    if (repeatState.startTimer) {
+      window.clearTimeout(repeatState.startTimer)
+      repeatState.startTimer = null
+    }
+    if (repeatState.repeatTimer) {
+      window.clearInterval(repeatState.repeatTimer)
+      repeatState.repeatTimer = null
+    }
+  }, [])
 
   const languages = useMemo(() => {
     const source = Array.isArray(sessionMeta?.languages)
@@ -847,6 +865,8 @@ const ControlPage = () => {
   useEffect(() => {
     setViewerAliasInput(sessionMeta?.viewerAlias || '')
   }, [sessionMeta?.viewerAlias])
+
+  useEffect(() => clearProjectorRepeat, [clearProjectorRepeat])
 
   useEffect(() => {
     let cancelled = false
@@ -2716,6 +2736,39 @@ const ControlPage = () => {
     updateProjectorLayout({ [field]: nextValue })
   }
 
+  const startProjectorLayoutRepeat = (field, delta, event) => {
+    if (event?.button != null && event.button !== 0) return
+    event?.preventDefault?.()
+    clearProjectorRepeat()
+    adjustProjectorLayout(field, delta)
+    projectorRepeatRef.current.startTimer = window.setTimeout(() => {
+      projectorRepeatRef.current.startTimer = null
+      projectorRepeatRef.current.repeatTimer = window.setInterval(() => {
+        adjustProjectorLayout(field, delta)
+      }, PROJECTOR_REPEAT_INTERVAL_MS)
+    }, PROJECTOR_REPEAT_START_DELAY_MS)
+  }
+
+  const stopProjectorLayoutRepeatFromKey = (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      clearProjectorRepeat()
+    }
+  }
+
+  const getProjectorRepeatHandlers = (field, delta) => ({
+    onPointerDown: (event) => startProjectorLayoutRepeat(field, delta, event),
+    onPointerUp: clearProjectorRepeat,
+    onPointerLeave: clearProjectorRepeat,
+    onPointerCancel: clearProjectorRepeat,
+    onKeyDown: (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      if (event.repeat) return
+      startProjectorLayoutRepeat(field, delta, event)
+    },
+    onKeyUp: stopProjectorLayoutRepeatFromKey,
+    onBlur: clearProjectorRepeat,
+  })
+
   const handleProjectorDisplayModeChange = (event) => {
     if (!socketRef.current || !sessionId) return
     const nextDisplayMode = normalizeProjectorDisplayMode(event.target.value)
@@ -3529,9 +3582,10 @@ const ControlPage = () => {
                       <button
                         type="button"
                         className="projector-step-button"
-                        onClick={() =>
-                          adjustProjectorLayout('fontSizePercent', -PROJECTOR_FONT_STEP)
-                        }
+                        {...getProjectorRepeatHandlers(
+                          'fontSizePercent',
+                          -PROJECTOR_FONT_STEP,
+                        )}
                       >
                         −
                       </button>
@@ -3539,9 +3593,10 @@ const ControlPage = () => {
                       <button
                         type="button"
                         className="projector-step-button"
-                        onClick={() =>
-                          adjustProjectorLayout('fontSizePercent', PROJECTOR_FONT_STEP)
-                        }
+                        {...getProjectorRepeatHandlers(
+                          'fontSizePercent',
+                          PROJECTOR_FONT_STEP,
+                        )}
                       >
                         +
                       </button>
@@ -3558,9 +3613,10 @@ const ControlPage = () => {
                         type="button"
                         className="projector-step-button"
                         aria-label="字幕往上移"
-                        onClick={() =>
-                          adjustProjectorLayout('offsetY', -PROJECTOR_POSITION_STEP)
-                        }
+                        {...getProjectorRepeatHandlers(
+                          'offsetY',
+                          -PROJECTOR_POSITION_STEP,
+                        )}
                       >
                         ↑
                       </button>
@@ -3569,9 +3625,10 @@ const ControlPage = () => {
                         type="button"
                         className="projector-step-button"
                         aria-label="字幕往左移"
-                        onClick={() =>
-                          adjustProjectorLayout('offsetX', -PROJECTOR_POSITION_STEP)
-                        }
+                        {...getProjectorRepeatHandlers(
+                          'offsetX',
+                          -PROJECTOR_POSITION_STEP,
+                        )}
                       >
                         ←
                       </button>
@@ -3580,9 +3637,10 @@ const ControlPage = () => {
                         type="button"
                         className="projector-step-button"
                         aria-label="字幕往右移"
-                        onClick={() =>
-                          adjustProjectorLayout('offsetX', PROJECTOR_POSITION_STEP)
-                        }
+                        {...getProjectorRepeatHandlers(
+                          'offsetX',
+                          PROJECTOR_POSITION_STEP,
+                        )}
                       >
                         →
                       </button>
@@ -3591,9 +3649,10 @@ const ControlPage = () => {
                         type="button"
                         className="projector-step-button"
                         aria-label="字幕往下移"
-                        onClick={() =>
-                          adjustProjectorLayout('offsetY', PROJECTOR_POSITION_STEP)
-                        }
+                        {...getProjectorRepeatHandlers(
+                          'offsetY',
+                          PROJECTOR_POSITION_STEP,
+                        )}
                       >
                         ↓
                       </button>

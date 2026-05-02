@@ -928,6 +928,8 @@
   color: #f8fafc;
   font-size: 1rem;
   line-height: 1;
+  touch-action: none;
+  user-select: none;
 }
 
 .projector-step-button:hover {
