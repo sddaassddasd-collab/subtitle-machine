@@ -409,6 +409,10 @@
   color: #93c5fd;
 }
 
+.script-compare-note {
+  color: #c4b5fd;
+}
+
 .script-music-hint {
   color: #f9a8d4;
 }
@@ -641,6 +645,11 @@
 
 .script-line-text.translation {
   color: #e0e7ff;
+}
+
+.script-line-text.readonly {
+  cursor: default;
+  opacity: 0.92;
 }
 
 .script-line-text.editing {

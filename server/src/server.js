@@ -3025,7 +3025,167 @@ function ensureSessionLanguages(session) {
   return session.languages;
 }
 
-function createCellDefinition(rawCell = {}, index = 0, primaryLanguageId = 'primary') {
+function normalizeSecondaryLanguageSourceSegments(entries) {
+  return normalizeScriptLines(Array.isArray(entries) ? entries : [], {
+    keepEmpty: false,
+    primaryLanguageId: 'primary',
+  }).map((line) => ({
+    text: sanitizeLineText(line?.text || ''),
+    type:
+      line?.type === LINE_TYPES.DIRECTION
+        ? LINE_TYPES.DIRECTION
+        : LINE_TYPES.DIALOGUE,
+    role: normalizeRoleName(line?.role),
+  })).filter((line) => line.text);
+}
+
+function normalizeSecondaryLanguageSourceTextToSegments(rawText) {
+  const normalizedText = sanitizeTranscriptionMultilineText(rawText);
+  if (!normalizedText) {
+    return [];
+  }
+
+  return normalizeSecondaryLanguageSourceSegments(normalizedText.split('\n'));
+}
+
+function buildSecondaryLanguageSourceText(segments) {
+  return normalizeSecondaryLanguageSourceSegments(segments)
+    .map((segment) => {
+      const text = sanitizeLineText(segment?.text || '');
+      if (!text) {
+        return '';
+      }
+      if (segment?.type === LINE_TYPES.DIRECTION) {
+        return text;
+      }
+      const role = normalizeRoleName(segment?.role);
+      return role ? `${role}：${text}` : text;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function normalizeCellLanguageSources(rawSources, languages = []) {
+  if (!rawSources || typeof rawSources !== 'object' || Array.isArray(rawSources)) {
+    return {};
+  }
+
+  const validLanguageIds = new Set(
+    (Array.isArray(languages) ? languages : [])
+      .map((language) =>
+        typeof language?.id === 'string' ? language.id.trim() : '',
+      )
+      .filter(Boolean),
+  );
+  const normalized = {};
+
+  Object.entries(rawSources).forEach(([languageId, value]) => {
+    const normalizedLanguageId = sanitizeLineText(languageId);
+    if (
+      !normalizedLanguageId ||
+      normalizedLanguageId === 'primary' ||
+      (validLanguageIds.size > 0 && !validLanguageIds.has(normalizedLanguageId))
+    ) {
+      return;
+    }
+
+    let segments = [];
+    let updatedAt = null;
+
+    if (Array.isArray(value)) {
+      segments = normalizeSecondaryLanguageSourceSegments(value);
+    } else if (typeof value === 'string') {
+      segments = normalizeSecondaryLanguageSourceTextToSegments(value);
+    } else if (value && typeof value === 'object') {
+      if (Array.isArray(value.segments)) {
+        segments = normalizeSecondaryLanguageSourceSegments(value.segments);
+      } else if (typeof value.text === 'string') {
+        segments = normalizeSecondaryLanguageSourceTextToSegments(value.text);
+      }
+      updatedAt =
+        Number.isFinite(value.updatedAt) && value.updatedAt > 0
+          ? value.updatedAt
+          : null;
+    }
+
+    if (segments.length === 0) {
+      return;
+    }
+
+    normalized[normalizedLanguageId] = {
+      segments,
+      updatedAt,
+    };
+  });
+
+  return normalized;
+}
+
+function setCellLanguageSource(cell, languageId, segments, updatedAt = Date.now()) {
+  if (!cell || typeof cell !== 'object') {
+    return;
+  }
+
+  const normalizedLanguageId = sanitizeLineText(languageId);
+  if (!normalizedLanguageId || normalizedLanguageId === 'primary') {
+    return;
+  }
+
+  const normalizedSegments = normalizeSecondaryLanguageSourceSegments(segments);
+  if (!cell.languageSources || typeof cell.languageSources !== 'object') {
+    cell.languageSources = {};
+  }
+
+  if (normalizedSegments.length === 0) {
+    delete cell.languageSources[normalizedLanguageId];
+    return;
+  }
+
+  cell.languageSources[normalizedLanguageId] = {
+    segments: normalizedSegments,
+    updatedAt:
+      Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
+  };
+}
+
+function getPublicCellLanguageSources(cell, languages = []) {
+  const publicSources = {};
+  const availableLanguages = Array.isArray(languages) ? languages : [];
+
+  availableLanguages.forEach((language) => {
+    const languageId =
+      typeof language?.id === 'string' ? language.id.trim() : '';
+    if (!languageId || languageId === 'primary') {
+      return;
+    }
+
+    const sourceEntry =
+      cell?.languageSources && typeof cell.languageSources === 'object'
+        ? cell.languageSources[languageId]
+        : null;
+    const segments = normalizeSecondaryLanguageSourceSegments(
+      Array.isArray(sourceEntry?.segments) ? sourceEntry.segments : [],
+    );
+
+    publicSources[languageId] = {
+      text: buildSecondaryLanguageSourceText(segments),
+      segmentCount: segments.length,
+      updatedAt:
+        Number.isFinite(sourceEntry?.updatedAt) && sourceEntry.updatedAt > 0
+          ? sourceEntry.updatedAt
+          : null,
+    };
+  });
+
+  return publicSources;
+}
+
+function createCellDefinition(
+  rawCell = {},
+  index = 0,
+  primaryLanguageId = 'primary',
+  languages = [],
+) {
   const name = sanitizeLineText(rawCell.name || `儲存格 ${index + 1}`).slice(0, 48);
   const rawLines = Array.isArray(rawCell.lines) ? rawCell.lines : [];
 
@@ -3039,6 +3199,10 @@ function createCellDefinition(rawCell = {}, index = 0, primaryLanguageId = 'prim
       keepEmpty: true,
       primaryLanguageId,
     }),
+    languageSources: normalizeCellLanguageSources(
+      rawCell.languageSources,
+      languages,
+    ),
   };
 }
 
@@ -3248,7 +3412,7 @@ function ensureSessionStructure(session) {
         ];
 
   session.cells = rawCells.map((cell, index) =>
-    createCellDefinition(cell, index, primaryLanguageId),
+    createCellDefinition(cell, index, primaryLanguageId, session.languages),
   );
 
   const selectedCell = getSelectedCell(session);
@@ -3325,6 +3489,7 @@ function serializeSessionForStorage(session) {
       id: cell.id,
       name: cell.name,
       lines: cell.lines,
+      languageSources: cell.languageSources,
     })),
   };
 }
@@ -3746,6 +3911,41 @@ async function parseAlignmentScriptWithOpenAI(rawText, apiKey, options = {}) {
   }
 
   return normalized;
+}
+
+async function parseSecondaryLanguageSourceWithOpenAI(
+  rawText,
+  apiKey,
+  options = {},
+) {
+  const languageCode =
+    typeof options.languageCode === 'string' ? options.languageCode : '';
+
+  try {
+    const parsedLines = await parseAlignmentScriptWithOpenAI(rawText, apiKey, {
+      languageCode,
+    });
+    return {
+      parsedLines,
+      warning: '',
+    };
+  } catch (error) {
+    console.error('Failed to parse target language script:', error);
+    if (!fallbackCodes.has(error?.code)) {
+      throw error;
+    }
+
+    const parsedLines = normalizeScriptLines(
+      fallbackSegmentScript(rawText, { languageCode }),
+    );
+
+    return {
+      parsedLines,
+      warning: error?.message
+        ? `OpenAI 語意分段失敗（${error.message}），已改用原稿語意分段`
+        : 'OpenAI 語意分段失敗，已改用原稿語意分段',
+    };
+  }
 }
 
 function sanitizeTranscriptionText(text) {
@@ -5682,10 +5882,15 @@ function getSessionSummary(session) {
 function getControlPayload(session) {
   const normalized = ensureSessionStructure(session);
   const lines = ensureSessionLines(normalized).map((line) => toPublicLine(line));
+  const selectedCell = getSelectedCell(normalized);
   return {
     sessionId: normalized.id,
     session: getSessionSummary(normalized),
     lines,
+    languageSources: getPublicCellLanguageSources(
+      selectedCell,
+      normalized.languages,
+    ),
     currentIndex: normalized.currentIndex,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
@@ -7118,35 +7323,16 @@ async function alignSecondaryLanguageWithOpenAI({
   languageName,
   languageCode,
 }) {
-  const warningMessages = [];
   const baseLines = buildLanguageAlignmentBaseLines(timelineLines, languageId);
   const supplementalBuckets = buildPreservedSupplementalAlignmentBuckets(
     timelineLines,
     languageId,
     baseLines.length,
   );
-  let parsedLines;
-
-  try {
-    parsedLines = await parseAlignmentScriptWithOpenAI(rawText, apiKey, {
-      languageCode,
-    });
-  } catch (error) {
-    console.error('Failed to parse target language script:', error);
-    if (!fallbackCodes.has(error?.code)) {
-      throw error;
-    }
-
-    const fallbackNormalized = normalizeScriptLines(
-      fallbackSegmentScript(rawText, { languageCode }),
-    );
-    parsedLines = fallbackNormalized;
-    warningMessages.push(
-      error?.message
-        ? `OpenAI 對齊分段失敗（${error.message}），已改用原稿語意分段`
-        : 'OpenAI 對齊分段失敗，已改用原稿語意分段',
-    );
-  }
+  const sourceResult = await parseSecondaryLanguageSourceWithOpenAI(rawText, apiKey, {
+    languageCode,
+  });
+  const parsedLines = sourceResult.parsedLines;
 
   const alignmentPlan = await alignParsedLanguageLinesWithOpenAI({
     apiKey,
@@ -7168,7 +7354,9 @@ async function alignSecondaryLanguageWithOpenAI({
 
   return {
     lines: mergedLines,
-    warning: warningMessages.join('；'),
+    warning: sourceResult.warning,
+    sourceLines: normalizeSecondaryLanguageSourceSegments(parsedLines),
+    sourceText: buildSecondaryLanguageSourceText(parsedLines),
   };
 }
 
@@ -7793,6 +7981,11 @@ app.delete('/api/session/:sessionId/languages/:languageId', requireAuth, (req, r
   session.languages.splice(languageIndex, 1);
   session.cells = session.cells.map((cell) => ({
     ...cell,
+    languageSources: Object.fromEntries(
+      Object.entries(cell.languageSources || {}).filter(
+        ([entryLanguageId]) => entryLanguageId !== languageId,
+      ),
+    ),
     lines: cell.lines
       .map((line) => {
         const translations = { ...(line.translations || {}) };
@@ -7868,8 +8061,10 @@ app.post(
       });
       const nextLines = alignmentResult.lines;
       const warning = alignmentResult.warning || '';
+      const sourceLines = alignmentResult.sourceLines || [];
 
       pushSessionHistory(session);
+      setCellLanguageSource(cell, language.id, sourceLines);
       cell.lines = normalizeScriptLines(nextLines, {
         keepEmpty: true,
         primaryLanguageId: 'primary',

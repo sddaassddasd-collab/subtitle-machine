@@ -447,18 +447,6 @@ const createBlankLineRecord = (
   }
 }
 
-const createBlankLineLikeRecord = (languages, sourceLine, languageId, text = '') =>
-  createBlankLineRecord(languages, {
-    type:
-      sourceLine && typeof sourceLine === 'object' && sourceLine.type === 'direction'
-        ? 'direction'
-        : 'dialogue',
-    music: isLineMarkedMusic(sourceLine),
-    role: sourceLine?.role || null,
-    languageId,
-    text,
-  })
-
 const updateLineLanguageText = (line, languageId, nextText) => {
   const currentPrimaryText = getLineLanguageText(line, 'primary')
   const baseLine =
@@ -521,105 +509,6 @@ const shouldRemoveLineAfterLanguageUpdate = (line, languageId, nextText) => {
   if (!line || typeof line !== 'object') return false
   const nextLine = updateLineLanguageText(line, languageId, nextText)
   return !lineHasAnyLanguageText(nextLine)
-}
-
-const applySecondaryLineSplitState = (
-  sourceLines,
-  index,
-  languageId,
-  beforeText,
-  afterText,
-  languages,
-) => {
-  if (
-    !Array.isArray(sourceLines) ||
-    index < 0 ||
-    index >= sourceLines.length ||
-    !languageId ||
-    languageId === 'primary'
-  ) {
-    return sourceLines
-  }
-
-  const next = [...sourceLines]
-  const currentLine = next[index]
-  next[index] = updateLineLanguageText(next[index], languageId, beforeText)
-
-  if (index + 1 < next.length) {
-    const nextText = getLineLanguageText(next[index + 1], languageId)
-    next[index + 1] = updateLineLanguageText(
-      next[index + 1],
-      languageId,
-      joinLineTextFragments(afterText, nextText),
-    )
-    return next
-  }
-
-  next.push(createBlankLineLikeRecord(languages, currentLine, languageId, afterText))
-  return next
-}
-
-const applySecondaryLineInsertState = (sourceLines, index, languageId, languages) => {
-  if (
-    !Array.isArray(sourceLines) ||
-    index < 0 ||
-    index >= sourceLines.length ||
-    !languageId ||
-    languageId === 'primary'
-  ) {
-    return sourceLines
-  }
-
-  const next = [...sourceLines]
-  const tailSource =
-    next[next.length - 1] ||
-    next[index] ||
-    createBlankLineLikeRecord(languages, null, languageId, '')
-  next.push(createBlankLineLikeRecord(languages, tailSource, languageId, ''))
-
-  for (let lineIndex = next.length - 1; lineIndex > index + 1; lineIndex -= 1) {
-    const carriedText = getLineLanguageText(next[lineIndex - 1], languageId)
-    next[lineIndex] = updateLineLanguageText(next[lineIndex], languageId, carriedText)
-  }
-
-  next[index + 1] = updateLineLanguageText(next[index + 1], languageId, '')
-  return next
-}
-
-const applySecondaryLineMergeState = (
-  sourceLines,
-  index,
-  languageId,
-  currentTextOverride = null,
-) => {
-  if (
-    !Array.isArray(sourceLines) ||
-    index <= 0 ||
-    index >= sourceLines.length ||
-    !languageId ||
-    languageId === 'primary'
-  ) {
-    return sourceLines
-  }
-
-  const next = [...sourceLines]
-  const previousText = getLineLanguageText(next[index - 1], languageId)
-  const currentText =
-    typeof currentTextOverride === 'string'
-      ? currentTextOverride
-      : getLineLanguageText(next[index], languageId)
-  next[index - 1] = updateLineLanguageText(
-    next[index - 1],
-    languageId,
-    joinLineTextFragments(previousText, currentText),
-  )
-  const clearedCurrentLine = updateLineLanguageText(next[index], languageId, '')
-  if (lineHasAnyLanguageText(clearedCurrentLine)) {
-    next[index] = clearedCurrentLine
-  } else {
-    next.splice(index, 1)
-  }
-  return next
 }
 
 const buildBlankTranslations = (languages) => {
@@ -703,6 +592,7 @@ const ControlPage = () => {
   const sessionBackupInputRef = useRef(null)
   const lineRefs = useRef({})
   const rowRefs = useRef([])
+  const serverDraftInputsRef = useRef({})
   const pendingLineClickTimeoutRef = useRef(null)
   const skipBlurRef = useRef(new Set())
   const lastTranscriptionErrorRef = useRef('')
@@ -786,6 +676,47 @@ const ControlPage = () => {
     if (!cellId || !languageId) return ''
     return draftInputs[cellId]?.[languageId] || ''
   }
+
+  const syncLanguageSourceDrafts = useCallback(
+    (cellId, languageSources, { forceLanguageId = '' } = {}) => {
+      if (!cellId || !languageSources || typeof languageSources !== 'object') return
+
+      setDraftInputs((prev) => {
+        const currentCellDrafts = prev[cellId] || {}
+        const previousServerDrafts = serverDraftInputsRef.current[cellId] || {}
+        const nextCellDrafts = { ...currentCellDrafts }
+        const nextServerDrafts = { ...previousServerDrafts }
+
+        Object.entries(languageSources).forEach(([languageId, entry]) => {
+          if (!languageId || languageId === 'primary') return
+          const nextText = typeof entry?.text === 'string' ? entry.text : ''
+          const localText = currentCellDrafts[languageId]
+          const previousServerText = previousServerDrafts[languageId]
+
+          if (
+            forceLanguageId === languageId ||
+            typeof localText !== 'string' ||
+            localText === previousServerText
+          ) {
+            nextCellDrafts[languageId] = nextText
+          }
+
+          nextServerDrafts[languageId] = nextText
+        })
+
+        serverDraftInputsRef.current = {
+          ...serverDraftInputsRef.current,
+          [cellId]: nextServerDrafts,
+        }
+
+        return {
+          ...prev,
+          [cellId]: nextCellDrafts,
+        }
+      })
+    },
+    [],
+  )
 
   const primaryScriptInput = getDraftInputValue(selectedCellId, 'primary')
 
@@ -888,8 +819,13 @@ const ControlPage = () => {
         Number.isInteger(payload?.currentIndex) ? payload.currentIndex : 0,
         nextLines.length,
       )
+      const nextSelectedCellId =
+        nextSession?.selectedCellId ||
+        (Array.isArray(nextSession?.cells) ? nextSession.cells[0]?.id : '') ||
+        ''
       setSessionMeta(nextSession)
       setLines(nextLines)
+      syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
       setLiveCurrentIndex(nextLiveIndex)
       setCurrentIndex((prev) =>
         editingModeEnabled ? clampLineIndex(prev, nextLines.length) : nextLiveIndex,
@@ -907,7 +843,7 @@ const ControlPage = () => {
         canRedo: payload?.history?.canRedo === true,
       })
     },
-    [applyProjectorSettingsPayload, editingModeEnabled],
+    [applyProjectorSettingsPayload, editingModeEnabled, syncLanguageSourceDrafts],
   )
 
   const releaseMicrophoneCapture = () => {
@@ -1100,7 +1036,11 @@ const ControlPage = () => {
   }, [lines.length])
 
   useEffect(() => {
-    if (!editingCell || editingCell.languageId === 'primary') return
+    if (!editingCell) return
+    if (editingCell.languageId !== 'primary') {
+      setEditingCell(null)
+      return
+    }
     if (!languages.some((language) => language.id === editingCell.languageId)) {
       setEditingCell(null)
     }
@@ -1824,10 +1764,16 @@ const ControlPage = () => {
     event.stopPropagation()
     clearPendingLineClick()
     setRoleEditor(null)
+    if (languageId !== 'primary') {
+      return
+    }
     setEditingCell({ index, languageId })
   }
 
   const handleLineBlur = (event, index, languageId) => {
+    if (languageId !== 'primary') {
+      return
+    }
     const cellKey = getEditingCellKey(index, languageId)
     if (skipBlurRef.current.has(cellKey)) {
       skipBlurRef.current.delete(cellKey)
@@ -1964,6 +1910,7 @@ const ControlPage = () => {
   }
 
   const handleLineKeyDown = (event, index, languageId) => {
+    if (languageId !== 'primary') return
     if (!socketRef.current || !sessionId || !window.getSelection) return
 
     const cellKey = getEditingCellKey(index, languageId)
@@ -1994,33 +1941,26 @@ const ControlPage = () => {
     ) {
       event.preventDefault()
       const currentText = normalizedFull
-      if (languageId === 'primary') {
-        setLines((prev) => {
-          const next = [...prev]
-          next.splice(
-            index - 1,
-            2,
-            mergeLineRecords(next[index - 1], next[index], currentText),
-          )
-          return next
-        })
-        setCurrentIndex((prev) => {
-          if (prev > index) return Math.max(prev - 1, 0)
-          if (prev === index) return index - 1
-          return prev
-        })
-        setPendingMusicRangeStartIndex((prev) => {
-          if (prev == null) return prev
-          if (prev === index) return index - 1
-          if (prev > index) return prev - 1
-          return prev
-        })
-      } else {
-        setLines((prev) =>
-          applySecondaryLineMergeState(prev, index, languageId, currentText),
+      setLines((prev) => {
+        const next = [...prev]
+        next.splice(
+          index - 1,
+          2,
+          mergeLineRecords(next[index - 1], next[index], currentText),
         )
-        setCurrentIndex(index - 1)
-      }
+        return next
+      })
+      setCurrentIndex((prev) => {
+        if (prev > index) return Math.max(prev - 1, 0)
+        if (prev === index) return index - 1
+        return prev
+      })
+      setPendingMusicRangeStartIndex((prev) => {
+        if (prev == null) return prev
+        if (prev === index) return index - 1
+        if (prev > index) return prev - 1
+        return prev
+      })
       setEditingCell({ index: index - 1, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('mergeLineIntoPrevious', {
@@ -2036,7 +1976,7 @@ const ControlPage = () => {
     if (event.key !== 'Enter') return
     if (event.shiftKey || event.isComposing || event.keyCode === 229) return
 
-    if (normalizedFull || languageId !== 'primary') {
+    if (normalizedFull) {
       setLines((prev) =>
         applyLineLanguageTextUpdate(prev, index, languageId, normalizedFull),
       )
@@ -2044,59 +1984,6 @@ const ControlPage = () => {
 
     if (!beforeText) return
     event.preventDefault()
-
-    if (languageId !== 'primary') {
-      if (beforeText !== currentLanguageText) {
-        socketRef.current.emit('updateLine', {
-          sessionId,
-          index,
-          text: beforeText,
-          languageId,
-        })
-      }
-
-      skipBlurRef.current.add(cellKey)
-      if (node.textContent !== beforeText) {
-        node.textContent = beforeText
-      }
-
-      if (!afterText) {
-        setLines((prev) =>
-          applySecondaryLineInsertState(prev, index, languageId, languages),
-        )
-        setCurrentIndex(index + 1)
-        setEditingCell({ index: index + 1, languageId })
-        setAutoCenterEnabled(true)
-        socketRef.current.emit('shiftLanguageDown', {
-          sessionId,
-          index,
-          languageId,
-        })
-        return
-      }
-
-      setLines((prev) =>
-        applySecondaryLineSplitState(
-          prev,
-          index,
-          languageId,
-          beforeText,
-          afterText,
-          languages,
-        ),
-      )
-      setCurrentIndex(index + 1)
-      setEditingCell({ index: index + 1, languageId })
-      setAutoCenterEnabled(true)
-      socketRef.current.emit('moveLanguageSuffixToNextLine', {
-        sessionId,
-        index,
-        beforeText,
-        afterText,
-        languageId,
-      })
-      return
-    }
 
     if (!afterText) {
       if (beforeText !== currentLanguageText) {
@@ -2472,6 +2359,8 @@ const ControlPage = () => {
     }
 
     const scriptText = getDraftInputValue(selectedCellId, languageId)
+    const languageName =
+      languages.find((language) => language.id === languageId)?.name || '目標語言'
     if (!scriptText.trim()) {
       setStatus({ kind: 'error', message: '請先貼上目標語言文字' })
       return
@@ -2479,7 +2368,7 @@ const ControlPage = () => {
 
     try {
       setParsingLanguageId(languageId)
-      setStatus({ kind: 'info', message: '正在對齊多語字幕…' })
+      setStatus({ kind: 'info', message: '正在整理語意分段並更新播放預覽…' })
       const data = await performSessionMutation(
         () =>
           fetch(
@@ -2493,11 +2382,23 @@ const ControlPage = () => {
               }),
             },
           ),
-        { successMessage: '多語字幕已對齊', keepStatus: true },
+        { successMessage: '多語語意段落已更新', keepStatus: true },
       )
+      syncLanguageSourceDrafts(selectedCellId, data?.languageSources, {
+        forceLanguageId: languageId,
+      })
+      const segmentCount = Number.isInteger(
+        data?.languageSources?.[languageId]?.segmentCount,
+      )
+        ? data.languageSources[languageId].segmentCount
+        : null
       setStatus({
         kind: data?.warning ? 'info' : 'success',
-        message: data?.warning || '多語字幕已對齊',
+        message:
+          data?.warning ||
+          (segmentCount && segmentCount > 0
+            ? `${languageName} 語意分段已更新（${segmentCount} 段），播放預覽已重編`
+            : `${languageName} 語意分段已更新，播放預覽已重編`),
       })
     } finally {
       setParsingLanguageId('')
@@ -2805,6 +2706,9 @@ const ControlPage = () => {
     ? currentIndex === liveCurrentIndex
       ? '編輯模式已開啟，清單暫停跟隨 CUE。'
       : `編輯模式：停留在第 ${currentIndex + 1} 行，直播 CUE 在第 ${liveCurrentIndex + 1} 行。`
+    : ''
+  const comparisonLanguagePreviewNote = comparisonLanguage
+    ? `${comparisonLanguage.name} 欄是播放對齊預覽；實際編輯請在左側輸入區調整語意分段。`
     : ''
   lineRefs.current = {}
   rowRefs.current = []
@@ -3170,19 +3074,24 @@ const ControlPage = () => {
                 <textarea
                   id={`language-input-${language.id}`}
                   rows={5}
-                  placeholder={`貼上 ${language.name} 全文，系統會依第一語言分段對齊。`}
+                  placeholder={`貼上 ${language.name} 全文，系統會先整理成語意段落，再更新檢視端與投影端的播放對齊。`}
                   value={getDraftInputValue(selectedCellId, language.id)}
                   onChange={(event) =>
                     setDraftInputValue(selectedCellId, language.id, event.target.value)
                   }
                 />
+                <span className="input-note">
+                  這裡編輯的是未對齊語意段落；右側字幕清單只顯示播放時的對齊預覽。
+                </span>
                 <button
                   type="submit"
                   disabled={
                     parsingLanguageId === language.id || !selectedCellId || !lines.length
                   }
                 >
-                  {parsingLanguageId === language.id ? '對齊中…' : `解析 ${language.name}`}
+                  {parsingLanguageId === language.id
+                    ? '處理中…'
+                    : `更新 ${language.name} 播放預覽`}
                 </button>
               </form>
             ))}
@@ -3549,6 +3458,9 @@ const ControlPage = () => {
               {editingModeEnabled && editingModeLabel && (
                 <small className="script-edit-mode-note">{editingModeLabel}</small>
               )}
+              {comparisonLanguagePreviewNote && (
+                <small className="script-compare-note">{comparisonLanguagePreviewNote}</small>
+              )}
               <small className="script-music-hint">{musicSelectionHint}</small>
             </div>
           </div>
@@ -3671,7 +3583,7 @@ const ControlPage = () => {
                     )}
                     {translatedCount > 0 && (
                       <span className="script-line-type type-language">
-                        {translatedCount} 語已對齊
+                        {translatedCount} 語已編譯
                       </span>
                     )}
                     {liveCurrentIndex === index && (
@@ -3745,8 +3657,8 @@ const ControlPage = () => {
                       <div key={language.id} className="script-line-column">
                         <div className="script-line-column-label">
                           <span>{language.name}</span>
-                          {language.id !== 'primary' && !text.trim() && (
-                            <small>尚未填寫</small>
+                          {language.id !== 'primary' && (
+                            <small>{text.trim() ? '播放預覽' : '尚未編譯'}</small>
                           )}
                         </div>
                         <div
@@ -3755,11 +3667,11 @@ const ControlPage = () => {
                           }}
                           className={`script-line-text ${
                             isEditing ? 'editing' : ''
-                          } ${language.id !== 'primary' ? 'translation' : ''}`}
-                          contentEditable={Boolean(isEditing)}
+                          } ${language.id !== 'primary' ? 'translation readonly' : ''}`}
+                          contentEditable={language.id === 'primary' && Boolean(isEditing)}
                           suppressContentEditableWarning
                           spellCheck={false}
-                          tabIndex={0}
+                          tabIndex={language.id === 'primary' ? 0 : -1}
                           onClick={(event) =>
                             handleLineTextClick(event, index, language.id)
                           }
