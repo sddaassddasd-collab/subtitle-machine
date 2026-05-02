@@ -3482,6 +3482,50 @@ function createSessionRecord(ownerUserId) {
   });
 }
 
+function createGlobalSessionRecord(ownerUserId = SHARED_ACCESS_USER_ID) {
+  const session = createSessionRecord(ownerUserId || SHARED_ACCESS_USER_ID);
+  session.id = DEFAULT_SESSION_ID;
+  session.ownerUserId = ownerUserId || SHARED_ACCESS_USER_ID;
+  if (!sanitizeLineText(session.title || '')) {
+    session.title = '全域字幕工作區';
+  }
+  return ensureSessionStructure(session);
+}
+
+function getGlobalSessionCandidate() {
+  const currentGlobal = sessions.get(DEFAULT_SESSION_ID);
+  if (currentGlobal) {
+    return ensureSessionStructure(currentGlobal);
+  }
+
+  const candidates = Array.from(sessions.values())
+    .map((session) => ensureSessionStructure(session))
+    .filter(Boolean)
+    .sort((left, right) => {
+      const rightUpdatedAt = Number.isFinite(right?.updatedAt) ? right.updatedAt : 0;
+      const leftUpdatedAt = Number.isFinite(left?.updatedAt) ? left.updatedAt : 0;
+      return rightUpdatedAt - leftUpdatedAt;
+    });
+
+  return candidates[0] || null;
+}
+
+function collapseToGlobalSession() {
+  const seededSession = getGlobalSessionCandidate();
+  const nextSession = seededSession
+    ? ensureSessionStructure(JSON.parse(JSON.stringify(seededSession)))
+    : createGlobalSessionRecord();
+
+  nextSession.id = DEFAULT_SESSION_ID;
+  if (!sanitizeLineText(nextSession.title || '')) {
+    nextSession.title = '全域字幕工作區';
+  }
+  clearPublicSessionTombstones(nextSession);
+  sessions.clear();
+  sessions.set(DEFAULT_SESSION_ID, ensureSessionStructure(nextSession));
+  return sessions.get(DEFAULT_SESSION_ID);
+}
+
 function serializeSessionForStorage(session) {
   const normalized = ensureSessionStructure({ ...session });
   return {
@@ -3669,6 +3713,7 @@ function hydrateApplicationStore(persistedStore) {
     sessions.set(normalized.id, normalized);
   });
 
+  collapseToGlobalSession();
   cleanupExpiredAuthSessions();
   ensureAdminBootstrapUser();
 }
@@ -3676,6 +3721,7 @@ function hydrateApplicationStore(persistedStore) {
 async function initializeApplicationStore() {
   const persistedStore = await loadStore();
   hydrateApplicationStore(persistedStore);
+  collapseToGlobalSession();
   await persistApplicationStore({ throwOnError: true });
 }
 
@@ -6169,6 +6215,16 @@ function getProjectorLayoutPayload(session) {
  * Returns or creates a session state bucket.
  */
 function ensureSession(sessionId, ownerUserId = '') {
+  if (sessionId === DEFAULT_SESSION_ID) {
+    const existingGlobal = sessions.get(DEFAULT_SESSION_ID);
+    if (!existingGlobal) {
+      const session = createGlobalSessionRecord(ownerUserId || SHARED_ACCESS_USER_ID);
+      sessions.clear();
+      sessions.set(DEFAULT_SESSION_ID, session);
+    }
+    return ensureSessionStructure(sessions.get(DEFAULT_SESSION_ID));
+  }
+
   if (!sessions.has(sessionId)) {
     const session = createSessionRecord(ownerUserId);
     session.id = sessionId;
@@ -6233,6 +6289,10 @@ function getViewerEntryRedirectPath(session) {
 }
 
 function getOwnedSession(sessionId, userId) {
+  if (sessionId === DEFAULT_SESSION_ID) {
+    return ensureSession(DEFAULT_SESSION_ID, userId || SHARED_ACCESS_USER_ID);
+  }
+
   const session = getSession(sessionId);
   if (!session) return null;
   if (!userId) return null;
@@ -6251,6 +6311,9 @@ function persistSession(session) {
   if (!session) return;
   touchSession(session);
   clearPublicSessionTombstones(session);
+  if (session.id === DEFAULT_SESSION_ID) {
+    sessions.clear();
+  }
   sessions.set(session.id, session);
   persistApplicationStore();
 }
@@ -7441,7 +7504,10 @@ function getOwnedSessionFromRequest(req, res) {
     res.status(403).json({ error: '目前權限無法管理控制端場次' });
     return null;
   }
-  const { sessionId } = req.params;
+  const sessionId =
+    typeof req.params?.sessionId === 'string' && req.params.sessionId.trim()
+      ? req.params.sessionId.trim()
+      : DEFAULT_SESSION_ID;
   const userId = req.authUser?.id;
   const session = getOwnedSession(sessionId, userId);
   if (!session) {
@@ -7729,25 +7795,16 @@ app.delete('/api/admin/users/:userId', requireAdmin, (req, res) => {
 });
 
 app.get('/api/sessions', requireAuth, (req, res) => {
-  const visibleSessions = Array.from(sessions.values())
-    .filter((session) =>
-      isSharedAccessUser(req.authUser)
-        ? true
-        : session.ownerUserId === req.authUser.id,
-    )
-    .map((session) => getSessionSummary(session))
-    .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
-
-  res.json({ sessions: visibleSessions });
+  const globalSession = ensureSession(DEFAULT_SESSION_ID, req.authUser?.id);
+  res.json({ sessions: [getSessionSummary(globalSession)] });
 });
 
 app.post('/api/session', requireSessionManager, (req, res) => {
-  const session = createSessionRecord(req.authUser.id);
+  const session = ensureSession(DEFAULT_SESSION_ID, req.authUser?.id);
   const requestedTitle = sanitizeLineText(req.body?.title || '');
   if (requestedTitle) {
     session.title = requestedTitle.slice(0, 60);
   }
-  sessions.set(session.id, session);
   persistSession(session);
   res.json(getControlPayload(session));
 });
@@ -7755,13 +7812,23 @@ app.post('/api/session', requireSessionManager, (req, res) => {
 app.post('/api/session/import', requireSessionManager, (req, res) => {
   try {
     const session = createImportedSessionFromBackup(req.body, req.authUser);
-    validateImportedSessionConflict(session);
-    sessions.set(session.id, session);
+    stopTranscriptionStream(DEFAULT_SESSION_ID, {
+      keepText: false,
+      reason: 'workspace import',
+    });
+    session.id = DEFAULT_SESSION_ID;
+    session.ownerUserId = SHARED_ACCESS_USER_ID;
+    session.transcription = defaultTranscriptionState();
+    session.history = { past: [], future: [] };
+    syncSelectedCellLines(session);
+    clearPublicSessionTombstones(session);
+    sessions.clear();
+    sessions.set(DEFAULT_SESSION_ID, ensureSessionStructure(session));
     persistSession(session);
     res.status(201).json(getControlPayload(session));
   } catch (error) {
     res.status(400).json({
-      error: error?.message || '匯入場次備份失敗',
+      error: error?.message || '匯入工作區備份失敗',
     });
   }
 });

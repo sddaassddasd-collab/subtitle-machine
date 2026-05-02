@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
 import {
@@ -47,6 +47,7 @@ const PROJECTOR_FONT_STEP = 5
 const PROJECTOR_POSITION_STEP = 1
 
 const TARGET_SAMPLE_RATE = 24000
+const GLOBAL_SESSION_ID = 'default'
 const MIC_CAPTURE_WORKLET_URL = new URL(
   '../worklets/mic-capture-processor.js',
   import.meta.url,
@@ -534,17 +535,11 @@ const formatStatusTimestamp = (timestamp) => {
 }
 
 const ControlPage = () => {
-  const location = useLocation()
   const navigate = useNavigate()
-  const query = useMemo(
-    () => new URLSearchParams(location.search),
-    [location.search],
-  )
-  const requestedSessionId = query.get('session') || ''
 
   const [user, setUser] = useState(null)
   const [authReady, setAuthReady] = useState(false)
-  const [sessionId, setSessionId] = useState(requestedSessionId)
+  const sessionId = GLOBAL_SESSION_ID
   const [sessionMeta, setSessionMeta] = useState(null)
   const [lines, setLines] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -975,17 +970,6 @@ const ControlPage = () => {
   }, [navigate])
 
   useEffect(() => {
-    setSessionId(requestedSessionId)
-  }, [requestedSessionId])
-
-  useEffect(() => {
-    if (!authReady || !user) return
-    if (!requestedSessionId) {
-      navigate('/', { replace: true })
-    }
-  }, [authReady, user, requestedSessionId, navigate])
-
-  useEffect(() => {
     if (!extraLanguages.length) {
       setComparisonLanguageId(PRIMARY_ONLY_OPTION_ID)
       return
@@ -1106,7 +1090,7 @@ const ControlPage = () => {
       try {
         const response = await fetch(`/api/session/${sessionId}`)
         if (!response.ok) {
-          throw new Error('找不到場次或無法載入資料')
+          throw new Error('無法載入全域字幕工作區')
         }
         const data = await response.json()
         if (disposed) return
@@ -1115,7 +1099,7 @@ const ControlPage = () => {
         if (!disposed) {
           setStatus({
             kind: 'error',
-            message: error?.message || '找不到場次或無法載入資料',
+            message: error?.message || '無法載入全域字幕工作區',
           })
         }
       }
@@ -1200,7 +1184,7 @@ const ControlPage = () => {
     if (!sessionId) return
     const response = await fetch(`/api/session/${sessionId}`)
     if (!response.ok) {
-      throw new Error('無法重新載入場次')
+      throw new Error('無法重新載入全域字幕工作區')
     }
     const data = await response.json()
     applySessionPayload(data)
@@ -1285,8 +1269,8 @@ const ControlPage = () => {
     setStatus({
       kind: 'info',
       message: nextState
-        ? '本場次已開啟「此段有音樂」效果'
-        : '本場次已關閉「此段有音樂」效果',
+        ? '已開啟「此段有音樂」效果'
+        : '已關閉「此段有音樂」效果',
     })
   }
 
@@ -1461,7 +1445,7 @@ const ControlPage = () => {
 
   const handleStartLiveTranscription = async () => {
     if (!socketRef.current || !sessionId) {
-      setStatus({ kind: 'error', message: '尚未連上場次，無法啟動語音辨識' })
+      setStatus({ kind: 'error', message: '尚未連上全域工作區，無法啟動語音辨識' })
       return
     }
 
@@ -2231,14 +2215,14 @@ const ControlPage = () => {
       const response = await fetch(`/api/session/${sessionId}/backup`)
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '匯出場次備份失敗')
+        throw new Error(data.error || '匯出工作區備份失敗')
       }
 
       const payload = JSON.stringify(data, null, 2)
       const blob = new Blob([payload], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
-      const filenameBase = (sessionMeta?.title || sessionId || 'session')
+      const filenameBase = (sessionMeta?.title || 'workspace')
         .replace(/[<>:"/\\|?*]+/g, '-')
         .trim()
       link.href = url
@@ -2247,11 +2231,11 @@ const ControlPage = () => {
       link.click()
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
-      setStatus({ kind: 'success', message: '場次備份 JSON 已匯出' })
+      setStatus({ kind: 'success', message: '工作區備份 JSON 已匯出' })
     } catch (error) {
       setStatus({
         kind: 'error',
-        message: error.message || '匯出場次備份失敗',
+        message: error.message || '匯出工作區備份失敗',
       })
     }
   }
@@ -2274,23 +2258,18 @@ const ControlPage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '匯入場次備份失敗')
-      }
-
-      const nextSessionId = data?.sessionId || data?.session?.id
-      if (!nextSessionId) {
-        throw new Error('匯入完成，但無法取得場次 ID')
+        throw new Error(data.error || '匯入工作區備份失敗')
       }
 
       setStatus({
         kind: 'success',
-        message: `場次備份已匯入：${nextSessionId}`,
+        message: '工作區備份已匯入',
       })
-      navigate(`/control?session=${encodeURIComponent(nextSessionId)}`)
+      navigate('/control')
     } catch (error) {
       setStatus({
         kind: 'error',
-        message: error.message || '匯入場次備份失敗',
+        message: error.message || '匯入工作區備份失敗',
       })
     } finally {
       setImportingSessionBackup(false)
@@ -2689,7 +2668,7 @@ const ControlPage = () => {
   const handleEndSession = async () => {
     if (!sessionId) return
     const confirmed = window.confirm(
-      '結束場次後，外部字幕會停止顯示，但檢視端與投影端網址不會失效。要繼續嗎？',
+      '停止外部字幕輸出後，檢視端與投影端網址仍可使用。要繼續嗎？',
     )
     if (!confirmed) return
     await performSessionMutation(
@@ -2697,7 +2676,7 @@ const ControlPage = () => {
         fetch(`/api/session/${sessionId}/end`, {
           method: 'POST',
         }),
-      { successMessage: '場次已結束，外部字幕已停止顯示' },
+      { successMessage: '外部字幕已停止顯示' },
     )
   }
 
@@ -2795,7 +2774,7 @@ const ControlPage = () => {
     )
   }
 
-  if (!user || !sessionId) {
+  if (!user) {
     return null
   }
 
@@ -2816,7 +2795,7 @@ const ControlPage = () => {
               className="subtle-button"
               onClick={() => navigate('/')}
             >
-              返回場次列表
+              返回首頁
             </button>
           )}
         </div>
@@ -2826,11 +2805,11 @@ const ControlPage = () => {
             <header className="control-header">
               <div className="session-title-row">
                 <div>
-                  <h1>{sessionMeta?.title || '控制端'}</h1>
+                  <h1>{sessionMeta?.title || '全域字幕工作區'}</h1>
                   <p className="input-note">
                     {sessionMeta?.status === 'ended'
-                      ? '已結束場次，檢視端與投影端網址仍可使用，但外部字幕預設為停止顯示'
-                      : '進行中場次'}
+                      ? '已停止外部字幕輸出；檢視端與投影端網址仍可使用'
+                      : '全域工作區啟用中'}
                   </p>
                 </div>
                 <span className={`session-state-badge ${sessionMeta?.status || 'active'}`}>
@@ -2860,10 +2839,10 @@ const ControlPage = () => {
               <div className="input-group">
                 <label htmlFor="viewer-alias">檢視端分享網址</label>
                 <p className="input-note">
-                  觀眾掃進去後會立即鎖定到當下場次；你之後改入口名稱，不會把已進場觀眾切到別場。
+                  觀眾掃進去後會直接連到目前這份全域字幕工作區。
                 </p>
                 <div className="viewer-link">
-                  <span>{viewerShareUrl || '尚未建立場次'}</span>
+                  <span>{viewerShareUrl || '尚未載入工作區'}</span>
                   <button type="button" onClick={handleCopyViewerLink}>
                     複製
                   </button>
@@ -2894,7 +2873,7 @@ const ControlPage = () => {
                   可用中文、英文、數字、-、_；空白會自動轉成 -。未設定時會直接使用固定亂碼網址。
                 </p>
                 <div className="viewer-link viewer-link-secondary">
-                  <span>{viewerUrl || '尚未建立場次'}</span>
+                  <span>{viewerUrl || '尚未載入工作區'}</span>
                   <button type="button" onClick={handleCopyViewerFixedLink}>
                     複製固定網址
                   </button>
@@ -2912,7 +2891,7 @@ const ControlPage = () => {
               <div className="input-group">
                 <label>投影端網址</label>
                 <div className="viewer-link">
-                  <span>{projectorUrl || '尚未建立場次'}</span>
+                  <span>{projectorUrl || '尚未載入工作區'}</span>
                   <button type="button" onClick={handleCopyProjectorLink}>
                     複製
                   </button>
@@ -3114,22 +3093,22 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                這裡只會處理目前選取儲存格的字幕內容，不包含整個場次設定。
+                這裡只會處理目前選取儲存格的字幕內容，不包含整個工作區設定。
               </span>
             </div>
 
             <div className="input-group">
-              <label>場次備份 JSON</label>
+              <label>工作區備份 JSON</label>
               <div className="json-actions">
                 <button
                   type="button"
                   onClick={() => sessionBackupInputRef.current?.click()}
                   disabled={importingSessionBackup}
                 >
-                  {importingSessionBackup ? '匯入中…' : '匯入場次備份 JSON'}
+                  {importingSessionBackup ? '匯入中…' : '匯入工作區備份 JSON'}
                 </button>
                 <button type="button" onClick={handleExportSessionBackup}>
-                  匯出場次備份 JSON
+                  匯出工作區備份 JSON
                 </button>
                 <input
                   ref={sessionBackupInputRef}
@@ -3140,7 +3119,7 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                可直接在控制端匯入或匯出整個場次的語言、所有儲存格、字幕內容、投影設定與原本場次 ID。
+                可直接在控制端匯入或匯出整個工作區的語言、所有儲存格、字幕內容與投影設定。
               </span>
             </div>
 
@@ -3174,7 +3153,7 @@ const ControlPage = () => {
                 onClick={handleEndSession}
                 disabled={sessionMeta?.status === 'ended'}
               >
-                結束場次
+                停止外部字幕
               </button>
             </div>
 
@@ -3314,7 +3293,7 @@ const ControlPage = () => {
               )}
               {!musicEffectEnabled && (
                 <div className="viewer-preview-note">
-                  本場次已關閉「此段有音樂」效果，逐行音樂標記會保留但不顯示。
+                  目前已關閉「此段有音樂」效果，逐行音樂標記會保留但不顯示。
                 </div>
               )}
               <div className="projector-preview-controls">

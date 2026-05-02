@@ -6,31 +6,11 @@ const HomePage = () => {
   const backupInputRef = useRef(null)
   const [password, setPassword] = useState('')
   const [user, setUser] = useState(null)
-  const [sessions, setSessions] = useState([])
   const [authLoading, setAuthLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [creating, setCreating] = useState(false)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-
-  const loadSessions = async () => {
-    const response = await fetch('/api/sessions')
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      throw new Error(data.error || '無法載入場次列表')
-    }
-    setSessions(Array.isArray(data?.sessions) ? data.sessions : [])
-  }
-
-  const syncUserState = async (nextUser) => {
-    setUser(nextUser || null)
-    if (nextUser) {
-      await loadSessions()
-      return
-    }
-    setSessions([])
-  }
 
   useEffect(() => {
     let cancelled = false
@@ -42,13 +22,6 @@ const HomePage = () => {
         if (cancelled) return
         if (data?.user) {
           setUser(data.user)
-          const sessionResponse = await fetch('/api/sessions')
-          const sessionData = await sessionResponse.json().catch(() => ({}))
-          if (!cancelled && sessionResponse.ok) {
-            setSessions(
-              Array.isArray(sessionData?.sessions) ? sessionData.sessions : [],
-            )
-          }
         }
       } catch {
         // Keep locked state when bootstrap fails.
@@ -59,7 +32,7 @@ const HomePage = () => {
       }
     }
 
-    bootstrap()
+    void bootstrap()
     return () => {
       cancelled = true
     }
@@ -86,7 +59,7 @@ const HomePage = () => {
         throw new Error(data.error || '密碼錯誤')
       }
 
-      await syncUserState(data?.user || null)
+      setUser(data?.user || null)
       setPassword('')
     } catch (accessError) {
       setError(accessError.message || '密碼錯誤')
@@ -102,42 +75,13 @@ const HomePage = () => {
       })
     } finally {
       setUser(null)
-      setSessions([])
       setPassword('')
       setError('')
       setNotice('')
     }
   }
 
-  const handleCreateSession = async () => {
-    setCreating(true)
-    setError('')
-    setNotice('')
-
-    try {
-      const response = await fetch('/api/session', {
-        method: 'POST',
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        throw new Error(data.error || '建立場次失敗')
-      }
-
-      const nextSessionId = data?.sessionId || data?.session?.id
-      if (!nextSessionId) {
-        throw new Error('建立場次失敗')
-      }
-
-      await loadSessions()
-      navigate(`/control?session=${encodeURIComponent(nextSessionId)}`)
-    } catch (createError) {
-      setError(createError.message || '建立場次失敗')
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  const handleImportSessionBackup = async (event) => {
+  const handleImportWorkspaceBackup = async (event) => {
     const file = event.target.files?.[0]
     if (!file) return
 
@@ -157,19 +101,13 @@ const HomePage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '匯入場次備份失敗')
+        throw new Error(data.error || '匯入工作區備份失敗')
       }
 
-      const nextSessionId = data?.sessionId || data?.session?.id
-      if (!nextSessionId) {
-        throw new Error('匯入完成，但無法取得場次 ID')
-      }
-
-      await loadSessions()
-      setNotice(`場次備份已匯入：${nextSessionId}`)
-      navigate(`/control?session=${encodeURIComponent(nextSessionId)}`)
+      setNotice('工作區備份已匯入')
+      navigate('/control')
     } catch (importError) {
-      setError(importError.message || '匯入場次備份失敗')
+      setError(importError.message || '匯入工作區備份失敗')
     } finally {
       setImporting(false)
       if (backupInputRef.current) {
@@ -196,8 +134,8 @@ const HomePage = () => {
               <p>登入系統已暫時隱藏，目前改為共用密碼進入控制端。</p>
             </div>
             <div className="info-panel compact">
-              <strong>進入後即可查看既有場次或建立新場次</strong>
-              <span>檢視端與投影端連結仍會照常由控制端產生。</span>
+              <strong>進入後會直接接到同一份全域字幕工作區</strong>
+              <span>不再切換場次，控制端、檢視端與投影端都共用這一份狀態。</span>
             </div>
             <form className="auth-form" onSubmit={handleAccessSubmit}>
               <label htmlFor="shared-password">密碼</label>
@@ -225,12 +163,12 @@ const HomePage = () => {
       <div className="dashboard-shell">
         <section className="dashboard-header-card">
           <div>
-            <h1>我的字幕系統</h1>
-            <p>目前以共用密碼模式進入，可直接管理所有場次。</p>
+            <h1>全域字幕工作區</h1>
+            <p>目前所有控制頁都會連到同一份字幕狀態，不再切換場次。</p>
           </div>
           <div className="dashboard-actions">
-            <button onClick={handleCreateSession} disabled={creating}>
-              {creating ? '建立中…' : '建立新場次'}
+            <button type="button" onClick={() => navigate('/control')}>
+              進入控制端
             </button>
             <button
               type="button"
@@ -244,9 +182,9 @@ const HomePage = () => {
 
         <section className="dashboard-settings-card">
           <div>
-            <h2>場次備份</h2>
+            <h2>工作區備份</h2>
             <p>
-              若要在 Render 免費版重部署後保留字幕，可先從控制端匯出場次備份 JSON，再從這裡手動匯入。
+              匯入備份會直接覆蓋目前這份全域工作區，包含語言、儲存格、字幕內容與投影設定。
             </p>
           </div>
           <div className="dashboard-actions">
@@ -256,63 +194,20 @@ const HomePage = () => {
               onClick={() => backupInputRef.current?.click()}
               disabled={importing}
             >
-              {importing ? '匯入中…' : '匯入場次備份 JSON'}
+              {importing ? '匯入中…' : '匯入工作區備份 JSON'}
             </button>
             <input
               ref={backupInputRef}
               type="file"
               accept=".json,application/json"
               style={{ display: 'none' }}
-              onChange={handleImportSessionBackup}
+              onChange={handleImportWorkspaceBackup}
             />
           </div>
         </section>
 
         {notice && <div className="status-success">{notice}</div>}
         {error && <div className="status-error">{error}</div>}
-
-        <section className="session-grid">
-          {sessions.length === 0 && (
-            <div className="session-card empty">
-              <p>目前還沒有場次。建立新場次後，系統會產生 viewer 網址、projector 網址與 QR code。</p>
-            </div>
-          )}
-
-          {sessions.map((session) => (
-            <article key={session.id} className="session-card">
-              <div className="session-card-head">
-                <div>
-                  <h2>{session.title || '未命名場次'}</h2>
-                  <p>
-                    建立時間：
-                    {session.createdAt
-                      ? ` ${new Date(session.createdAt).toLocaleString()}`
-                      : ' 未知'}
-                  </p>
-                </div>
-                <span className={`session-badge ${session.status || 'active'}`}>
-                  {session.status === 'ended' ? '已結束' : '進行中'}
-                </span>
-              </div>
-
-              <div className="session-card-meta">
-                <span>{session.cells?.length || 0} 個儲存格</span>
-                <span>{session.languages?.length || 1} 種語言</span>
-              </div>
-
-              <div className="session-card-actions">
-                <button
-                  type="button"
-                  onClick={() =>
-                    navigate(`/control?session=${encodeURIComponent(session.id)}`)
-                  }
-                >
-                  進入控制端
-                </button>
-              </div>
-            </article>
-          ))}
-        </section>
       </div>
     </div>
   )
