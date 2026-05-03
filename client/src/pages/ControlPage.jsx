@@ -28,6 +28,21 @@ const ALLOWED_TRANSCRIPTION_MODELS = new Set([
   'whisper-1',
 ])
 
+const ControlSection = ({ title, defaultOpen = false, children }) => {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <details
+      className="control-section"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>{title}</summary>
+      <div className="control-section-body">{children}</div>
+    </details>
+  )
+}
+
 const DEFAULT_TRANSCRIPTION_STATE = {
   active: false,
   status: 'idle',
@@ -2886,7 +2901,7 @@ const ControlPage = () => {
 
   const handleCreateCell = async () => {
     if (!sessionId) return
-    const name = window.prompt('儲存格名稱', `儲存格 ${cells.length + 1}`)
+    const name = window.prompt('字幕本名稱', `字幕本 ${cells.length + 1}`)
     if (name == null) return
     await performSessionMutation(
       () =>
@@ -2895,13 +2910,13 @@ const ControlPage = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         }),
-      { successMessage: '已新增儲存格' },
+      { successMessage: '已新增字幕本' },
     )
   }
 
   const handleRenameCell = async (cell) => {
     if (!sessionId || !cell) return
-    const name = window.prompt('重新命名儲存格', cell.name || '')
+    const name = window.prompt('重新命名字幕本', cell.name || '')
     if (name == null) return
     await performSessionMutation(
       () =>
@@ -2910,7 +2925,7 @@ const ControlPage = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         }),
-      { successMessage: '已更新儲存格名稱' },
+      { successMessage: '已更新字幕本名稱' },
     )
   }
 
@@ -2934,7 +2949,7 @@ const ControlPage = () => {
         fetch(`/api/session/${sessionId}/cells/${cell.id}`, {
           method: 'DELETE',
         }),
-      { successMessage: '儲存格已刪除' },
+      { successMessage: '字幕本已刪除' },
     )
   }
 
@@ -3088,6 +3103,9 @@ const ControlPage = () => {
     roleColorEnabled && currentLine?.type !== 'direction'
       ? roleToColor(currentLine?.role)
       : ''
+  const canMoveToPreviousLine = lines.length > 0 && liveCurrentIndex > 0
+  const canMoveToNextLine =
+    lines.length > 0 && liveCurrentIndex < lines.length - 1
 
   if (!authReady) {
     return (
@@ -3139,7 +3157,9 @@ const ControlPage = () => {
                   {sessionMeta?.status === 'ended' ? '已結束' : '進行中'}
                 </span>
               </div>
+            </header>
 
+            <ControlSection title="系統連線" defaultOpen>
               <div className="input-group">
                 <label htmlFor="openai-key">OpenAI API Key</label>
                 <input
@@ -3158,7 +3178,9 @@ const ControlPage = () => {
                   在此裝置記住 API Key
                 </label>
               </div>
+            </ControlSection>
 
+            <ControlSection title="分享與投影連結" defaultOpen>
               <div className="input-group">
                 <label htmlFor="viewer-alias">檢視端分享網址</label>
                 <p className="input-note">
@@ -3228,13 +3250,14 @@ const ControlPage = () => {
                   請使用延伸桌面，將投影頁移到外接螢幕後點右上角隱藏熱區切換全螢幕。投影端預設固定顯示劇本，不會再自動被即時語音覆蓋。
                 </span>
               </div>
-            </header>
+            </ControlSection>
 
+            <ControlSection title="字幕本與語言" defaultOpen>
             <div className="input-group">
               <div className="section-header-inline">
-                <label>儲存格</label>
+                <label>字幕本</label>
                 <button type="button" className="subtle-button" onClick={handleCreateCell}>
-                  新增儲存格
+                  新增字幕本
                 </button>
               </div>
               <div className="cell-list">
@@ -3344,13 +3367,15 @@ const ControlPage = () => {
                 檢視端初次進入會先套用預設語言，但觀眾之後仍可自行切換；投影端則會持續跟著這裡的設定。
               </span>
             </div>
+            </ControlSection>
 
+            <ControlSection title="貼上與解析" defaultOpen={!lines.length}>
             <form className="input-group" onSubmit={handleParsePrimaryScript}>
               <label htmlFor="script-text-primary">{primaryLanguageName} 劇本文字</label>
               <textarea
                 id="script-text-primary"
                 rows={8}
-                placeholder={`貼上 ${primaryLanguageName} 全文，系統會解析角色、分段並寫入目前儲存格。`}
+                placeholder={`貼上 ${primaryLanguageName} 全文，系統會解析角色、分段並寫入目前字幕本。`}
                 value={primaryScriptInput}
                 onChange={(event) =>
                   setDraftInputValue(selectedCellId, 'primary', event.target.value)
@@ -3397,15 +3422,17 @@ const ControlPage = () => {
                 </button>
               </form>
             ))}
+            </ControlSection>
 
+            <ControlSection title="匯入與備份">
             <div className="input-group">
-              <label>目前儲存格字幕 JSON 匯入 / 匯出</label>
+              <label>目前字幕本 JSON 匯入 / 匯出</label>
               <div className="json-actions">
                 <button type="button" onClick={() => jsonInputRef.current?.click()}>
-                  匯入目前儲存格 JSON
+                  匯入目前字幕本 JSON
                 </button>
                 <button type="button" onClick={handleExportJson}>
-                  匯出目前儲存格 JSON
+                  匯出目前字幕本 JSON
                 </button>
                 <input
                   ref={jsonInputRef}
@@ -3416,7 +3443,7 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                這裡只會處理目前選取儲存格的字幕內容，不包含整個工作區設定。
+                這裡只會處理目前選取字幕本的內容，不包含整個工作區設定。
               </span>
             </div>
 
@@ -3442,44 +3469,12 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                可直接在控制端匯入或匯出整個工作區的語言、所有儲存格、字幕內容與投影設定。
+                可直接在控制端匯入或匯出整個工作區的語言、所有字幕本、字幕內容與投影設定。
               </span>
             </div>
+            </ControlSection>
 
-            <div className="control-actions">
-              <button
-                type="button"
-                className={`toggle-button ${displayEnabled ? 'active' : ''}`}
-                onClick={handleToggleDisplay}
-              >
-                {displayEnabled ? '遮蔽檢視端 / 投影字幕' : '重新顯示外部字幕'}
-              </button>
-              <button
-                type="button"
-                className="subtle-button"
-                onClick={handleUndo}
-                disabled={!historyState.canUndo}
-              >
-                上一步
-              </button>
-              <button
-                type="button"
-                className="subtle-button"
-                onClick={handleRedo}
-                disabled={!historyState.canRedo}
-              >
-                還原
-              </button>
-              <button
-                type="button"
-                className="subtle-button danger-button"
-                onClick={handleEndSession}
-                disabled={sessionMeta?.status === 'ended'}
-              >
-                停止外部字幕
-              </button>
-            </div>
-
+            <ControlSection title="即時語音">
             <div className="input-group transcription-panel">
               <label>即時語音辨識（雲端）</label>
               <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
@@ -3545,6 +3540,7 @@ const ControlPage = () => {
                 {transcriptionPreview}
               </div>
             </div>
+            </ControlSection>
 
             <div className="viewer-preview">
               <div className="projector-preview-header">
@@ -3737,32 +3733,22 @@ const ControlPage = () => {
                 • 觀眾進入檢視端會先套用預設語言，之後仍可自行切換語言與字級
               </div>
             </div>
-
-            <div
-              className={`status-bar ${
-                status.kind === 'success'
-                  ? 'status-success'
-                  : status.kind === 'error'
-                    ? 'status-error'
-                    : ''
-              }`}
-            >
-              {status.message}
-            </div>
           </>
         )}
       </aside>
 
       <section className="script-panel">
         <header className="script-header">
-          <div>
-            <h2>{selectedCell?.name || '劇本字幕清單'}</h2>
-            <div className="script-header-meta">
-              <small>
+          <div className="script-heading">
+            <div className="script-title-line">
+              <h2>{selectedCell?.name || '劇本字幕清單'}</h2>
+              <span className="script-cue-pill">
                 {lines.length
-                  ? `目前 CUE：${liveCurrentIndex + 1} / ${lines.length}`
-                  : '尚未載入字幕'}
-              </small>
+                  ? `CUE ${liveCurrentIndex + 1} / ${lines.length}`
+                  : '尚未載入'}
+              </span>
+            </div>
+            <div className="script-header-meta">
               {editingModeEnabled && editingModeLabel && (
                 <small className="script-edit-mode-note">{editingModeLabel}</small>
               )}
@@ -3803,13 +3789,41 @@ const ControlPage = () => {
             <button type="button" className="subtle-button" onClick={handleAddLine}>
               新增字幕格
             </button>
+          </div>
+        </header>
+
+        <div className="script-live-controls">
+          <div className="control-actions">
+            <button
+              type="button"
+              className={`toggle-button ${displayEnabled ? 'active' : ''}`}
+              onClick={handleToggleDisplay}
+            >
+              {displayEnabled ? '遮蔽外部字幕' : '重新顯示字幕'}
+            </button>
+            <button
+              type="button"
+              className="subtle-button"
+              onClick={() => handleShiftCurrentIndex(-1)}
+              disabled={!canMoveToPreviousLine}
+            >
+              上一句
+            </button>
+            <button
+              type="button"
+              className="subtle-button"
+              onClick={() => handleShiftCurrentIndex(1)}
+              disabled={!canMoveToNextLine}
+            >
+              下一句
+            </button>
             <button
               type="button"
               className="subtle-button"
               onClick={handleUndo}
               disabled={!historyState.canUndo}
             >
-              上一步
+              復原
             </button>
             <button
               type="button"
@@ -3819,8 +3833,27 @@ const ControlPage = () => {
             >
               還原
             </button>
+            <button
+              type="button"
+              className="subtle-button danger-button"
+              onClick={handleEndSession}
+              disabled={sessionMeta?.status === 'ended'}
+            >
+              停止外部字幕
+            </button>
           </div>
-        </header>
+          <div
+            className={`status-bar ${
+              status.kind === 'success'
+                ? 'status-success'
+                : status.kind === 'error'
+                  ? 'status-error'
+                  : ''
+            }`}
+          >
+            {status.message}
+          </div>
+        </div>
 
         <div className="script-list">
           {lines.length === 0 && (
