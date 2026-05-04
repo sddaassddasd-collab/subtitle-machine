@@ -95,8 +95,8 @@
 }
 
 .control-sidebar {
-  width: 320px;
-  max-width: 320px;
+  width: 380px;
+  max-width: 380px;
   background: #0d1422;
   padding: 1rem;
   display: flex;
@@ -128,12 +128,14 @@
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  min-height: 44px;
   padding: 0.75rem 0.85rem;
   cursor: pointer;
   color: #e2e8f0;
   font-size: 0.88rem;
   font-weight: 700;
   list-style: none;
+  white-space: nowrap;
 }
 
 .control-section summary::-webkit-details-marker {
@@ -179,11 +181,21 @@
 .input-group input[type='file'],
 .input-group select,
 .input-group textarea {
+  width: 100%;
+  min-width: 0;
   padding: 0.55rem 0.7rem;
   border-radius: 8px;
   border: 1px solid rgba(148, 163, 184, 0.25);
   background: rgba(15, 23, 42, 0.6);
   color: #e2e8f0;
+}
+
+.control-page input:-webkit-autofill,
+.control-page input:-webkit-autofill:hover,
+.control-page input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #e2e8f0;
+  box-shadow: 0 0 0 1000px #111827 inset;
+  caret-color: #e2e8f0;
 }
 
 .input-group textarea {
@@ -930,11 +942,14 @@
 }
 
 .viewer-link span {
+  min-width: 0;
+  flex: 1 1 auto;
   color: #0f172a;
   font-weight: 600;
 }
 
 .viewer-link button {
+  flex: 0 0 auto;
   padding: 0.35rem 0.7rem;
   font-size: 0.8rem;
   background: #334155;
@@ -1817,10 +1832,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   padding: 0.35rem 0.8rem;
   border-radius: 999px;
   font-size: 0.82rem;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .session-badge.active,
@@ -1839,6 +1856,7 @@
   display: flex;
   gap: 0.75rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .control-page.sidebar-collapsed .control-sidebar {
@@ -1861,6 +1879,10 @@
 
 .session-title-row h1 {
   margin: 0;
+  max-width: 100%;
+  font-size: 1.35rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .section-header-inline {
