@@ -744,7 +744,8 @@ const ControlPage = () => {
     useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
   const [viewerAliasInput, setViewerAliasInput] = useState('')
   const [importingSessionBackup, setImportingSessionBackup] = useState(false)
@@ -3124,18 +3125,22 @@ const ControlPage = () => {
   }
 
   return (
-    <div className={`control-page ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      <aside className={`control-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+    <div
+      className={`control-page ${
+        leftPanelCollapsed ? 'left-panel-collapsed' : ''
+      } ${rightPanelCollapsed ? 'right-panel-collapsed' : ''}`}
+    >
+      <aside className={`control-sidebar ${leftPanelCollapsed ? 'collapsed' : ''}`}>
         <div className="control-sidebar-fixed">
           <div className="sidebar-toggle-row">
             <button
               type="button"
               className="subtle-button"
-              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              onClick={() => setLeftPanelCollapsed((prev) => !prev)}
             >
-              {sidebarCollapsed ? '展開控制端' : '收合控制端'}
+              {leftPanelCollapsed ? '展開控制端' : '收合控制端'}
             </button>
-            {!sidebarCollapsed && (
+            {!leftPanelCollapsed && (
               <button
                 type="button"
                 className="subtle-button"
@@ -3146,7 +3151,7 @@ const ControlPage = () => {
             )}
           </div>
 
-          {!sidebarCollapsed && (
+          {!leftPanelCollapsed && (
             <header className="control-header">
               <div className="session-title-row">
                 <div>
@@ -3165,7 +3170,7 @@ const ControlPage = () => {
           )}
         </div>
 
-        {!sidebarCollapsed && (
+        {!leftPanelCollapsed && (
           <>
             <div className="control-sidebar-scroll">
               <ControlSection title="系統連線" defaultOpen>
@@ -3552,197 +3557,6 @@ const ControlPage = () => {
             </ControlSection>
             </div>
 
-            <div className="viewer-preview">
-              <div className="projector-preview-header">
-                <label>投影預覽</label>
-                <div className="projector-preview-toggles">
-                  <label className="checkbox-row viewer-preview-toggle">
-                    <input
-                      type="checkbox"
-                      checked={roleColorEnabled}
-                      onChange={handleToggleRoleColorEnabled}
-                    />
-                    顏色分辨角色
-                  </label>
-                  <label className="checkbox-row viewer-preview-toggle">
-                    <input
-                      type="checkbox"
-                      checked={musicEffectEnabled}
-                      onChange={handleToggleMusicEffectEnabled}
-                    />
-                    開啟「此段有音樂」效果
-                  </label>
-                </div>
-              </div>
-              <div
-                className={`projector-status-panel projector-status-${projectorStatusLevel}`}
-              >
-                <div className="projector-status-row">
-                  <strong>投影端狀態</strong>
-                  <span className="projector-status-badge">
-                    {projectorStatusBadgeLabel}
-                  </span>
-                </div>
-                <div className="projector-status-message">{projectorStatusMessage}</div>
-                {projectorStatusUpdatedAtLabel && (
-                  <div className="projector-status-time">
-                    最後更新：{projectorStatusUpdatedAtLabel}
-                  </div>
-                )}
-              </div>
-              <div
-                className={`viewer-preview-box ${
-                  displayEnabled ? '' : 'viewer-muted'
-                } ${
-                  currentLine?.type === 'direction' ? 'viewer-direction' : ''
-                } ${
-                  currentLineMusicVisible ? 'viewer-music-preview' : ''
-                }`}
-                style={projectorPreviewStyle}
-              >
-                <div className="viewer-preview-stage">
-                  <div
-                    className="viewer-preview-text"
-                    style={previewRoleColor ? { color: previewRoleColor } : undefined}
-                  >
-                    {projectorPreviewText}
-                  </div>
-                </div>
-              </div>
-              {currentLine?.role && (
-                <div
-                  className="viewer-preview-role"
-                  style={previewRoleColor ? { color: previewRoleColor } : undefined}
-                >
-                  角色：{currentLine.role}
-                </div>
-              )}
-              {currentLineMusicVisible && (
-                <div className="viewer-preview-music">此處有音樂</div>
-              )}
-              {!musicEffectEnabled && (
-                <div className="viewer-preview-note">
-                  目前已關閉「此段有音樂」效果，逐行音樂標記會保留但不顯示。
-                </div>
-              )}
-              <div className="projector-preview-controls">
-                <div className="projector-control-panel projector-control-panel-inline">
-                  <label className="projector-control-select">
-                    <span>投影顯示內容</span>
-                    <select
-                      value={projectorDisplayMode}
-                      onChange={handleProjectorDisplayModeChange}
-                    >
-                      <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
-                        固定劇本字幕
-                      </option>
-                      <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
-                        即時語音辨識
-                      </option>
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    className="subtle-button"
-                    onClick={handleResetProjectorLayout}
-                  >
-                    重設位置與字體
-                  </button>
-                </div>
-                <div className="projector-control-grid">
-                  <div className="projector-control-panel">
-                    <span className="projector-control-label">字體大小</span>
-                    <div className="projector-stepper">
-                      <button
-                        type="button"
-                        className="projector-step-button"
-                        {...getProjectorRepeatHandlers(
-                          'fontSizePercent',
-                          -PROJECTOR_FONT_STEP,
-                        )}
-                      >
-                        −
-                      </button>
-                      <strong>{projectorLayout.fontSizePercent}%</strong>
-                      <button
-                        type="button"
-                        className="projector-step-button"
-                        {...getProjectorRepeatHandlers(
-                          'fontSizePercent',
-                          PROJECTOR_FONT_STEP,
-                        )}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                  <div className="projector-control-panel">
-                    <span className="projector-control-label">字幕位置</span>
-                    <div className="projector-position-readout">
-                      左右 {projectorLayout.offsetX} / 上下 {projectorLayout.offsetY}
-                    </div>
-                    <div className="projector-axis-pad">
-                      <span />
-                      <button
-                        type="button"
-                        className="projector-step-button"
-                        aria-label="字幕往上移"
-                        {...getProjectorRepeatHandlers(
-                          'offsetY',
-                          -PROJECTOR_POSITION_STEP,
-                        )}
-                      >
-                        ↑
-                      </button>
-                      <span />
-                      <button
-                        type="button"
-                        className="projector-step-button"
-                        aria-label="字幕往左移"
-                        {...getProjectorRepeatHandlers(
-                          'offsetX',
-                          -PROJECTOR_POSITION_STEP,
-                        )}
-                      >
-                        ←
-                      </button>
-                      <div className="projector-axis-center">位置</div>
-                      <button
-                        type="button"
-                        className="projector-step-button"
-                        aria-label="字幕往右移"
-                        {...getProjectorRepeatHandlers(
-                          'offsetX',
-                          PROJECTOR_POSITION_STEP,
-                        )}
-                      >
-                        →
-                      </button>
-                      <span />
-                      <button
-                        type="button"
-                        className="projector-step-button"
-                        aria-label="字幕往下移"
-                        {...getProjectorRepeatHandlers(
-                          'offsetY',
-                          PROJECTOR_POSITION_STEP,
-                        )}
-                      >
-                        ↓
-                      </button>
-                      <span />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="control-instructions">
-                • 上下方向鍵切換字幕
-                <br />
-                • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 還原
-                <br />
-                • 觀眾進入檢視端會先套用預設語言，之後仍可自行切換語言與字級
-              </div>
-            </div>
           </>
         )}
       </aside>
@@ -4125,6 +3939,212 @@ const ControlPage = () => {
           })}
         </div>
       </section>
+
+      <aside className={`preview-sidebar ${rightPanelCollapsed ? 'collapsed' : ''}`}>
+        <div className="preview-sidebar-toggle-row">
+          <button
+            type="button"
+            className="subtle-button"
+            onClick={() => setRightPanelCollapsed((prev) => !prev)}
+          >
+            {rightPanelCollapsed ? '展開預覽' : '收合預覽'}
+          </button>
+        </div>
+
+        {!rightPanelCollapsed && (
+          <div className="preview-sidebar-scroll">
+            <div className="projector-preview-header">
+              <label>投影預覽</label>
+              <div className="projector-preview-toggles">
+                <label className="checkbox-row viewer-preview-toggle">
+                  <input
+                    type="checkbox"
+                    checked={roleColorEnabled}
+                    onChange={handleToggleRoleColorEnabled}
+                  />
+                  顏色分辨角色
+                </label>
+                <label className="checkbox-row viewer-preview-toggle">
+                  <input
+                    type="checkbox"
+                    checked={musicEffectEnabled}
+                    onChange={handleToggleMusicEffectEnabled}
+                  />
+                  開啟「此段有音樂」效果
+                </label>
+              </div>
+            </div>
+            <div
+              className={`projector-status-panel projector-status-${projectorStatusLevel}`}
+            >
+              <div className="projector-status-row">
+                <strong>投影端狀態</strong>
+                <span className="projector-status-badge">
+                  {projectorStatusBadgeLabel}
+                </span>
+              </div>
+              <div className="projector-status-message">{projectorStatusMessage}</div>
+              {projectorStatusUpdatedAtLabel && (
+                <div className="projector-status-time">
+                  最後更新：{projectorStatusUpdatedAtLabel}
+                </div>
+              )}
+            </div>
+            <div
+              className={`viewer-preview-box ${
+                displayEnabled ? '' : 'viewer-muted'
+              } ${
+                currentLine?.type === 'direction' ? 'viewer-direction' : ''
+              } ${
+                currentLineMusicVisible ? 'viewer-music-preview' : ''
+              }`}
+              style={projectorPreviewStyle}
+            >
+              <div className="viewer-preview-stage">
+                <div
+                  className="viewer-preview-text"
+                  style={previewRoleColor ? { color: previewRoleColor } : undefined}
+                >
+                  {projectorPreviewText}
+                </div>
+              </div>
+            </div>
+            {currentLine?.role && (
+              <div
+                className="viewer-preview-role"
+                style={previewRoleColor ? { color: previewRoleColor } : undefined}
+              >
+                角色：{currentLine.role}
+              </div>
+            )}
+            {currentLineMusicVisible && (
+              <div className="viewer-preview-music">此處有音樂</div>
+            )}
+            {!musicEffectEnabled && (
+              <div className="viewer-preview-note">
+                目前已關閉「此段有音樂」效果，逐行音樂標記會保留但不顯示。
+              </div>
+            )}
+            <div className="projector-preview-controls">
+              <div className="projector-control-panel projector-control-panel-inline">
+                <label className="projector-control-select">
+                  <span>投影顯示內容</span>
+                  <select
+                    value={projectorDisplayMode}
+                    onChange={handleProjectorDisplayModeChange}
+                  >
+                    <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
+                      固定劇本字幕
+                    </option>
+                    <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
+                      即時語音辨識
+                    </option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="subtle-button"
+                  onClick={handleResetProjectorLayout}
+                >
+                  重設位置與字體
+                </button>
+              </div>
+              <div className="projector-control-grid">
+                <div className="projector-control-panel">
+                  <span className="projector-control-label">字體大小</span>
+                  <div className="projector-stepper">
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'fontSizePercent',
+                        -PROJECTOR_FONT_STEP,
+                      )}
+                    >
+                      −
+                    </button>
+                    <strong>{projectorLayout.fontSizePercent}%</strong>
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'fontSizePercent',
+                        PROJECTOR_FONT_STEP,
+                      )}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <div className="projector-control-panel">
+                  <span className="projector-control-label">字幕位置</span>
+                  <div className="projector-position-readout">
+                    左右 {projectorLayout.offsetX} / 上下 {projectorLayout.offsetY}
+                  </div>
+                  <div className="projector-axis-pad">
+                    <span />
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往上移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetY',
+                        -PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      ↑
+                    </button>
+                    <span />
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往左移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetX',
+                        -PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      ←
+                    </button>
+                    <div className="projector-axis-center">位置</div>
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往右移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetX',
+                        PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      →
+                    </button>
+                    <span />
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往下移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetY',
+                        PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      ↓
+                    </button>
+                    <span />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="control-instructions">
+              • 上下方向鍵切換字幕
+              <br />
+              • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 還原
+              <br />
+              • 觀眾進入檢視端會先套用預設語言，之後仍可自行切換語言與字級
+            </div>
+          </div>
+        )}
+      </aside>
     </div>
   )
 }
