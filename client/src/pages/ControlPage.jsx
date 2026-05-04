@@ -32,14 +32,18 @@ const ControlSection = ({ title, defaultOpen = false, children }) => {
   const [open, setOpen] = useState(defaultOpen)
 
   return (
-    <details
-      className="control-section"
-      open={open}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary>{title}</summary>
-      <div className="control-section-body">{children}</div>
-    </details>
+    <section className={`control-section ${open ? 'is-open' : ''}`}>
+      <button
+        type="button"
+        className="control-section-summary"
+        aria-expanded={open}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <span>{title}</span>
+        <span aria-hidden="true">{open ? '-' : '+'}</span>
+      </button>
+      {open && <div className="control-section-body">{children}</div>}
+    </section>
   )
 }
 
@@ -3122,27 +3126,27 @@ const ControlPage = () => {
   return (
     <div className={`control-page ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className={`control-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-        <div className="sidebar-toggle-row">
-          <button
-            type="button"
-            className="subtle-button"
-            onClick={() => setSidebarCollapsed((prev) => !prev)}
-          >
-            {sidebarCollapsed ? '展開控制端' : '收合控制端'}
-          </button>
-          {!sidebarCollapsed && (
+        <div className="control-sidebar-fixed">
+          <div className="sidebar-toggle-row">
             <button
               type="button"
               className="subtle-button"
-              onClick={() => navigate('/')}
+              onClick={() => setSidebarCollapsed((prev) => !prev)}
             >
-              返回首頁
+              {sidebarCollapsed ? '展開控制端' : '收合控制端'}
             </button>
-          )}
-        </div>
+            {!sidebarCollapsed && (
+              <button
+                type="button"
+                className="subtle-button"
+                onClick={() => navigate('/')}
+              >
+                返回首頁
+              </button>
+            )}
+          </div>
 
-        {!sidebarCollapsed && (
-          <>
+          {!sidebarCollapsed && (
             <header className="control-header">
               <div className="session-title-row">
                 <div>
@@ -3158,8 +3162,13 @@ const ControlPage = () => {
                 </span>
               </div>
             </header>
+          )}
+        </div>
 
-            <ControlSection title="系統連線" defaultOpen>
+        {!sidebarCollapsed && (
+          <>
+            <div className="control-sidebar-scroll">
+              <ControlSection title="系統連線" defaultOpen>
               <div className="input-group">
                 <label htmlFor="openai-key">OpenAI API Key</label>
                 <input
@@ -3541,6 +3550,7 @@ const ControlPage = () => {
               </div>
             </div>
             </ControlSection>
+            </div>
 
             <div className="viewer-preview">
               <div className="projector-preview-header">
