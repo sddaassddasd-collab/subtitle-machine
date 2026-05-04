@@ -98,6 +98,7 @@ const viewerSessionTombstones = new Map();
 const projectorSessionTombstones = new Map();
 const projectorConnections = new Map();
 const projectorPresence = new Map();
+const currentIndexPersistTimers = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -105,6 +106,7 @@ const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
 const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
 const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
+const CURRENT_INDEX_PERSIST_DELAY_MS = 750;
 const USER_ROLES = {
   ADMIN: 'admin',
   OPERATOR: 'operator',
@@ -6348,7 +6350,7 @@ function touchSession(session) {
   session.updatedAt = Date.now();
 }
 
-function persistSession(session) {
+function storeSessionInMemory(session) {
   if (!session) return;
   touchSession(session);
   clearPublicSessionTombstones(session);
@@ -6356,7 +6358,37 @@ function persistSession(session) {
     sessions.clear();
   }
   sessions.set(session.id, session);
+}
+
+function clearScheduledCurrentIndexPersist(sessionId) {
+  const timer = currentIndexPersistTimers.get(sessionId);
+  if (!timer) return;
+  clearTimeout(timer);
+  currentIndexPersistTimers.delete(sessionId);
+}
+
+function persistSession(session) {
+  if (!session) return;
+  clearScheduledCurrentIndexPersist(session.id);
+  storeSessionInMemory(session);
   persistApplicationStore();
+}
+
+function persistSessionCurrentIndexSoon(session) {
+  if (!session) return;
+  storeSessionInMemory(session);
+
+  clearScheduledCurrentIndexPersist(session.id);
+  const timer = setTimeout(() => {
+    currentIndexPersistTimers.delete(session.id);
+    persistApplicationStore();
+  }, CURRENT_INDEX_PERSIST_DELAY_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+
+  currentIndexPersistTimers.set(session.id, timer);
 }
 
 function broadcastControlState(sessionId) {
@@ -6383,6 +6415,24 @@ function broadcastViewerState(sessionId) {
     'projector:update',
     getProjectorPayload(session),
   );
+}
+
+function applyCurrentIndexChange(session, nextIndex) {
+  if (!session) return false;
+  if (
+    !Number.isInteger(nextIndex) ||
+    nextIndex < 0 ||
+    nextIndex >= session.lines.length ||
+    nextIndex === session.currentIndex
+  ) {
+    return false;
+  }
+
+  session.currentIndex = nextIndex;
+  persistSessionCurrentIndexSoon(session);
+  broadcastViewerState(session.id);
+  broadcastControlState(session.id);
+  return true;
 }
 
 function broadcastProjectorState(sessionId) {
@@ -8423,10 +8473,7 @@ app.post('/api/session/:sessionId/current', requireAuth, (req, res) => {
     return res.status(400).json({ error: '索引超出範圍' });
   }
 
-  session.currentIndex = nextIndex;
-  persistSession(session);
-  broadcastControlState(session.id);
-  broadcastViewerState(session.id);
+  applyCurrentIndexChange(session, nextIndex);
   res.json(getControlPayload(session));
 });
 
@@ -9034,16 +9081,7 @@ io.on('connection', (socket) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
-    if (
-      Number.isInteger(index) &&
-      index >= 0 &&
-      index < session.lines.length
-    ) {
-      session.currentIndex = index;
-      persistSession(session);
-      broadcastControlState(sessionId);
-      broadcastViewerState(sessionId);
-    }
+    applyCurrentIndexChange(session, index);
   });
 
   socket.on('shiftIndex', ({ sessionId, delta }) => {
@@ -9055,12 +9093,7 @@ io.on('connection', (socket) => {
       Math.max(session.lines.length - 1, 0),
     );
 
-    if (nextIndex !== session.currentIndex) {
-      session.currentIndex = nextIndex;
-      persistSession(session);
-      broadcastControlState(sessionId);
-      broadcastViewerState(sessionId);
-    }
+    applyCurrentIndexChange(session, nextIndex);
   });
 
   socket.on('setDisplay', ({ sessionId, displayEnabled }) => {
