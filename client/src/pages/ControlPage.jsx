@@ -743,6 +743,7 @@ const ControlPage = () => {
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
+  const liveCurrentIndexRef = useRef(0)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
@@ -1006,6 +1007,7 @@ const ControlPage = () => {
       setSessionMeta(nextSession)
       setLines(nextLines)
       syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
+      liveCurrentIndexRef.current = nextLiveIndex
       setLiveCurrentIndex(nextLiveIndex)
       setCurrentIndex((prev) =>
         editingModeEnabled ? clampLineIndex(prev, nextLines.length) : nextLiveIndex,
@@ -1101,6 +1103,7 @@ const ControlPage = () => {
         if (!socketRef.current || !sessionId) return
         setEditingCell(null)
         socketRef.current.emit('setCurrentIndex', { sessionId, index })
+        liveCurrentIndexRef.current = index
         setLiveCurrentIndex(index)
         setCurrentIndex(index)
       }, 180)
@@ -1201,7 +1204,9 @@ const ControlPage = () => {
 
   useEffect(() => {
     setCurrentIndex((prev) => clampLineIndex(prev, lines.length))
-    setLiveCurrentIndex((prev) => clampLineIndex(prev, lines.length))
+    const nextLiveIndex = clampLineIndex(liveCurrentIndexRef.current, lines.length)
+    liveCurrentIndexRef.current = nextLiveIndex
+    setLiveCurrentIndex(nextLiveIndex)
   }, [lines.length])
 
   useEffect(() => {
@@ -1527,16 +1532,23 @@ const ControlPage = () => {
 
       clearPendingLineClick()
       setEditingCell(null)
-      setCurrentIndex((prev) => {
-        const maxIndex = Math.max(lines.length - 1, 0)
-        return Math.min(Math.max(prev + normalizedDelta, 0), maxIndex)
-      })
-      socketRef.current.emit('shiftIndex', {
+      const nextIndex = clampLineIndex(
+        liveCurrentIndexRef.current + normalizedDelta,
+        lines.length,
+      )
+      if (nextIndex === liveCurrentIndexRef.current) return
+
+      liveCurrentIndexRef.current = nextIndex
+      setLiveCurrentIndex(nextIndex)
+      setCurrentIndex((prev) =>
+        editingModeEnabled ? clampLineIndex(prev, lines.length) : nextIndex,
+      )
+      socketRef.current.emit('setCurrentIndex', {
         sessionId,
-        delta: normalizedDelta,
+        index: nextIndex,
       })
     },
-    [clearPendingLineClick, lines.length, sessionId],
+    [clearPendingLineClick, editingModeEnabled, lines.length, sessionId],
   )
 
   useEffect(() => {
@@ -1809,6 +1821,7 @@ const ControlPage = () => {
     setEditingCell(null)
     setRoleEditor(null)
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
+    liveCurrentIndexRef.current = index
     setLiveCurrentIndex(index)
     setCurrentIndex(index)
   }
