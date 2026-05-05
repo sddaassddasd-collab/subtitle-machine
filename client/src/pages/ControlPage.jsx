@@ -66,6 +66,7 @@ const PROJECTOR_FONT_STEP = 5
 const PROJECTOR_POSITION_STEP = 1
 const PROJECTOR_REPEAT_START_DELAY_MS = 320
 const PROJECTOR_REPEAT_INTERVAL_MS = 85
+const CUE_CONFIRM_TIMEOUT_MS = 2000
 
 const TARGET_SAMPLE_RATE = 24000
 const GLOBAL_SESSION_ID = 'default'
@@ -744,6 +745,7 @@ const ControlPage = () => {
     useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
   const liveCurrentIndexRef = useRef(0)
+  const pendingCueRequestRef = useRef(null)
   const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
@@ -1004,13 +1006,31 @@ const ControlPage = () => {
         nextSession?.selectedCellId ||
         (Array.isArray(nextSession?.cells) ? nextSession.cells[0]?.id : '') ||
         ''
+      const pendingCueRequest = pendingCueRequestRef.current
+      let effectiveLiveIndex = nextLiveIndex
+      if (pendingCueRequest) {
+        const requestExpired =
+          Date.now() - pendingCueRequest.requestedAt > CUE_CONFIRM_TIMEOUT_MS
+        const requestOutOfRange =
+          nextLines.length <= 0 ||
+          pendingCueRequest.index < 0 ||
+          pendingCueRequest.index >= nextLines.length
+
+        if (requestExpired || requestOutOfRange) {
+          pendingCueRequestRef.current = null
+        } else if (nextLiveIndex === pendingCueRequest.index) {
+          pendingCueRequestRef.current = null
+        } else {
+          effectiveLiveIndex = pendingCueRequest.index
+        }
+      }
       setSessionMeta(nextSession)
       setLines(nextLines)
       syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
-      liveCurrentIndexRef.current = nextLiveIndex
-      setLiveCurrentIndex(nextLiveIndex)
+      liveCurrentIndexRef.current = effectiveLiveIndex
+      setLiveCurrentIndex(effectiveLiveIndex)
       setCurrentIndex((prev) =>
-        editingModeEnabled ? clampLineIndex(prev, nextLines.length) : nextLiveIndex,
+        editingModeEnabled ? clampLineIndex(prev, nextLines.length) : effectiveLiveIndex,
       )
       setDisplayEnabled(
         typeof payload?.displayEnabled === 'boolean'
@@ -1103,6 +1123,7 @@ const ControlPage = () => {
         if (!socketRef.current || !sessionId) return
         setEditingCell(null)
         socketRef.current.emit('setCurrentIndex', { sessionId, index })
+        pendingCueRequestRef.current = { index, requestedAt: Date.now() }
         liveCurrentIndexRef.current = index
         setLiveCurrentIndex(index)
         setCurrentIndex(index)
@@ -1538,6 +1559,10 @@ const ControlPage = () => {
       )
       if (nextIndex === liveCurrentIndexRef.current) return
 
+      pendingCueRequestRef.current = {
+        index: nextIndex,
+        requestedAt: Date.now(),
+      }
       liveCurrentIndexRef.current = nextIndex
       setLiveCurrentIndex(nextIndex)
       setCurrentIndex((prev) =>
@@ -1821,6 +1846,7 @@ const ControlPage = () => {
     setEditingCell(null)
     setRoleEditor(null)
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
+    pendingCueRequestRef.current = { index, requestedAt: Date.now() }
     liveCurrentIndexRef.current = index
     setLiveCurrentIndex(index)
     setCurrentIndex(index)
