@@ -155,6 +155,7 @@ const defaultTranscriptionState = () => ({
 
 const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
   fontSizePercent: 100,
+  widthPercent: 88,
   offsetX: 0,
   offsetY: 24,
 });
@@ -765,6 +766,10 @@ function normalizeProjectorLayout(rawLayout) {
       source.fontSizePercent,
       DEFAULT_PROJECTOR_LAYOUT.fontSizePercent,
     ),
+    widthPercent: normalizeInteger(
+      source.widthPercent,
+      DEFAULT_PROJECTOR_LAYOUT.widthPercent,
+    ),
     offsetX: normalizeInteger(source.offsetX, DEFAULT_PROJECTOR_LAYOUT.offsetX),
     offsetY: normalizeInteger(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY),
   };
@@ -775,6 +780,7 @@ function projectorLayoutsEqual(leftLayout, rightLayout) {
   const right = normalizeProjectorLayout(rightLayout);
   return (
     left.fontSizePercent === right.fontSizePercent &&
+    left.widthPercent === right.widthPercent &&
     left.offsetX === right.offsetX &&
     left.offsetY === right.offsetY
   );
