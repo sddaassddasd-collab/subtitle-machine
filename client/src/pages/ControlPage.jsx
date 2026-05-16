@@ -63,7 +63,13 @@ const DEFAULT_TRANSCRIPTION_STATE = {
 }
 
 const PROJECTOR_FONT_STEP = 5
+const PROJECTOR_WIDTH_STEP = 5
 const PROJECTOR_POSITION_STEP = 1
+const PROJECTOR_LAYOUT_INPUT_FIELDS = Object.freeze([
+  'fontSizePercent',
+  'widthPercent',
+])
+const PROJECTOR_LAYOUT_INPUT_PATTERN = /^[+-]?\d+$/
 const PROJECTOR_REPEAT_START_DELAY_MS = 320
 const PROJECTOR_REPEAT_INTERVAL_MS = 85
 const CUE_CONFIRM_TIMEOUT_MS = 2000
@@ -715,6 +721,14 @@ const ControlPage = () => {
   const [projectorLayout, setProjectorLayout] = useState(() =>
     normalizeProjectorLayout(),
   )
+  const [projectorLayoutInputDrafts, setProjectorLayoutInputDrafts] =
+    useState(() => {
+      const initialLayout = normalizeProjectorLayout()
+      return {
+        fontSizePercent: String(initialLayout.fontSizePercent),
+        widthPercent: String(initialLayout.widthPercent),
+      }
+    })
   const [projectorDisplayMode, setProjectorDisplayMode] = useState(
     PROJECTOR_DISPLAY_MODES.SCRIPT,
   )
@@ -764,6 +778,7 @@ const ControlPage = () => {
   const projectorRevisionRef = useRef(0)
   const projectorLayoutDirtyRef = useRef(false)
   const projectorLayoutDraftRef = useRef(normalizeProjectorLayout())
+  const activeProjectorLayoutInputRef = useRef(null)
   const projectorDisplayModeDirtyRef = useRef(false)
   const projectorDisplayModeDraftRef = useRef(PROJECTOR_DISPLAY_MODES.SCRIPT)
   const projectorRepeatRef = useRef({
@@ -777,6 +792,13 @@ const ControlPage = () => {
     captureNode: null,
     silenceNode: null,
   })
+  const projectorLayoutInputValues = useMemo(
+    () => ({
+      fontSizePercent: String(projectorLayout.fontSizePercent),
+      widthPercent: String(projectorLayout.widthPercent),
+    }),
+    [projectorLayout.fontSizePercent, projectorLayout.widthPercent],
+  )
 
   const clearProjectorRepeat = useCallback(() => {
     const repeatState = projectorRepeatRef.current
@@ -789,6 +811,25 @@ const ControlPage = () => {
       repeatState.repeatTimer = null
     }
   }, [])
+
+  useEffect(() => {
+    setProjectorLayoutInputDrafts((previousDrafts) => {
+      let changed = false
+      const nextDrafts = { ...previousDrafts }
+
+      PROJECTOR_LAYOUT_INPUT_FIELDS.forEach((field) => {
+        if (activeProjectorLayoutInputRef.current === field) return
+
+        const nextValue = projectorLayoutInputValues[field]
+        if (nextDrafts[field] !== nextValue) {
+          nextDrafts[field] = nextValue
+          changed = true
+        }
+      })
+
+      return changed ? nextDrafts : previousDrafts
+    })
+  }, [projectorLayoutInputValues])
 
   const languages = useMemo(() => {
     const source = Array.isArray(sessionMeta?.languages)
@@ -2857,9 +2898,61 @@ const ControlPage = () => {
     }
   }
 
+  const handleProjectorLayoutInputChange = (field, event) => {
+    const rawValue = event.target.value
+    setProjectorLayoutInputDrafts((previousDrafts) => ({
+      ...previousDrafts,
+      [field]: rawValue,
+    }))
+
+    const trimmedValue = rawValue.trim()
+    if (
+      trimmedValue === '' ||
+      trimmedValue === '-' ||
+      trimmedValue === '+' ||
+      !PROJECTOR_LAYOUT_INPUT_PATTERN.test(trimmedValue)
+    ) {
+      return
+    }
+
+    const nextValue = Number(trimmedValue)
+    if (!Number.isFinite(nextValue)) return
+    updateProjectorLayout({ [field]: nextValue })
+  }
+
+  const handleProjectorLayoutInputFocus = (field) => {
+    activeProjectorLayoutInputRef.current = field
+  }
+
+  const handleProjectorLayoutInputBlur = (field) => {
+    activeProjectorLayoutInputRef.current = null
+    const latestLayout = normalizeProjectorLayout(projectorLayoutDraftRef.current)
+    setProjectorLayoutInputDrafts((previousDrafts) => ({
+      ...previousDrafts,
+      [field]: String(latestLayout[field]),
+    }))
+  }
+
+  const handleProjectorLayoutInputKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      event.currentTarget.blur()
+    }
+  }
+
   const adjustProjectorLayout = (field, delta) => {
     const currentValue = Number(projectorLayoutDraftRef.current?.[field])
     const nextValue = (Number.isFinite(currentValue) ? currentValue : 0) + delta
+    if (PROJECTOR_LAYOUT_INPUT_FIELDS.includes(field)) {
+      const nextLayout = normalizeProjectorLayout({
+        ...projectorLayoutDraftRef.current,
+        [field]: nextValue,
+      })
+      activeProjectorLayoutInputRef.current = null
+      setProjectorLayoutInputDrafts((previousDrafts) => ({
+        ...previousDrafts,
+        [field]: String(nextLayout[field]),
+      }))
+    }
     updateProjectorLayout({ [field]: nextValue })
   }
 
@@ -3140,6 +3233,7 @@ const ControlPage = () => {
       : projectorStatus?.level || 'idle'
   const projectorPreviewStyle = {
     '--projector-preview-scale': Math.max(projectorLayout.fontSizePercent, 0) / 100,
+    '--projector-preview-width': `${projectorLayout.widthPercent}%`,
     '--projector-preview-left': `${50 + projectorLayout.offsetX * 0.8}%`,
     '--projector-preview-top': `${50 + projectorLayout.offsetY * 0.9}%`,
   }
@@ -4085,7 +4179,7 @@ const ControlPage = () => {
                   className="subtle-button"
                   onClick={handleResetProjectorLayout}
                 >
-                  重設位置與字體
+                  重設投影版面
                 </button>
               </div>
               <div className="projector-control-grid">
@@ -4102,13 +4196,82 @@ const ControlPage = () => {
                     >
                       −
                     </button>
-                    <strong>{projectorLayout.fontSizePercent}%</strong>
+                    <label className="projector-layout-input-wrap">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[+-]?[0-9]*"
+                        className="projector-layout-input"
+                        aria-label="字體大小百分比"
+                        value={projectorLayoutInputDrafts.fontSizePercent}
+                        onChange={(event) =>
+                          handleProjectorLayoutInputChange(
+                            'fontSizePercent',
+                            event,
+                          )
+                        }
+                        onFocus={() =>
+                          handleProjectorLayoutInputFocus('fontSizePercent')
+                        }
+                        onBlur={() =>
+                          handleProjectorLayoutInputBlur('fontSizePercent')
+                        }
+                        onKeyDown={handleProjectorLayoutInputKeyDown}
+                      />
+                      <span>%</span>
+                    </label>
                     <button
                       type="button"
                       className="projector-step-button"
                       {...getProjectorRepeatHandlers(
                         'fontSizePercent',
                         PROJECTOR_FONT_STEP,
+                      )}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <div className="projector-control-panel">
+                  <span className="projector-control-label">字幕寬度</span>
+                  <div className="projector-stepper">
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'widthPercent',
+                        -PROJECTOR_WIDTH_STEP,
+                      )}
+                    >
+                      −
+                    </button>
+                    <label className="projector-layout-input-wrap">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[+-]?[0-9]*"
+                        className="projector-layout-input"
+                        aria-label="字幕寬度百分比"
+                        value={projectorLayoutInputDrafts.widthPercent}
+                        onChange={(event) =>
+                          handleProjectorLayoutInputChange('widthPercent', event)
+                        }
+                        onFocus={() =>
+                          handleProjectorLayoutInputFocus('widthPercent')
+                        }
+                        onBlur={() =>
+                          handleProjectorLayoutInputBlur('widthPercent')
+                        }
+                        onKeyDown={handleProjectorLayoutInputKeyDown}
+                      />
+                      <span>%</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'widthPercent',
+                        PROJECTOR_WIDTH_STEP,
                       )}
                     >
                       +

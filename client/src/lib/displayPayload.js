@@ -9,6 +9,7 @@ const normalizeInt = (rawValue, fallback, min = null, max = null) => {
 
 export const DEFAULT_PROJECTOR_LAYOUT = Object.freeze({
   fontSizePercent: 100,
+  widthPercent: 88,
   offsetX: 0,
   offsetY: 24,
 })
@@ -29,6 +30,10 @@ export const normalizeProjectorLayout = (rawLayout) => {
       source.fontSizePercent,
       DEFAULT_PROJECTOR_LAYOUT.fontSizePercent,
     ),
+    widthPercent: normalizeInt(
+      source.widthPercent,
+      DEFAULT_PROJECTOR_LAYOUT.widthPercent,
+    ),
     offsetX: normalizeInt(source.offsetX, DEFAULT_PROJECTOR_LAYOUT.offsetX),
     offsetY: normalizeInt(source.offsetY, DEFAULT_PROJECTOR_LAYOUT.offsetY),
   }
@@ -39,6 +44,7 @@ export const areProjectorLayoutsEqual = (leftLayout, rightLayout) => {
   const right = normalizeProjectorLayout(rightLayout)
   return (
     left.fontSizePercent === right.fontSizePercent &&
+    left.widthPercent === right.widthPercent &&
     left.offsetX === right.offsetX &&
     left.offsetY === right.offsetY
   )

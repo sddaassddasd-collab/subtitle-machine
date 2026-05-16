@@ -392,7 +392,7 @@
   position: absolute;
   left: var(--projector-preview-left, 50%);
   top: var(--projector-preview-top, 72%);
-  width: min(90%, 100%);
+  width: var(--projector-preview-width, 88%);
   transform: translate(-50%, -50%);
   text-align: center;
 }
@@ -1100,6 +1100,36 @@
   font-variant-numeric: tabular-nums;
 }
 
+.projector-layout-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-width: 5rem;
+  color: #f8fafc;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.projector-layout-input {
+  width: 3.8rem;
+  min-height: 2.2rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #f8fafc;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.projector-layout-input:focus {
+  outline: 2px solid rgba(96, 165, 250, 0.55);
+  outline-offset: 2px;
+  border-color: rgba(147, 197, 253, 0.82);
+}
+
 .projector-step-button {
   min-width: 2.35rem;
   min-height: 2.35rem;
@@ -1372,6 +1402,7 @@
 
 .projector-page {
   --projector-font-scale: 1;
+  --projector-block-width: 88vw;
   --projector-offset-x: 0vw;
   --projector-offset-y: 24vh;
   min-height: 100vh;
@@ -1393,7 +1424,7 @@
   position: absolute;
   left: 50%;
   top: 50%;
-  width: min(88vw, 1700px);
+  width: var(--projector-block-width);
   transform: translate(
     calc(-50% + var(--projector-offset-x)),
     calc(-50% + var(--projector-offset-y))
@@ -1523,9 +1554,6 @@
     padding-top: 6.5rem;
   }
 
-  .projector-subtitle-block {
-    width: calc(100vw - 2rem);
-  }
 }
 
 .no-session {

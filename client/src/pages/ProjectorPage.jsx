@@ -492,6 +492,7 @@ const ProjectorPage = () => {
   const resolvedLayout = normalizeProjectorLayout(layout)
   const projectorStyle = {
     '--projector-font-scale': Math.max(resolvedLayout.fontSizePercent, 0) / 100,
+    '--projector-block-width': `${resolvedLayout.widthPercent}vw`,
     '--projector-offset-x': `${resolvedLayout.offsetX}vw`,
     '--projector-offset-y': `${resolvedLayout.offsetY}vh`,
   }
