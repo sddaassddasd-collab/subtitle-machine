@@ -959,6 +959,11 @@ const ControlPage = () => {
 
   const viewerShareUrl = viewerAliasUrl || viewerUrl
 
+  const prompterUrl = useMemo(() => {
+    if (typeof window === 'undefined' || !sessionMeta?.viewerToken) return ''
+    return `${window.location.origin}/prompter/${sessionMeta.viewerToken}`
+  }, [sessionMeta?.viewerToken])
+
   const projectorUrl = useMemo(() => {
     if (typeof window === 'undefined' || !sessionMeta?.projectorToken) return ''
     return `${window.location.origin}/projector/${sessionMeta.projectorToken}`
@@ -2805,6 +2810,19 @@ const ControlPage = () => {
     }
   }
 
+  const handleCopyPrompterLink = async () => {
+    if (!prompterUrl) return
+    try {
+      await navigator.clipboard.writeText(prompterUrl)
+      setStatus({ kind: 'success', message: '題詞頁網址已複製' })
+    } catch {
+      setStatus({
+        kind: 'error',
+        message: '無法複製，請手動複製題詞頁網址',
+      })
+    }
+  }
+
   const handleSaveViewerAlias = async () => {
     if (!sessionId) return
     const data = await performSessionMutation(
@@ -3368,6 +3386,12 @@ const ControlPage = () => {
                   <span>{viewerUrl || '尚未載入工作區'}</span>
                   <button type="button" onClick={handleCopyViewerFixedLink}>
                     複製固定網址
+                  </button>
+                </div>
+                <div className="viewer-link viewer-link-secondary">
+                  <span>{prompterUrl || '尚未載入工作區'}</span>
+                  <button type="button" onClick={handleCopyPrompterLink}>
+                    複製題詞頁
                   </button>
                 </div>
                 {viewerShareUrl && (

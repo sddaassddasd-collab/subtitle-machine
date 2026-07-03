@@ -71,22 +71,36 @@ export const normalizeDisplayPayload = (payload) => {
       : 'primary'
 
   const lineCandidate = payload?.line
-  const nextLine =
-    lineCandidate && typeof lineCandidate === 'object'
+  const normalizeLine = (line) =>
+    line && typeof line === 'object'
       ? {
-          text: typeof lineCandidate.text === 'string' ? lineCandidate.text : '',
-          type:
-            lineCandidate.type === 'direction' ? 'direction' : 'dialogue',
+          id: typeof line.id === 'string' && line.id.trim() ? line.id.trim() : '',
+          text: typeof line.text === 'string' ? line.text : '',
+          type: line.type === 'direction' ? 'direction' : 'dialogue',
+          music: line.music === true,
           role:
-            typeof lineCandidate.role === 'string' && lineCandidate.role.trim()
-              ? lineCandidate.role.trim()
+            typeof line.role === 'string' && line.role.trim()
+              ? line.role.trim()
               : null,
           translations:
-            lineCandidate.translations && typeof lineCandidate.translations === 'object'
-              ? lineCandidate.translations
+            line.translations && typeof line.translations === 'object'
+              ? line.translations
               : {},
         }
       : null
+  const nextLine =
+    lineCandidate && typeof lineCandidate === 'object'
+      ? normalizeLine(lineCandidate)
+      : null
+  const lines = Array.isArray(payload?.lines)
+    ? payload.lines.map((line) => normalizeLine(line)).filter(Boolean)
+    : []
+  const currentIndex = normalizeInt(
+    payload?.currentIndex,
+    0,
+    0,
+    Math.max(lines.length - 1, 0),
+  )
 
   const transcription = payload?.transcription || {}
   const transcriptionIsFinal = transcription.isFinal !== false
@@ -119,6 +133,8 @@ export const normalizeDisplayPayload = (payload) => {
   return {
     enabled,
     line: nextLine,
+    lines,
+    currentIndex,
     liveEntries,
     liveLines,
     musicActive,

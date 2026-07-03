@@ -1312,6 +1312,128 @@
   opacity: 0.35;
 }
 
+.prompter-page {
+  --prompter-font-scale: 1;
+  min-height: 100vh;
+  width: 100%;
+  min-width: 100vw;
+  background: #888890;
+  color: #f8fafc;
+  position: relative;
+  overflow: hidden;
+}
+
+.prompter-toolbar {
+  top: 1rem;
+}
+
+.prompter-scroll {
+  height: 100vh;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
+}
+
+.prompter-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.prompter-lines {
+  width: min(760px, calc(100vw - 3rem));
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 34vh 0 42vh;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(0.65rem, 1.35vh, 1.15rem);
+  text-align: left;
+}
+
+.prompter-line {
+  font-size: clamp(
+    calc(1.7rem * var(--prompter-font-scale)),
+    calc(4.4vw * var(--prompter-font-scale)),
+    calc(3rem * var(--prompter-font-scale))
+  );
+  line-height: 1.28;
+  font-weight: 800;
+  color: rgba(18, 24, 38, 0.48);
+  white-space: pre-line;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  transition:
+    color 180ms ease,
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.prompter-line-active {
+  color: #fff;
+  opacity: 1;
+  transform: translateX(0.15rem);
+  text-shadow: 0 2px 24px rgba(255, 255, 255, 0.18);
+}
+
+.prompter-line-direction {
+  min-height: 0.35rem;
+  opacity: 0.18;
+}
+
+.prompter-empty-line,
+.prompter-hidden-line {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(248, 250, 252, 0.48);
+  font-size: clamp(1.4rem, 4vw, 2.4rem);
+  font-weight: 700;
+}
+
+.prompter-live-feed {
+  width: min(760px, calc(100vw - 3rem));
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 30vh 0 18vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  text-align: left;
+}
+
+.prompter-live-feed.with-music-banner {
+  padding-top: 38vh;
+}
+
+.prompter-live-line {
+  font-size: clamp(
+    calc(1.45rem * var(--prompter-font-scale)),
+    calc(3.8vw * var(--prompter-font-scale)),
+    calc(2.6rem * var(--prompter-font-scale))
+  );
+  line-height: 1.32;
+  font-weight: 800;
+  color: rgba(18, 24, 38, 0.48);
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.prompter-live-line-active {
+  color: #fff;
+  font-size: clamp(
+    calc(1.9rem * var(--prompter-font-scale)),
+    calc(4.8vw * var(--prompter-font-scale)),
+    calc(3.4rem * var(--prompter-font-scale))
+  );
+  text-shadow: 0 2px 24px rgba(255, 255, 255, 0.18);
+}
+
+.prompter-live-line-final {
+  color: #ecfdf5;
+}
+
 .viewer-live-badge {
   position: absolute;
   top: 1rem;
@@ -2299,6 +2421,11 @@
     bottom: 1rem;
     left: 1rem;
     right: 4.5rem;
+  }
+
+  .prompter-toolbar {
+    top: auto;
+    bottom: 1rem;
   }
 
   .projector-preview-header {

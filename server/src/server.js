@@ -6093,6 +6093,13 @@ function getViewerPayload(session) {
     musicText,
     transcription,
   } = getSessionDisplayState(session);
+  const publicLines = ensureSessionLines(normalized).map((line) =>
+    toPublicLine(line),
+  );
+  const currentIndex =
+    publicLines.length > 0
+      ? Math.min(Math.max(normalized.currentIndex, 0), publicLines.length - 1)
+      : 0;
 
   if (!normalized.displayEnabled) {
     return {
@@ -6101,6 +6108,8 @@ function getViewerPayload(session) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
+      lines: publicLines,
+      currentIndex,
       line: null,
       text: '',
       liveEntries: [],
@@ -6121,6 +6130,8 @@ function getViewerPayload(session) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
+      lines: publicLines,
+      currentIndex,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
         type: LINE_TYPES.DIALOGUE,
@@ -6143,6 +6154,8 @@ function getViewerPayload(session) {
     status: normalized.status,
     languages: normalized.languages,
     defaultLanguageId: normalized.viewerDefaultLanguageId,
+    lines: publicLines,
+    currentIndex,
     line: toPublicLine(activeScriptLine),
     text:
       activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
