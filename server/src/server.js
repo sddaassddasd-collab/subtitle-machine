@@ -559,6 +559,12 @@ const TRANSCRIPTION_CORRECTION_MODEL =
   process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
 const SECONDARY_ALIGNMENT_MODEL =
   process.env.SECONDARY_ALIGNMENT_MODEL || 'gpt-4o';
+const DEFAULT_SCRIPT_PARSE_MODEL = 'gpt-4o-mini';
+const VALID_SCRIPT_PARSE_MODELS = new Set([
+  'gpt-4o-mini',
+  'gpt-4o',
+  'gpt-5.5',
+]);
 const SECONDARY_ALIGNMENT_PARSE_LIMIT_MULTIPLIER = 3;
 const TRANSCRIPTION_CORRECTION_ENABLED =
   process.env.TRANSCRIPTION_CORRECTION_ENABLED !== 'false';
@@ -3891,6 +3897,17 @@ function sanitizeModelLines(parsed, sourceText, options = {}) {
   return cleaned;
 }
 
+function normalizeScriptParseModel(model) {
+  const normalized = typeof model === 'string' ? model.trim() : '';
+  return VALID_SCRIPT_PARSE_MODELS.has(normalized)
+    ? normalized
+    : DEFAULT_SCRIPT_PARSE_MODEL;
+}
+
+function isGpt5ScriptParseModel(model) {
+  return typeof model === 'string' && model.startsWith('gpt-5');
+}
+
 async function parseChunk({
   client,
   chunkText,
@@ -3899,6 +3916,7 @@ async function parseChunk({
   languageCode = '',
   mode = 'subtitle',
   lineLimit = null,
+  model = DEFAULT_SCRIPT_PARSE_MODEL,
 }) {
   const profile = resolveScriptSegmentationProfile(languageCode, chunkText);
   const lineWidthUnits = Number.isFinite(lineLimit)
@@ -3937,12 +3955,21 @@ ${chunkText}
     },
   ];
 
-  const response = await client.responses.create({
-    model: 'gpt-4o-mini',
+  const selectedModel = normalizeScriptParseModel(model);
+  const request = {
+    model: selectedModel,
     input: prompt,
-    temperature: 0.1,
     max_output_tokens: 4000,
-  });
+  };
+
+  if (isGpt5ScriptParseModel(selectedModel)) {
+    request.reasoning = { effort: 'low' };
+    request.text = { verbosity: 'low' };
+  } else {
+    request.temperature = 0.1;
+  }
+
+  const response = await client.responses.create(request);
 
   const output = response.output_text?.trim();
   if (!output) {
@@ -3982,6 +4009,7 @@ function getSecondaryAlignmentParseLimit(languageCode = '', sampleText = '') {
 async function parseAlignmentScriptWithOpenAI(rawText, apiKey, options = {}) {
   const languageCode =
     typeof options.languageCode === 'string' ? options.languageCode : '';
+  const model = normalizeScriptParseModel(options.model);
   const client = new OpenAI({ apiKey });
   const chunks = chunkScript(rawText, MAX_CHUNK_LENGTH, { languageCode });
   const combined = [];
@@ -3999,6 +4027,7 @@ async function parseAlignmentScriptWithOpenAI(rawText, apiKey, options = {}) {
         languageCode,
         mode: 'alignment',
         lineLimit,
+        model,
       });
       combined.push(...parsedLines);
     } catch (error) {
@@ -6477,6 +6506,7 @@ function broadcastProjectorLayoutState(sessionId) {
 async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
   const languageCode =
     typeof options.languageCode === 'string' ? options.languageCode : '';
+  const model = normalizeScriptParseModel(options.model);
   const client = new OpenAI({ apiKey });
   const chunks = chunkScript(rawText, MAX_CHUNK_LENGTH, { languageCode });
   const combined = [];
@@ -6491,6 +6521,7 @@ async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
         chunkIndex: index,
         totalChunks: chunks.length,
         languageCode,
+        model,
       });
       combined.push(...parsedLines);
     } catch (error) {
@@ -8283,6 +8314,9 @@ app.post(
     }
 
     const apiKey = sanitizeLineText(req.body?.apiKey || '');
+    const scriptParseModel = normalizeScriptParseModel(
+      req.body?.scriptParseModel,
+    );
     const rawScriptText =
       typeof req.body?.scriptText === 'string' ? req.body.scriptText : '';
 
@@ -8301,6 +8335,7 @@ app.post(
       try {
         parsedLines = await parseScriptWithOpenAI(normalizedRawText, apiKey, {
           languageCode: language.code,
+          model: scriptParseModel,
         });
       } catch (error) {
         console.error('Failed to parse secondary language script:', error);
@@ -8373,6 +8408,9 @@ app.post(
     if (!session) return;
 
     const apiKey = sanitizeLineText(req.body?.apiKey || '');
+    const scriptParseModel = normalizeScriptParseModel(
+      req.body?.scriptParseModel,
+    );
     const rawScriptText =
       typeof req.body?.scriptText === 'string' ? req.body.scriptText : '';
     const cellId =
@@ -8399,6 +8437,7 @@ app.post(
       try {
         lines = await parseScriptWithOpenAI(rawText, apiKey, {
           languageCode: primaryLanguageCode,
+          model: scriptParseModel,
         });
       } catch (error) {
         console.error('Failed to parse script:', error);

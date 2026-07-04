@@ -2220,6 +2220,13 @@
   border: 1px solid rgba(148, 163, 184, 0.18);
 }
 
+.script-parse-model-card {
+  padding: 0.75rem;
+  border-radius: 12px;
+  background: rgba(30, 41, 59, 0.28);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
 .viewer-preview-role {
   text-align: center;
   color: #fde68a;

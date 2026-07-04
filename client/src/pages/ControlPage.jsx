@@ -15,8 +15,30 @@ import {
 const storageKeys = {
   apiKey: 'subtitleMachineApiKey',
   rememberKey: 'subtitleMachineRememberKey',
+  scriptParseModel: 'subtitleMachineScriptParseModel',
 }
 
+const DEFAULT_SCRIPT_PARSE_MODEL = 'gpt-4o-mini'
+const SCRIPT_PARSE_MODEL_OPTIONS = Object.freeze([
+  {
+    id: 'gpt-4o-mini',
+    name: 'GPT-4o mini',
+    description: '速度快、成本低，適合日常拆解',
+  },
+  {
+    id: 'gpt-4o',
+    name: 'GPT-4o',
+    description: '品質較穩，適合複雜劇本',
+  },
+  {
+    id: 'gpt-5.5',
+    name: 'GPT-5.5',
+    description: '最新模型，適合高品質拆解',
+  },
+])
+const ALLOWED_SCRIPT_PARSE_MODELS = new Set(
+  SCRIPT_PARSE_MODEL_OPTIONS.map((model) => model.id),
+)
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
 const PRIMARY_ONLY_OPTION_ID = '__primary_only__'
 const NEW_ROLE_OPTION_ID = '__new_role__'
@@ -748,6 +770,13 @@ const ControlPage = () => {
     if (typeof window === 'undefined') return false
     return window.localStorage.getItem(storageKeys.rememberKey) === 'true'
   })
+  const [scriptParseModel, setScriptParseModel] = useState(() => {
+    if (typeof window === 'undefined') return DEFAULT_SCRIPT_PARSE_MODEL
+    const stored = window.localStorage.getItem(storageKeys.scriptParseModel)
+    return ALLOWED_SCRIPT_PARSE_MODELS.has(stored)
+      ? stored
+      : DEFAULT_SCRIPT_PARSE_MODEL
+  })
   const [draftInputs, setDraftInputs] = useState({})
   const [parsingPrimary, setParsingPrimary] = useState(false)
   const [parsingLanguageId, setParsingLanguageId] = useState('')
@@ -866,6 +895,9 @@ const ControlPage = () => {
     ? [primaryLanguage, comparisonLanguage]
     : [primaryLanguage]
   const primaryLanguageName = primaryLanguage?.name || '第一語言'
+  const selectedScriptParseModel =
+    SCRIPT_PARSE_MODEL_OPTIONS.find((model) => model.id === scriptParseModel) ||
+    SCRIPT_PARSE_MODEL_OPTIONS[0]
   const viewerDefaultLanguageId =
     sessionMeta?.viewerDefaultLanguageId || languages[0]?.id || 'primary'
   const projectorDefaultLanguageId =
@@ -1193,6 +1225,11 @@ const ControlPage = () => {
       window.localStorage.removeItem(storageKeys.apiKey)
     }
   }, [rememberKey, apiKey])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(storageKeys.scriptParseModel, scriptParseModel)
+  }, [scriptParseModel])
 
   useEffect(() => {
     let cancelled = false
@@ -2698,6 +2735,7 @@ const ControlPage = () => {
               apiKey,
               cellId: selectedCellId,
               scriptText: primaryScriptInput,
+              scriptParseModel,
             }),
           }),
         { successMessage: '第一語言字幕已更新', keepStatus: true },
@@ -2753,6 +2791,7 @@ const ControlPage = () => {
               body: JSON.stringify({
                 apiKey,
                 scriptText,
+                scriptParseModel,
               }),
             },
           ),
@@ -3541,6 +3580,24 @@ const ControlPage = () => {
             </ControlSection>
 
             <ControlSection title="貼上與解析" defaultOpen={!lines.length}>
+            <div className="input-group script-parse-model-card">
+              <label htmlFor="script-parse-model">劇本拆解模型</label>
+              <select
+                id="script-parse-model"
+                value={scriptParseModel}
+                onChange={(event) => setScriptParseModel(event.target.value)}
+              >
+                {SCRIPT_PARSE_MODEL_OPTIONS.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+              <span className="input-note">
+                {selectedScriptParseModel.description}
+              </span>
+            </div>
+
             <form className="input-group" onSubmit={handleParsePrimaryScript}>
               <label htmlFor="script-text-primary">{primaryLanguageName} 劇本文字</label>
               <textarea
