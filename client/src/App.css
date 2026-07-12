@@ -498,6 +498,7 @@
   color: #cbd5f5;
   text-align: right;
   flex: 1 1 12rem;
+  white-space: pre-line;
 }
 
 .status-success {

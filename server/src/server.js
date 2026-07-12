@@ -6501,6 +6501,18 @@ function buildVerifiedControlPayloadAfterLineWrite(
   const cellLineCount = Array.isArray(cell?.lines) ? cell.lines.length : 0;
   const sessionLineCount = Array.isArray(session?.lines) ? session.lines.length : 0;
   const payloadLineCount = Array.isArray(payload?.lines) ? payload.lines.length : 0;
+  const diagnostics = {
+    operationLabel,
+    expectedLineCount,
+    selectedCellId: selectedCell?.id || null,
+    targetCellId: cell?.id || null,
+    selectedCellMatchesTarget: Boolean(selectedCell && selectedCell.id === cell?.id),
+    cellLineCount,
+    sessionLineCount,
+    payloadLineCount,
+    sessionId: session?.id || null,
+    selectedCellCount: Array.isArray(session?.cells) ? session.cells.length : 0,
+  };
 
   if (
     expectedLineCount > 0 &&
@@ -6514,14 +6526,8 @@ function buildVerifiedControlPayloadAfterLineWrite(
       `${operationLabel}完成，但字幕沒有成功寫入目前字幕本`,
     );
     error.code = 'LINES_NOT_PERSISTED';
-    error.details = {
-      expectedLineCount,
-      selectedCellId: selectedCell?.id || null,
-      targetCellId: cell?.id || null,
-      cellLineCount,
-      sessionLineCount,
-      payloadLineCount,
-    };
+    error.diagnostics = diagnostics;
+    console.error('Subtitle line write verification failed:', diagnostics);
     throw error;
   }
 
@@ -9014,6 +9020,7 @@ app.post(
         error: '解析劇本失敗，請確認貼上的內容或稍後再試',
         details: error.message,
         code: error.code || 'UNKNOWN',
+        diagnostics: error.diagnostics || null,
       });
     }
   },

@@ -728,6 +728,31 @@ const formatStatusTimestamp = (timestamp) => {
   return new Date(timestamp).toLocaleString('zh-TW', { hour12: false })
 }
 
+const formatMutationErrorMessage = (data, fallbackMessage = '操作失敗') => {
+  const message = data?.details || data?.error || fallbackMessage
+  const diagnostics =
+    data?.diagnostics && typeof data.diagnostics === 'object'
+      ? data.diagnostics
+      : null
+  if (!diagnostics) return message
+
+  const diagnosticLines = [
+    `code: ${data?.code || 'UNKNOWN'}`,
+    `operationLabel: ${diagnostics.operationLabel ?? ''}`,
+    `expectedLineCount: ${diagnostics.expectedLineCount ?? ''}`,
+    `targetCellId: ${diagnostics.targetCellId ?? ''}`,
+    `selectedCellId: ${diagnostics.selectedCellId ?? ''}`,
+    `selectedCellMatchesTarget: ${diagnostics.selectedCellMatchesTarget ?? ''}`,
+    `cellLineCount: ${diagnostics.cellLineCount ?? ''}`,
+    `sessionLineCount: ${diagnostics.sessionLineCount ?? ''}`,
+    `payloadLineCount: ${diagnostics.payloadLineCount ?? ''}`,
+    `sessionId: ${diagnostics.sessionId ?? ''}`,
+    `selectedCellCount: ${diagnostics.selectedCellCount ?? ''}`,
+  ]
+
+  return `${message}\n${diagnosticLines.join('\n')}`
+}
+
 const ControlPage = () => {
   const navigate = useNavigate()
   const params = useParams()
@@ -1493,7 +1518,7 @@ const ControlPage = () => {
       const response = await request()
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.details || data.error || '操作失敗')
+        throw new Error(formatMutationErrorMessage(data, '操作失敗'))
       }
       if (data && typeof data === 'object' && data.session) {
         applySessionPayload(data)
