@@ -19,6 +19,10 @@ const storageKeys = {
 }
 
 const DEFAULT_SCRIPT_PARSE_MODEL = 'gpt-4o-mini'
+const SUBTITLE_CONTROL_MODES = Object.freeze({
+  MANUAL: 'manual',
+  AUTO: 'auto',
+})
 const SCRIPT_PARSE_MODEL_OPTIONS = Object.freeze([
   {
     id: 'gpt-4o-mini',
@@ -932,6 +936,12 @@ const ControlPage = () => {
   const projectorDefaultLanguageId =
     sessionMeta?.projectorDefaultLanguageId || languages[0]?.id || 'primary'
   const musicEffectEnabled = sessionMeta?.musicEffectEnabled !== false
+  const subtitleControlMode =
+    sessionMeta?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+      ? SUBTITLE_CONTROL_MODES.AUTO
+      : SUBTITLE_CONTROL_MODES.MANUAL
+  const subtitleControlModeLabel =
+    subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? '自動模式' : '手動模式'
   const existingRoleOptions = useMemo(() => {
     const roles = new Set()
     lines.forEach((line) => {
@@ -1234,9 +1244,20 @@ const ControlPage = () => {
         liveCurrentIndexRef.current = index
         setLiveCurrentIndex(index)
         setCurrentIndex(index)
+        if (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+          setSessionMeta((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  subtitleControlMode: SUBTITLE_CONTROL_MODES.MANUAL,
+                }
+              : prev,
+          )
+          setStatus({ kind: 'info', message: '已手動接管，切換為手動模式' })
+        }
       }, 180)
     },
-    [clearPendingLineClick, sessionId],
+    [clearPendingLineClick, sessionId, subtitleControlMode],
   )
 
   useEffect(() => {
@@ -1571,6 +1592,35 @@ const ControlPage = () => {
     })
   }
 
+  const handleSetSubtitleControlMode = (mode) => {
+    if (!socketRef.current || !sessionId) return
+    const nextMode =
+      mode === SUBTITLE_CONTROL_MODES.AUTO
+        ? SUBTITLE_CONTROL_MODES.AUTO
+        : SUBTITLE_CONTROL_MODES.MANUAL
+    if (nextMode === subtitleControlMode) return
+
+    socketRef.current.emit('setSubtitleControlMode', {
+      sessionId,
+      mode: nextMode,
+    })
+    setSessionMeta((prev) =>
+      prev
+        ? {
+            ...prev,
+            subtitleControlMode: nextMode,
+          }
+        : prev,
+    )
+    setStatus({
+      kind: 'info',
+      message:
+        nextMode === SUBTITLE_CONTROL_MODES.AUTO
+          ? '已切換為自動模式；聲音對齊引擎尚未啟用'
+          : '已切換為手動模式',
+    })
+  }
+
   const handleToggleMusicEffectEnabled = () => {
     if (!socketRef.current || !sessionId) return
     const nextState = !musicEffectEnabled
@@ -1681,12 +1731,29 @@ const ControlPage = () => {
       setCurrentIndex((prev) =>
         editingModeEnabled ? clampLineIndex(prev, lines.length) : nextIndex,
       )
+      if (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+        setSessionMeta((prev) =>
+          prev
+            ? {
+                ...prev,
+                subtitleControlMode: SUBTITLE_CONTROL_MODES.MANUAL,
+              }
+            : prev,
+        )
+        setStatus({ kind: 'info', message: '已手動接管，切換為手動模式' })
+      }
       socketRef.current.emit('setCurrentIndex', {
         sessionId,
         index: nextIndex,
       })
     },
-    [clearPendingLineClick, editingModeEnabled, lines.length, sessionId],
+    [
+      clearPendingLineClick,
+      editingModeEnabled,
+      lines.length,
+      sessionId,
+      subtitleControlMode,
+    ],
   )
 
   useEffect(() => {
@@ -3937,6 +4004,38 @@ const ControlPage = () => {
 
         <div className="script-live-controls">
           <div className="control-actions">
+            <div
+              className="subtitle-mode-switch"
+              aria-label="字幕控制模式"
+              title={`目前為${subtitleControlModeLabel}`}
+            >
+              <button
+                type="button"
+                className={`subtitle-mode-button ${
+                  subtitleControlMode === SUBTITLE_CONTROL_MODES.MANUAL
+                    ? 'active'
+                    : ''
+                }`}
+                onClick={() =>
+                  handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.MANUAL)
+                }
+              >
+                手動
+              </button>
+              <button
+                type="button"
+                className={`subtitle-mode-button ${
+                  subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+                    ? 'active'
+                    : ''
+                }`}
+                onClick={() =>
+                  handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.AUTO)
+                }
+              >
+                自動
+              </button>
+            </div>
             <button
               type="button"
               className={`toggle-button ${displayEnabled ? 'active' : ''}`}

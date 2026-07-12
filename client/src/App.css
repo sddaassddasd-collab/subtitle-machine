@@ -1190,6 +1190,31 @@
   align-items: center;
 }
 
+.subtitle-mode-switch {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.68);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.subtitle-mode-button {
+  min-width: 4rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #cbd5e1;
+}
+
+.subtitle-mode-button + .subtitle-mode-button {
+  border-left: 1px solid rgba(148, 163, 184, 0.38);
+}
+
+.subtitle-mode-button.active {
+  background: #2563eb;
+  color: #eff6ff;
+}
+
 .toggle-button {
   background: #d97706;
 }

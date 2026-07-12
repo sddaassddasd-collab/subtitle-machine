@@ -167,6 +167,10 @@ const PROJECTOR_DISPLAY_MODES = Object.freeze({
   SCRIPT: 'script',
   TRANSCRIPTION: 'transcription',
 });
+const SUBTITLE_CONTROL_MODES = Object.freeze({
+  MANUAL: 'manual',
+  AUTO: 'auto',
+});
 
 const PROJECTOR_STATUS_LEVELS = Object.freeze({
   IDLE: 'idle',
@@ -800,6 +804,12 @@ function normalizeProjectorDisplayMode(rawMode) {
   return rawMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
     ? PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
     : PROJECTOR_DISPLAY_MODES.SCRIPT;
+}
+
+function normalizeSubtitleControlMode(rawMode) {
+  return rawMode === SUBTITLE_CONTROL_MODES.AUTO
+    ? SUBTITLE_CONTROL_MODES.AUTO
+    : SUBTITLE_CONTROL_MODES.MANUAL;
 }
 
 function normalizeProjectorRevision(rawRevision) {
@@ -3366,6 +3376,7 @@ function captureSessionSnapshot(session) {
       cells: session.cells,
       selectedCellId: session.selectedCellId,
       currentIndex: session.currentIndex,
+      subtitleControlMode: session.subtitleControlMode,
       displayEnabled: session.displayEnabled,
       roleColorEnabled: session.roleColorEnabled,
       musicEffectEnabled: session.musicEffectEnabled,
@@ -3400,6 +3411,9 @@ function restoreSessionSnapshot(session, snapshot) {
   session.currentIndex = Number.isInteger(snapshot.currentIndex)
     ? snapshot.currentIndex
     : 0;
+  session.subtitleControlMode = normalizeSubtitleControlMode(
+    snapshot.subtitleControlMode || session.subtitleControlMode,
+  );
   session.displayEnabled = snapshot.displayEnabled !== false;
   session.roleColorEnabled = snapshot.roleColorEnabled !== false;
   session.musicEffectEnabled = snapshot.musicEffectEnabled !== false;
@@ -3528,6 +3542,9 @@ function ensureSessionStructure(session) {
   session.currentIndex = Number.isInteger(session.currentIndex)
     ? Math.max(session.currentIndex, 0)
     : 0;
+  session.subtitleControlMode = normalizeSubtitleControlMode(
+    session.subtitleControlMode,
+  );
   session.transcription = ensureTranscriptionState(session);
   ensureSessionHistory(session);
   syncSelectedCellLines(session);
@@ -3559,6 +3576,7 @@ function createSessionRecord(ownerUserId) {
     languages: [createLanguageDefinition({}, 0)],
     selectedCellId: null,
     currentIndex: 0,
+    subtitleControlMode: SUBTITLE_CONTROL_MODES.MANUAL,
     cells: [createCellDefinition({}, 0, 'primary')],
   });
 }
@@ -3631,6 +3649,7 @@ function serializeSessionForStorage(session) {
     projectorStatus: normalized.projectorStatus,
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
+    subtitleControlMode: normalized.subtitleControlMode,
     languages: normalized.languages.map((language) => ({
       id: language.id,
       name: language.name,
@@ -6442,6 +6461,7 @@ function getSessionSummary(session) {
     updatedAt: normalized.updatedAt,
     endedAt: normalized.endedAt,
     selectedCellId: normalized.selectedCellId,
+    subtitleControlMode: normalized.subtitleControlMode,
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
@@ -6948,14 +6968,26 @@ function broadcastViewerState(sessionId) {
   );
 }
 
-function applyCurrentIndexChange(session, nextIndex) {
+function applyCurrentIndexChange(session, nextIndex, options = {}) {
   if (!session) return false;
+  const manualOverride = options.manualOverride === true;
+  if (
+    manualOverride &&
+    session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.MANUAL
+  ) {
+    session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
+  }
+
   if (
     !Number.isInteger(nextIndex) ||
     nextIndex < 0 ||
     nextIndex >= session.lines.length ||
     nextIndex === session.currentIndex
   ) {
+    if (manualOverride) {
+      persistSession(session);
+      broadcastControlState(session.id);
+    }
     return false;
   }
 
@@ -9109,7 +9141,7 @@ app.post('/api/session/:sessionId/current', requireAuth, (req, res) => {
     return res.status(400).json({ error: '索引超出範圍' });
   }
 
-  applyCurrentIndexChange(session, nextIndex);
+  applyCurrentIndexChange(session, nextIndex, { manualOverride: true });
   res.json(getControlPayload(session));
 });
 
@@ -9717,7 +9749,7 @@ io.on('connection', (socket) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
-    applyCurrentIndexChange(session, index);
+    applyCurrentIndexChange(session, index, { manualOverride: true });
   });
 
   socket.on('shiftIndex', ({ sessionId, delta }) => {
@@ -9729,7 +9761,19 @@ io.on('connection', (socket) => {
       Math.max(session.lines.length - 1, 0),
     );
 
-    applyCurrentIndexChange(session, nextIndex);
+    applyCurrentIndexChange(session, nextIndex, { manualOverride: true });
+  });
+
+  socket.on('setSubtitleControlMode', ({ sessionId, mode }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    const nextMode = normalizeSubtitleControlMode(mode);
+    if (session.subtitleControlMode === nextMode) return;
+
+    session.subtitleControlMode = nextMode;
+    persistSession(session);
+    broadcastControlState(sessionId);
   });
 
   socket.on('setDisplay', ({ sessionId, displayEnabled }) => {
