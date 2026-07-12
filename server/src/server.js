@@ -6490,6 +6490,44 @@ function getControlPayload(session) {
   };
 }
 
+function buildVerifiedControlPayloadAfterLineWrite(
+  session,
+  cell,
+  expectedLineCount,
+  operationLabel = '字幕更新',
+) {
+  const payload = getControlPayload(session);
+  const selectedCell = getSelectedCell(session);
+  const cellLineCount = Array.isArray(cell?.lines) ? cell.lines.length : 0;
+  const sessionLineCount = Array.isArray(session?.lines) ? session.lines.length : 0;
+  const payloadLineCount = Array.isArray(payload?.lines) ? payload.lines.length : 0;
+
+  if (
+    expectedLineCount > 0 &&
+    (!selectedCell ||
+      selectedCell.id !== cell?.id ||
+      cellLineCount <= 0 ||
+      sessionLineCount <= 0 ||
+      payloadLineCount <= 0)
+  ) {
+    const error = new Error(
+      `${operationLabel}完成，但字幕沒有成功寫入目前字幕本`,
+    );
+    error.code = 'LINES_NOT_PERSISTED';
+    error.details = {
+      expectedLineCount,
+      selectedCellId: selectedCell?.id || null,
+      targetCellId: cell?.id || null,
+      cellLineCount,
+      sessionLineCount,
+      payloadLineCount,
+    };
+    throw error;
+  }
+
+  return payload;
+}
+
 function getSessionDisplayState(session) {
   const normalized = ensureSessionStructure(session);
   const lines = ensureSessionLines(normalized);
@@ -8956,12 +8994,18 @@ app.post(
       session.currentIndex = 0;
       session.displayEnabled = true;
       syncSelectedCellLines(session);
+      const controlPayload = buildVerifiedControlPayloadAfterLineWrite(
+        session,
+        cell,
+        normalizedLines.length,
+        '解析劇本',
+      );
       persistSession(session);
       broadcastControlState(session.id);
       broadcastViewerState(session.id);
 
       res.json({
-        ...getControlPayload(session),
+        ...controlPayload,
         parsedLineCount: normalizedLines.length,
         ...(warning ? { warning } : {}),
       });
@@ -8998,10 +9042,16 @@ app.put('/api/session/:sessionId/lines', requireAuth, (req, res) => {
   });
   session.selectedCellId = cell.id;
   syncSelectedCellLines(session);
+  const controlPayload = buildVerifiedControlPayloadAfterLineWrite(
+    session,
+    cell,
+    cell.lines.length,
+    '匯入字幕',
+  );
   persistSession(session);
   broadcastControlState(session.id);
   broadcastViewerState(session.id);
-  res.json(getControlPayload(session));
+  res.json(controlPayload);
 });
 
 app.delete('/api/session/:sessionId/lines', requireAuth, (req, res) => {

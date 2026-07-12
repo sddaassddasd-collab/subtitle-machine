@@ -1482,6 +1482,7 @@ const ControlPage = () => {
     }
     const data = await response.json()
     applySessionPayload(data)
+    return data
   }
 
   const performSessionMutation = async (
@@ -2789,12 +2790,19 @@ const ControlPage = () => {
                 typeof line?.text === 'string' && line.text.trim().length > 0,
             ).length
           : 0
+      const refreshedData = await requestSessionRefresh()
+      const loadedLineCount = Array.isArray(refreshedData?.lines)
+        ? refreshedData.lines.length
+        : 0
+      if (parsedLineCount > 0 && loadedLineCount === 0) {
+        throw new Error('解析完成，但字幕沒有成功寫入目前字幕本')
+      }
       setStatus({
         kind: data?.warning ? 'info' : 'success',
         message:
           data?.warning ||
-          (parsedLineCount > 0
-            ? `第一語言字幕已更新（${parsedLineCount} 行）`
+          (loadedLineCount > 0
+            ? `第一語言字幕已更新（${loadedLineCount} 行）`
             : '第一語言字幕已更新'),
       })
       setAutoCenterEnabled(false)
@@ -3666,7 +3674,10 @@ const ControlPage = () => {
               <span className="input-note">
                 角色會被保留到字幕資料裡，可由控制端切換是否用顏色區分。
               </span>
-              <button type="submit" disabled={parsingPrimary || !selectedCellId}>
+              <button
+                type="submit"
+                disabled={parsingPrimary || clearingSubtitles || !selectedCellId}
+              >
                 {parsingPrimary ? '解析中…' : `解析 ${primaryLanguageName}`}
               </button>
             </form>
@@ -3695,7 +3706,9 @@ const ControlPage = () => {
                 <button
                   type="submit"
                   disabled={
-                    parsingLanguageId === language.id || !selectedCellId
+                    parsingLanguageId === language.id ||
+                    clearingSubtitles ||
+                    !selectedCellId
                   }
                 >
                   {parsingLanguageId === language.id
@@ -3885,7 +3898,12 @@ const ControlPage = () => {
               type="button"
               className="subtle-button danger-button"
               onClick={handleClearCurrentCellSubtitles}
-              disabled={clearingSubtitles || lines.length === 0}
+              disabled={
+                clearingSubtitles ||
+                parsingPrimary ||
+                Boolean(parsingLanguageId) ||
+                lines.length === 0
+              }
             >
               {clearingSubtitles ? '清空中…' : '清空字幕'}
             </button>
