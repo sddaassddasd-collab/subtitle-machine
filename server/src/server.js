@@ -3908,6 +3908,395 @@ function sanitizeModelLines(parsed, sourceText, options = {}) {
   return cleaned;
 }
 
+const SCRIPT_ANNOTATION_MAX_UNITS = 90;
+const SCRIPT_ANNOTATION_MAX_CHARS = 3600;
+
+function splitInlineStageDirections(text) {
+  const sanitized = sanitizeLineText(text);
+  if (!sanitized) return [];
+
+  const segments = [];
+  let lastIndex = 0;
+  const pattern = /[（(【\[][^）)】\]]+[）)】\]]/gu;
+  let match;
+
+  while ((match = pattern.exec(sanitized)) !== null) {
+    const before = sanitizeLineText(sanitized.slice(lastIndex, match.index));
+    if (before) segments.push(before);
+    const direction = sanitizeLineText(match[0]);
+    if (direction) segments.push(direction);
+    lastIndex = match.index + match[0].length;
+  }
+
+  const after = sanitizeLineText(sanitized.slice(lastIndex));
+  if (after) segments.push(after);
+  return segments.length ? segments : [sanitized];
+}
+
+function splitMultipleSpeakerLine(text) {
+  const sanitized = sanitizeLineText(text);
+  if (!sanitized) return [];
+
+  const speakerPattern =
+    /(^|[。！？!?；;]\s*)([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}A-Za-z0-9_・·.\-]{1,12})[：:]/gu;
+  const matches = [];
+  let match;
+
+  while ((match = speakerPattern.exec(sanitized)) !== null) {
+    const prefixLength = match[1] ? match[1].length : 0;
+    matches.push(match.index + prefixLength);
+  }
+
+  if (matches.length <= 1 || matches[0] !== 0) {
+    return [sanitized];
+  }
+
+  const segments = [];
+  matches.forEach((start, index) => {
+    const end = index + 1 < matches.length ? matches[index + 1] : sanitized.length;
+    const segment = sanitizeLineText(sanitized.slice(start, end));
+    if (segment) segments.push(segment);
+  });
+
+  return segments.length ? segments : [sanitized];
+}
+
+function splitLongScriptUnit(text, languageCode = '') {
+  const sanitized = sanitizeLineText(text);
+  if (!sanitized) return [];
+  const profile = resolveScriptSegmentationProfile(languageCode, sanitized);
+  const hardLimit = Math.max(profile.maxLineWidthUnits * 8, 120);
+
+  if (measureSubtitleTextWidth(sanitized) <= hardLimit) {
+    return [sanitized];
+  }
+
+  const units = splitScriptTextUnits(sanitized, profile, {
+    includeWeakBreaks: profile.family !== 'latin',
+  })
+    .map((unit) => sanitizeLineText(unit))
+    .filter(Boolean);
+
+  return units.length ? units : chunkLongUnit(sanitized, hardLimit);
+}
+
+function buildScriptAnnotationUnits(rawText, languageCode = '') {
+  const units = [];
+  const paragraphs = String(rawText || '')
+    .split(/\r?\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  paragraphs.forEach((paragraph) => {
+    splitInlineStageDirections(paragraph).forEach((stageSegment) => {
+      splitMultipleSpeakerLine(stageSegment).forEach((speakerSegment) => {
+        splitLongScriptUnit(speakerSegment, languageCode).forEach((unitText) => {
+          const text = sanitizeLineText(unitText);
+          if (!text) return;
+          units.push({
+            id: units.length + 1,
+            text,
+          });
+        });
+      });
+    });
+  });
+
+  if (units.length > 0) return units;
+
+  const fallbackText = sanitizeLineText(rawText);
+  return fallbackText ? [{ id: 1, text: fallbackText }] : [];
+}
+
+function chunkScriptAnnotationUnits(units) {
+  const chunks = [];
+  let current = [];
+  let currentChars = 0;
+
+  const pushCurrent = () => {
+    if (current.length > 0) {
+      chunks.push(current);
+    }
+    current = [];
+    currentChars = 0;
+  };
+
+  units.forEach((unit) => {
+    const unitChars = unit.text.length;
+    const exceedsUnitLimit = current.length >= SCRIPT_ANNOTATION_MAX_UNITS;
+    const exceedsCharLimit =
+      current.length > 0 &&
+      currentChars + unitChars > SCRIPT_ANNOTATION_MAX_CHARS;
+
+    if (exceedsUnitLimit || exceedsCharLimit) {
+      pushCurrent();
+    }
+
+    current.push(unit);
+    currentChars += unitChars;
+  });
+
+  pushCurrent();
+  return chunks;
+}
+
+function normalizeAnnotationType(rawType, unitText) {
+  const normalized = typeof rawType === 'string' ? rawType.trim().toLowerCase() : '';
+  if (normalized === LINE_TYPES.DIRECTION || normalized === 'stage_direction') {
+    return LINE_TYPES.DIRECTION;
+  }
+  if (normalized === LINE_TYPES.DIALOGUE) {
+    return LINE_TYPES.DIALOGUE;
+  }
+  return isLikelyDirection(unitText) ? LINE_TYPES.DIRECTION : LINE_TYPES.DIALOGUE;
+}
+
+function normalizeAnnotationRole(rawRole) {
+  if (rawRole == null) return null;
+  const role = normalizeRoleName(rawRole);
+  if (!role) return null;
+  const normalized = role.trim().toLowerCase();
+  if (
+    ['null', 'none', 'n/a', 'unknown', 'undefined', '無', '無角色', '未知'].includes(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+  return role;
+}
+
+function joinAnnotatedUnitText(leftText, rightText) {
+  const left = sanitizeLineText(leftText);
+  const right = sanitizeLineText(rightText);
+  if (!left) return right;
+  if (!right) return left;
+
+  const lastChar = left.slice(-1);
+  const firstChar = right.charAt(0);
+  const needsSpace =
+    /[\p{L}\p{N}]/u.test(lastChar) &&
+    /[\p{L}\p{N}]/u.test(firstChar) &&
+    !/[\p{Script=Han}]/u.test(lastChar) &&
+    !/[\p{Script=Han}]/u.test(firstChar);
+
+  return needsSpace ? `${left} ${right}` : `${left}${right}`;
+}
+
+function normalizeUnitAnnotation(rawAnnotation, unit) {
+  const type = normalizeAnnotationType(rawAnnotation?.type, unit.text);
+  const extracted =
+    type === LINE_TYPES.DIALOGUE
+      ? extractRoleFromDialogueText(unit.text)
+      : { role: null };
+  const role =
+    type === LINE_TYPES.DIALOGUE
+      ? normalizeAnnotationRole(rawAnnotation?.role) ||
+        normalizeAnnotationRole(extracted.role)
+      : null;
+
+  return {
+    id: unit.id,
+    type,
+    role,
+    mergeWithPrevious: rawAnnotation?.mergeWithPrevious === true,
+  };
+}
+
+function fallbackAnnotateUnits(units, previousRole = null) {
+  let activeRole = previousRole;
+  return units.map((unit) => {
+    const type = normalizeAnnotationType('', unit.text);
+    const extracted =
+      type === LINE_TYPES.DIALOGUE
+        ? extractRoleFromDialogueText(unit.text)
+        : { role: null };
+    const role =
+      type === LINE_TYPES.DIALOGUE
+        ? normalizeAnnotationRole(extracted.role) || activeRole || null
+        : null;
+
+    if (role) {
+      activeRole = role;
+    }
+
+    return {
+      id: unit.id,
+      type,
+      role,
+      mergeWithPrevious: false,
+    };
+  });
+}
+
+function validateAndCompleteAnnotations(parsed, units, previousRole = null) {
+  const unitById = new Map(units.map((unit) => [unit.id, unit]));
+  const annotationById = new Map();
+
+  if (Array.isArray(parsed)) {
+    parsed.forEach((entry) => {
+      const rawId = Number(entry?.unitId ?? entry?.id);
+      const unitId = Number.isInteger(rawId) ? rawId : null;
+      if (!unitId || !unitById.has(unitId) || annotationById.has(unitId)) {
+        return;
+      }
+      annotationById.set(
+        unitId,
+        normalizeUnitAnnotation(entry, unitById.get(unitId)),
+      );
+    });
+  }
+
+  const fallback = fallbackAnnotateUnits(units, previousRole);
+  return fallback.map((fallbackAnnotation) =>
+    annotationById.get(fallbackAnnotation.id) || fallbackAnnotation,
+  );
+}
+
+function buildAnnotatedLinesFromUnits(units, annotations, previousRole = null) {
+  const unitById = new Map(units.map((unit) => [unit.id, unit]));
+  const lines = [];
+  let activeRole = previousRole;
+
+  annotations.forEach((annotation) => {
+    const unit = unitById.get(annotation.id);
+    if (!unit) return;
+
+    const type = normalizeAnnotationType(annotation.type, unit.text);
+    const extracted =
+      type === LINE_TYPES.DIALOGUE
+        ? extractRoleFromDialogueText(unit.text)
+        : { text: unit.text, role: null };
+    const role =
+      type === LINE_TYPES.DIALOGUE
+        ? normalizeAnnotationRole(annotation.role) ||
+          normalizeAnnotationRole(extracted.role) ||
+          activeRole ||
+          null
+        : null;
+    const text =
+      type === LINE_TYPES.DIALOGUE
+        ? sanitizeLineText(extracted.text || unit.text)
+        : sanitizeLineText(unit.text);
+
+    if (!text) return;
+    if (role) activeRole = role;
+
+    const canMerge =
+      annotation.mergeWithPrevious === true &&
+      lines.length > 0 &&
+      lines[lines.length - 1].type === type &&
+      type === LINE_TYPES.DIALOGUE &&
+      (lines[lines.length - 1].role || null) === (role || null);
+
+    if (canMerge) {
+      const previous = lines[lines.length - 1];
+      previous.text = joinAnnotatedUnitText(previous.text, text);
+      previous.translations = {
+        ...(previous.translations || {}),
+        primary: previous.text,
+      };
+      return;
+    }
+
+    lines.push(
+      createLineRecord({
+        text,
+        type,
+        role,
+        translations: { primary: text },
+      }),
+    );
+  });
+
+  return {
+    lines,
+    lastRole: activeRole,
+  };
+}
+
+async function annotateScriptUnitsWithOpenAI({
+  client,
+  units,
+  chunkIndex,
+  totalChunks,
+  previousRole = null,
+  languageCode = '',
+  model = DEFAULT_SCRIPT_PARSE_MODEL,
+}) {
+  const unitPayload = units.map((unit) => ({
+    id: unit.id,
+    text: unit.text,
+  }));
+  const languagePrompt = normalizeLanguageCode(languageCode) || 'auto';
+  const prompt = [
+    {
+      role: 'system',
+      content:
+        'You annotate theater script units. Return annotations only; never rewrite or omit source text.',
+    },
+    {
+      role: 'user',
+      content: `
+你正在注記第 ${chunkIndex + 1} 批劇本單位（共 ${totalChunks} 批）。
+後端已經把原文切成不可遺漏的單位。你只需要回傳每個 unit 的分類，不要回傳劇本文字。
+
+請輸出 JSON array，且每個輸入 unit 都必須剛好回傳一次：
+{ "unitId": number, "type": "dialogue" | "direction", "role": "角色名稱或 null", "mergeWithPrevious": boolean }
+
+規則：
+- 不要新增、刪除、改寫任何原文。
+- unitId 必須沿用輸入的 id。
+- type 判斷台詞或舞台指示。
+- role 只在 dialogue 填入說話角色；direction 一律 null。
+- 如果某句省略角色但明顯延續上一位角色，請填入該角色。
+- mergeWithPrevious 只在該 unit 應與上一個 unit 合併成同一個字幕語意時設 true；不確定就 false。
+- 上一批最後角色：${previousRole || 'null'}
+- 劇本語言代碼：${languagePrompt}
+
+輸入 units：
+${JSON.stringify(unitPayload)}
+      `.trim(),
+    },
+  ];
+
+  const selectedModel = normalizeScriptParseModel(model);
+  const request = {
+    model: selectedModel,
+    input: prompt,
+    max_output_tokens: Math.max(1200, units.length * 42),
+  };
+
+  if (isGpt5ScriptParseModel(selectedModel)) {
+    request.reasoning = { effort: 'low' };
+    request.text = { verbosity: 'low' };
+  } else {
+    request.temperature = 0;
+  }
+
+  const response = await client.responses.create(request);
+  const output = response.output_text?.trim();
+  if (!output) {
+    const error = new Error('未能取得 OpenAI 注記回應');
+    error.code = 'MISSING_OUTPUT';
+    throw error;
+  }
+
+  const sanitized = output
+    .replace(/^```json/i, '')
+    .replace(/^```/i, '')
+    .replace(/```$/i, '')
+    .trim();
+  const parsed = parseJsonArrayLoose(sanitized);
+  if (!Array.isArray(parsed)) {
+    const error = new Error('OpenAI 注記格式不是 JSON array');
+    error.code = 'INVALID_JSON';
+    throw error;
+  }
+
+  return validateAndCompleteAnnotations(parsed, units, previousRole);
+}
+
 function normalizeScriptParseModel(model) {
   const normalized = typeof model === 'string' ? model.trim() : '';
   return VALID_SCRIPT_PARSE_MODELS.has(normalized)
@@ -6530,21 +6919,31 @@ async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
     typeof options.languageCode === 'string' ? options.languageCode : '';
   const model = normalizeScriptParseModel(options.model);
   const client = new OpenAI({ apiKey });
-  const chunks = chunkScript(rawText, MAX_CHUNK_LENGTH, { languageCode });
+  const units = buildScriptAnnotationUnits(rawText, languageCode);
+  const chunks = chunkScriptAnnotationUnits(units);
   const combined = [];
+  let previousRole = null;
 
   for (let index = 0; index < chunks.length; index += 1) {
-    const chunkText = chunks[index];
+    const chunkUnits = chunks[index];
 
     try {
-      const parsedLines = await parseChunk({
+      const annotations = await annotateScriptUnitsWithOpenAI({
         client,
-        chunkText,
+        units: chunkUnits,
         chunkIndex: index,
         totalChunks: chunks.length,
+        previousRole,
         languageCode,
         model,
       });
+      const annotated = buildAnnotatedLinesFromUnits(
+        chunkUnits,
+        annotations,
+        previousRole,
+      );
+      previousRole = annotated.lastRole || previousRole;
+      const parsedLines = normalizeScriptLines(annotated.lines);
       combined.push(...parsedLines);
     } catch (error) {
       if (fallbackCodes.has(error?.code)) {
@@ -6552,12 +6951,14 @@ async function parseScriptWithOpenAI(rawText, apiKey, options = {}) {
           `Chunk ${index + 1}/${chunks.length} failed validation, using fallback.`,
           error,
         );
-        const fallbackLines = enforceLineLengths(
-          normalizeScriptLines(
-            fallbackSegmentScript(chunkText, { languageCode }),
-          ),
-          { languageCode },
+        const annotations = fallbackAnnotateUnits(chunkUnits, previousRole);
+        const annotated = buildAnnotatedLinesFromUnits(
+          chunkUnits,
+          annotations,
+          previousRole,
         );
+        previousRole = annotated.lastRole || previousRole;
+        const fallbackLines = normalizeScriptLines(annotated.lines);
         combined.push(...fallbackLines);
         continue;
       }
