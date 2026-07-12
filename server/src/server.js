@@ -186,6 +186,7 @@ const AUTO_FOLLOW_VERIFY_THRESHOLD = 0.68;
 const AUTO_FOLLOW_CORRECT_THRESHOLD = 0.82;
 const AUTO_FOLLOW_SEARCH_BEHIND = 3;
 const AUTO_FOLLOW_SEARCH_AHEAD = 18;
+const AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS = 250;
 
 const PROJECTOR_STATUS_LEVELS = Object.freeze({
   IDLE: 'idle',
@@ -7038,6 +7039,7 @@ function createAutoFollowState() {
     waitingForRelease: false,
     lastAudioLevel: 0,
     lastAudioAt: null,
+    lastAudioDiagnosticBroadcastAt: null,
     lastOnsetAt: null,
     lastAdvancedAt: null,
     lastVerifiedAt: null,
@@ -7103,6 +7105,20 @@ function updateAutoFollowState(sessionId, patch = {}) {
   const state = getAutoFollowState(sessionId);
   Object.assign(state, patch, { updatedAt: Date.now() });
   return state;
+}
+
+function maybeBroadcastAutoFollowDiagnostics(sessionId, now = Date.now()) {
+  const state = getAutoFollowState(sessionId);
+  if (
+    state.lastAudioDiagnosticBroadcastAt &&
+    now - state.lastAudioDiagnosticBroadcastAt <
+      AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS
+  ) {
+    return;
+  }
+
+  state.lastAudioDiagnosticBroadcastAt = now;
+  broadcastTranscriptionState(sessionId);
 }
 
 function normalizeAutoFollowMatchText(text) {
@@ -7268,6 +7284,7 @@ function handleAutoFollowAudioLevel(sessionId, level) {
       ...listeningPatch,
       waitingForRelease: false,
     });
+    maybeBroadcastAutoFollowDiagnostics(sessionId, now);
     return;
   }
 
@@ -7278,6 +7295,7 @@ function handleAutoFollowAudioLevel(sessionId, level) {
       now - state.lastOnsetAt < AUTO_FOLLOW_ONSET_COOLDOWN_MS)
   ) {
     updateAutoFollowState(sessionId, listeningPatch);
+    maybeBroadcastAutoFollowDiagnostics(sessionId, now);
     return;
   }
 
@@ -10092,13 +10110,15 @@ io.on('connection', (socket) => {
     if (typeof audio !== 'string' || !audio) return;
     const normalizedDurationMs = normalizeChunkDurationMs(durationMs);
     const normalizedLevel = normalizeAudioLevel(level);
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    handleAutoFollowAudioLevel(session.id, normalizedLevel);
 
     const stream = transcriptionStreams.get(sessionId);
     if (!stream || stream.socketId !== socket.id || stream.closing) {
       return;
     }
-
-    handleAutoFollowAudioLevel(sessionId, normalizedLevel);
 
     if (!stream.ready) {
       stream.pendingAudioChunks.push({
