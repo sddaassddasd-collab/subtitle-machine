@@ -88,6 +88,59 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   updatedAt: null,
 }
 
+const DEFAULT_AUTO_FOLLOW_STATE = {
+  status: 'idle',
+  listening: false,
+  started: false,
+  lastAudioLevel: 0,
+  lastOnsetAt: null,
+  lastAdvancedAt: null,
+  lastVerifiedAt: null,
+  lastHeardText: '',
+  lastCandidateIndex: null,
+  lastCandidateText: '',
+  confidence: null,
+  message: '',
+  updatedAt: null,
+}
+
+const normalizeAutoFollowState = (raw) => {
+  if (!raw || typeof raw !== 'object') {
+    return DEFAULT_AUTO_FOLLOW_STATE
+  }
+
+  return {
+    ...DEFAULT_AUTO_FOLLOW_STATE,
+    ...raw,
+    status:
+      typeof raw.status === 'string' && raw.status.trim().length > 0
+        ? raw.status
+        : 'idle',
+    listening: raw.listening === true,
+    started: raw.started === true,
+    lastAudioLevel:
+      typeof raw.lastAudioLevel === 'number' && Number.isFinite(raw.lastAudioLevel)
+        ? raw.lastAudioLevel
+        : 0,
+    lastHeardText:
+      typeof raw.lastHeardText === 'string' ? raw.lastHeardText : '',
+    lastCandidateText:
+      typeof raw.lastCandidateText === 'string' ? raw.lastCandidateText : '',
+    lastCandidateIndex: Number.isInteger(raw.lastCandidateIndex)
+      ? raw.lastCandidateIndex
+      : null,
+    confidence:
+      typeof raw.confidence === 'number' && Number.isFinite(raw.confidence)
+        ? raw.confidence
+        : null,
+    message: typeof raw.message === 'string' ? raw.message : '',
+    updatedAt:
+      typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
+        ? raw.updatedAt
+        : null,
+  }
+}
+
 const PROJECTOR_FONT_STEP = 5
 const PROJECTOR_WIDTH_STEP = 5
 const PROJECTOR_POSITION_STEP = 1
@@ -793,6 +846,7 @@ const ControlPage = () => {
   const [transcription, setTranscription] = useState(
     DEFAULT_TRANSCRIPTION_STATE,
   )
+  const [autoFollow, setAutoFollow] = useState(DEFAULT_AUTO_FOLLOW_STATE)
   const [status, setStatus] = useState({ kind: 'info', message: '' })
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return ''
@@ -942,6 +996,19 @@ const ControlPage = () => {
       : SUBTITLE_CONTROL_MODES.MANUAL
   const subtitleControlModeLabel =
     subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? '自動模式' : '手動模式'
+  const autoFollowStatusLabelMap = {
+    idle: '待命',
+    listening: '等聲音',
+    advanced: '已先推',
+    verified: '已核對',
+    corrected: '已校正',
+  }
+  const autoFollowStatusLabel =
+    autoFollowStatusLabelMap[autoFollow.status] || autoFollow.status || '待命'
+  const autoFollowConfidenceLabel =
+    typeof autoFollow.confidence === 'number'
+      ? ` ${(autoFollow.confidence * 100).toFixed(0)}%`
+      : ''
   const existingRoleOptions = useMemo(() => {
     const roles = new Set()
     lines.forEach((line) => {
@@ -1157,6 +1224,7 @@ const ControlPage = () => {
       setRoleColorEnabled(payload?.roleColorEnabled !== false)
       applyProjectorSettingsPayload(payload?.projector)
       setTranscription(normalizeTranscriptionState(payload?.transcription))
+      setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
       setHistoryState({
         canUndo: payload?.history?.canUndo === true,
         canRedo: payload?.history?.canRedo === true,
@@ -1452,6 +1520,7 @@ const ControlPage = () => {
 
     const handleTranscriptionUpdate = (payload) => {
       setTranscription(normalizeTranscriptionState(payload?.transcription))
+      setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
     }
 
     const handleTranscriptionError = (payload) => {
@@ -4036,6 +4105,19 @@ const ControlPage = () => {
                 自動
               </button>
             </div>
+            {subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && (
+              <div className="auto-follow-status" aria-live="polite">
+                <span>{autoFollowStatusLabel}</span>
+                {autoFollowConfidenceLabel && (
+                  <span>{autoFollowConfidenceLabel}</span>
+                )}
+                {autoFollow.lastCandidateText && (
+                  <span className="auto-follow-candidate">
+                    {autoFollow.lastCandidateText}
+                  </span>
+                )}
+              </div>
+            )}
             <button
               type="button"
               className={`toggle-button ${displayEnabled ? 'active' : ''}`}

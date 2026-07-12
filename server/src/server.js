@@ -171,6 +171,21 @@ const SUBTITLE_CONTROL_MODES = Object.freeze({
   MANUAL: 'manual',
   AUTO: 'auto',
 });
+const AUTO_FOLLOW_STATUS = Object.freeze({
+  IDLE: 'idle',
+  LISTENING: 'listening',
+  ADVANCED: 'advanced',
+  VERIFIED: 'verified',
+  CORRECTED: 'corrected',
+});
+const AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD = 0.04;
+const AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD = 0.018;
+const AUTO_FOLLOW_ONSET_COOLDOWN_MS = 650;
+const AUTO_FOLLOW_VERIFY_MIN_TEXT_LENGTH = 2;
+const AUTO_FOLLOW_VERIFY_THRESHOLD = 0.68;
+const AUTO_FOLLOW_CORRECT_THRESHOLD = 0.82;
+const AUTO_FOLLOW_SEARCH_BEHIND = 3;
+const AUTO_FOLLOW_SEARCH_AHEAD = 18;
 
 const PROJECTOR_STATUS_LEVELS = Object.freeze({
   IDLE: 'idle',
@@ -185,6 +200,8 @@ const DEFAULT_PROJECTOR_STATUS = Object.freeze({
   message: '',
   updatedAt: null,
 });
+
+const autoFollowStates = new Map();
 
 const placeholderRegex = /^[第]?[零〇一二三四五六七八九十百千\d]+[句行條話]$/i;
 
@@ -5885,6 +5902,12 @@ function stopTranscriptionStream(sessionId, options = {}) {
       state.isFinal = true;
     }
     state.updatedAt = Date.now();
+    updateAutoFollowState(sessionId, {
+      listening: false,
+      waitingForRelease: false,
+      status: AUTO_FOLLOW_STATUS.IDLE,
+      message: '',
+    });
     broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
     return;
@@ -5926,6 +5949,12 @@ function stopTranscriptionStream(sessionId, options = {}) {
     state.isFinal = true;
   }
   state.updatedAt = Date.now();
+  updateAutoFollowState(sessionId, {
+    listening: false,
+    waitingForRelease: false,
+    status: AUTO_FOLLOW_STATUS.IDLE,
+    message: '',
+  });
 
   broadcastTranscriptionState(sessionId);
   broadcastViewerState(sessionId);
@@ -6503,6 +6532,7 @@ function getControlPayload(session) {
       revision: normalized.projectorRevision,
     },
     transcription: getPublicTranscriptionState(normalized),
+    autoFollow: getPublicAutoFollowState(normalized),
     history: {
       canUndo: canUndoSession(normalized),
       canRedo: canRedoSession(normalized),
@@ -6954,6 +6984,7 @@ function broadcastTranscriptionState(sessionId) {
 
   io.to(`control:${sessionId}`).emit('control:transcription', {
     transcription: getPublicTranscriptionState(session),
+    autoFollow: getPublicAutoFollowState(session),
   });
 }
 
@@ -6976,6 +7007,7 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
     session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.MANUAL
   ) {
     session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
+    resetAutoFollowState(session.id);
   }
 
   if (
@@ -6996,6 +7028,312 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   broadcastViewerState(session.id);
   broadcastControlState(session.id);
   return true;
+}
+
+function createAutoFollowState() {
+  return {
+    status: AUTO_FOLLOW_STATUS.IDLE,
+    listening: false,
+    started: false,
+    waitingForRelease: false,
+    lastAudioLevel: 0,
+    lastOnsetAt: null,
+    lastAdvancedAt: null,
+    lastVerifiedAt: null,
+    lastHeardText: '',
+    lastCandidateIndex: null,
+    lastCandidateText: '',
+    confidence: null,
+    message: '',
+    updatedAt: null,
+  };
+}
+
+function getAutoFollowState(sessionId) {
+  const key =
+    typeof sessionId === 'string' && sessionId.trim()
+      ? sessionId.trim()
+      : DEFAULT_SESSION_ID;
+  if (!autoFollowStates.has(key)) {
+    autoFollowStates.set(key, createAutoFollowState());
+  }
+  return autoFollowStates.get(key);
+}
+
+function resetAutoFollowState(sessionId, patch = {}) {
+  const nextState = {
+    ...createAutoFollowState(),
+    ...patch,
+    updatedAt: Date.now(),
+  };
+  autoFollowStates.set(sessionId, nextState);
+  return nextState;
+}
+
+function getPublicAutoFollowState(session) {
+  const state = getAutoFollowState(session.id);
+  const autoEnabled =
+    session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
+  return {
+    status: autoEnabled ? state.status : AUTO_FOLLOW_STATUS.IDLE,
+    listening: autoEnabled && state.listening === true,
+    started: state.started === true,
+    lastAudioLevel: Number.isFinite(state.lastAudioLevel)
+      ? Number(state.lastAudioLevel.toFixed(4))
+      : 0,
+    lastOnsetAt: state.lastOnsetAt,
+    lastAdvancedAt: state.lastAdvancedAt,
+    lastVerifiedAt: state.lastVerifiedAt,
+    lastHeardText: state.lastHeardText,
+    lastCandidateIndex: state.lastCandidateIndex,
+    lastCandidateText: state.lastCandidateText,
+    confidence: Number.isFinite(state.confidence)
+      ? Number(state.confidence.toFixed(3))
+      : null,
+    message: state.message,
+    updatedAt: state.updatedAt,
+  };
+}
+
+function updateAutoFollowState(sessionId, patch = {}) {
+  const state = getAutoFollowState(sessionId);
+  Object.assign(state, patch, { updatedAt: Date.now() });
+  return state;
+}
+
+function normalizeAutoFollowMatchText(text) {
+  const sanitized = sanitizeLineText(text || '');
+  if (!sanitized) return '';
+  return sanitized
+    .replace(/^[^：:\n]{1,12}[：:]/u, '')
+    .replace(/[（(][^（）()]{0,80}[）)]/gu, '')
+    .replace(/[\s　"'“”‘’「」『』《》〈〉【】\[\]{}（）(),，、。．.；;：:！？!?…—\-]/gu, '')
+    .toLocaleLowerCase();
+}
+
+function getAutoFollowLineText(line) {
+  if (!line || line.type === LINE_TYPES.DIRECTION) return '';
+  const extracted = extractRoleFromDialogueText(line.text || '');
+  const text = extracted.role ? extracted.text : line.text || '';
+  return normalizeAutoFollowMatchText(text);
+}
+
+function getAutoFollowDisplayText(line) {
+  if (!line) return '';
+  const extracted = extractRoleFromDialogueText(line.text || '');
+  return sanitizeLineText(extracted.role ? extracted.text : line.text || '');
+}
+
+function findAutoDialogueIndexAtOrAfter(session, startIndex) {
+  const lines = ensureSessionLines(session);
+  const start = Math.max(0, Number.isInteger(startIndex) ? startIndex : 0);
+  for (let index = start; index < lines.length; index += 1) {
+    if (getAutoFollowLineText(lines[index])) return index;
+  }
+  return null;
+}
+
+function findAutoDialogueIndexAfter(session, startIndex) {
+  const start = Number.isInteger(startIndex) ? startIndex + 1 : 0;
+  return findAutoDialogueIndexAtOrAfter(session, start);
+}
+
+function scoreAutoFollowText(heardText, targetText) {
+  const heard = normalizeAutoFollowMatchText(heardText);
+  const target = normalizeAutoFollowMatchText(targetText);
+  if (
+    heard.length < AUTO_FOLLOW_VERIFY_MIN_TEXT_LENGTH ||
+    target.length < AUTO_FOLLOW_VERIFY_MIN_TEXT_LENGTH
+  ) {
+    return 0;
+  }
+  if (heard === target) return 1;
+
+  const shorter = heard.length <= target.length ? heard : target;
+  const longer = heard.length > target.length ? heard : target;
+  if (longer.startsWith(shorter)) {
+    return Math.min(0.96, 0.72 + shorter.length / Math.max(longer.length, 1) * 0.24);
+  }
+  if (longer.includes(shorter)) {
+    return Math.min(0.9, 0.58 + shorter.length / Math.max(longer.length, 1) * 0.26);
+  }
+
+  const targetChars = new Map();
+  Array.from(target).forEach((char) => {
+    targetChars.set(char, (targetChars.get(char) || 0) + 1);
+  });
+  let overlap = 0;
+  Array.from(heard).forEach((char) => {
+    const count = targetChars.get(char) || 0;
+    if (count > 0) {
+      overlap += 1;
+      targetChars.set(char, count - 1);
+    }
+  });
+  return overlap > 0 ? (2 * overlap) / (heard.length + target.length) : 0;
+}
+
+function findBestAutoFollowMatch(session, heardText) {
+  const lines = ensureSessionLines(session);
+  const heard = normalizeAutoFollowMatchText(heardText);
+  if (heard.length < AUTO_FOLLOW_VERIFY_MIN_TEXT_LENGTH || lines.length === 0) {
+    return null;
+  }
+
+  const from = Math.max(0, session.currentIndex - AUTO_FOLLOW_SEARCH_BEHIND);
+  const to = Math.min(
+    lines.length - 1,
+    session.currentIndex + AUTO_FOLLOW_SEARCH_AHEAD,
+  );
+  let best = null;
+
+  for (let index = from; index <= to; index += 1) {
+    const target = getAutoFollowLineText(lines[index]);
+    if (!target) continue;
+
+    const distance = Math.abs(index - session.currentIndex);
+    const distancePenalty = Math.min(distance * 0.012, 0.12);
+    const score = Math.max(0, scoreAutoFollowText(heard, target) - distancePenalty);
+    if (!best || score > best.confidence) {
+      best = {
+        index,
+        confidence: score,
+        text: getAutoFollowDisplayText(lines[index]),
+      };
+    }
+  }
+
+  return best;
+}
+
+function advanceAutoFollowToIndex(session, index, patch = {}) {
+  if (!Number.isInteger(index)) return false;
+  updateAutoFollowState(session.id, patch);
+  return applyCurrentIndexChange(session, index);
+}
+
+function handleAutoFollowAudioLevel(sessionId, level) {
+  const session = getSession(sessionId);
+  if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+    return;
+  }
+
+  const state = getAutoFollowState(sessionId);
+  const normalizedLevel = Number.isFinite(level) ? level : 0;
+  const now = Date.now();
+  const listeningPatch = {
+    listening: true,
+    lastAudioLevel: normalizedLevel,
+    status:
+      state.status === AUTO_FOLLOW_STATUS.IDLE
+        ? AUTO_FOLLOW_STATUS.LISTENING
+        : state.status,
+  };
+
+  if (normalizedLevel <= AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD) {
+    updateAutoFollowState(sessionId, {
+      ...listeningPatch,
+      waitingForRelease: false,
+    });
+    return;
+  }
+
+  if (
+    normalizedLevel < AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD ||
+    state.waitingForRelease ||
+    (state.lastOnsetAt &&
+      now - state.lastOnsetAt < AUTO_FOLLOW_ONSET_COOLDOWN_MS)
+  ) {
+    updateAutoFollowState(sessionId, listeningPatch);
+    return;
+  }
+
+  const nextIndex = state.started
+    ? findAutoDialogueIndexAfter(session, session.currentIndex)
+    : findAutoDialogueIndexAtOrAfter(session, session.currentIndex);
+  if (!Number.isInteger(nextIndex)) {
+    updateAutoFollowState(sessionId, {
+      ...listeningPatch,
+      waitingForRelease: true,
+      lastOnsetAt: now,
+      message: '已偵測到聲音，但後面沒有可自動跟的台詞。',
+    });
+    broadcastControlState(sessionId);
+    return;
+  }
+
+  const line = ensureSessionLines(session)[nextIndex];
+  const moved = advanceAutoFollowToIndex(session, nextIndex, {
+    ...listeningPatch,
+    started: true,
+    waitingForRelease: true,
+    status: AUTO_FOLLOW_STATUS.ADVANCED,
+    lastOnsetAt: now,
+    lastAdvancedAt: now,
+    lastCandidateIndex: nextIndex,
+    lastCandidateText: getAutoFollowDisplayText(line),
+    confidence: null,
+    message: '偵測到出聲，已先推到預期台詞。',
+  });
+
+  if (!moved) {
+    broadcastControlState(sessionId);
+  }
+}
+
+function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
+  const session = getSession(sessionId);
+  if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+    return;
+  }
+
+  const heard = sanitizeLineText(transcript || '');
+  if (!normalizeAutoFollowMatchText(heard)) {
+    return;
+  }
+
+  const best = findBestAutoFollowMatch(session, heard);
+  const isFinal = options.isFinal === true;
+  if (!best || best.confidence < AUTO_FOLLOW_VERIFY_THRESHOLD) {
+    updateAutoFollowState(sessionId, {
+      listening: true,
+      status: AUTO_FOLLOW_STATUS.LISTENING,
+      lastHeardText: heard,
+      confidence: best?.confidence || null,
+      message: '正在比對語音與附近台詞。',
+    });
+    broadcastControlState(sessionId);
+    return;
+  }
+
+  const shouldCorrect =
+    best.index !== session.currentIndex &&
+    (best.confidence >= AUTO_FOLLOW_CORRECT_THRESHOLD ||
+      (isFinal && best.confidence >= AUTO_FOLLOW_VERIFY_THRESHOLD + 0.06));
+  const now = Date.now();
+  const patch = {
+    listening: true,
+    started: true,
+    status: shouldCorrect
+      ? AUTO_FOLLOW_STATUS.CORRECTED
+      : AUTO_FOLLOW_STATUS.VERIFIED,
+    lastVerifiedAt: now,
+    lastHeardText: heard,
+    lastCandidateIndex: best.index,
+    lastCandidateText: best.text,
+    confidence: best.confidence,
+    message: shouldCorrect
+      ? '語音比對到不同台詞，已自動校正。'
+      : '語音已核對目前台詞。',
+  };
+
+  if (shouldCorrect) {
+    advanceAutoFollowToIndex(session, best.index, patch);
+    return;
+  }
+
+  updateAutoFollowState(sessionId, patch);
+  broadcastControlState(sessionId);
 }
 
 function broadcastProjectorState(sessionId) {
@@ -9375,6 +9713,7 @@ function startRealtimeTranscription({
     );
     setDraftLine(stream, event.item_id, merged);
     syncTranscriptionStateFromStream(sessionId, stream);
+    handleAutoFollowTranscript(sessionId, merged, { isFinal: false });
   });
 
   rt.on('conversation.item.input_audio_transcription.completed', (event) => {
@@ -9397,6 +9736,7 @@ function startRealtimeTranscription({
       boundaryMeta,
     });
     syncTranscriptionStateFromStream(sessionId, stream);
+    handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
     queueTranscriptionCorrection({
       stream,
       isCurrent,
@@ -9702,6 +10042,8 @@ io.on('connection', (socket) => {
       return;
     }
 
+    handleAutoFollowAudioLevel(sessionId, normalizedLevel);
+
     if (!stream.ready) {
       stream.pendingAudioChunks.push({
         audio,
@@ -9772,6 +10114,17 @@ io.on('connection', (socket) => {
     if (session.subtitleControlMode === nextMode) return;
 
     session.subtitleControlMode = nextMode;
+    resetAutoFollowState(sessionId, {
+      status:
+        nextMode === SUBTITLE_CONTROL_MODES.AUTO
+          ? AUTO_FOLLOW_STATUS.LISTENING
+          : AUTO_FOLLOW_STATUS.IDLE,
+      listening: nextMode === SUBTITLE_CONTROL_MODES.AUTO,
+      message:
+        nextMode === SUBTITLE_CONTROL_MODES.AUTO
+          ? '自動模式已啟用；開始收音後會先推預期字幕，再用語音核對。'
+          : '',
+    });
     persistSession(session);
     broadcastControlState(sessionId);
   });
