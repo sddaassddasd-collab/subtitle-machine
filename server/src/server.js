@@ -10105,15 +10105,33 @@ io.on('connection', (socket) => {
     },
   );
 
-  socket.on('transcription:audio', ({ sessionId, audio, durationMs, level }) => {
-    if (!sessionId) return;
-    if (typeof audio !== 'string' || !audio) return;
+  socket.on('transcription:audio', ({ sessionId, audio, durationMs, level }, ack) => {
+    const acknowledge =
+      typeof ack === 'function'
+        ? ack
+        : () => {};
+    if (!sessionId) {
+      acknowledge({ ok: false, reason: 'missing_session' });
+      return;
+    }
+    if (typeof audio !== 'string' || !audio) {
+      acknowledge({ ok: false, reason: 'missing_audio' });
+      return;
+    }
     const normalizedDurationMs = normalizeChunkDurationMs(durationMs);
     const normalizedLevel = normalizeAudioLevel(level);
     const session = getOwnedSocketSession(sessionId);
-    if (!session) return;
+    if (!session) {
+      acknowledge({ ok: false, reason: 'session_not_allowed' });
+      return;
+    }
 
     handleAutoFollowAudioLevel(session.id, normalizedLevel);
+    acknowledge({
+      ok: true,
+      receivedAt: Date.now(),
+      level: Number(normalizedLevel.toFixed(4)),
+    });
 
     const stream = transcriptionStreams.get(sessionId);
     if (!stream || stream.socketId !== socket.id || stream.closing) {

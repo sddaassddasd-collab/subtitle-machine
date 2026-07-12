@@ -871,9 +871,13 @@ const ControlPage = () => {
   const [autoFollow, setAutoFollow] = useState(DEFAULT_AUTO_FOLLOW_STATE)
   const [micDiagnostics, setMicDiagnostics] = useState({
     active: false,
+    socketConnected: false,
     lastLevel: 0,
     lastSentAt: null,
     lastHeardAt: null,
+    lastAckAt: null,
+    lastAckLevel: 0,
+    lastRejectReason: '',
   })
   const [audioDiagnosticsOpen, setAudioDiagnosticsOpen] = useState(false)
   const [status, setStatus] = useState({ kind: 'info', message: '' })
@@ -1051,6 +1055,7 @@ const ControlPage = () => {
     subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || transcriptionBusy
   const micLevelLabel = micDiagnostics.lastLevel.toFixed(3)
   const backendLevelLabel = autoFollow.lastAudioLevel.toFixed(3)
+  const backendAckLevelLabel = micDiagnostics.lastAckLevel.toFixed(3)
   const micHasTriggerLevel =
     micDiagnostics.active && micDiagnostics.lastLevel >= autoFollowTriggerThreshold
   const micHasRecentSignal =
@@ -1595,15 +1600,33 @@ const ControlPage = () => {
       setStatus({ kind: 'error', message })
     }
 
+    const markSocketConnected = () => {
+      setMicDiagnostics((prev) => ({
+        ...prev,
+        socketConnected: true,
+      }))
+    }
+
+    const markSocketDisconnected = () => {
+      setMicDiagnostics((prev) => ({
+        ...prev,
+        socketConnected: false,
+      }))
+    }
+
     socket.on('connect', rejoinAndRefresh)
+    socket.on('connect', markSocketConnected)
     socket.on('reconnect', rejoinAndRefresh)
+    socket.on('disconnect', markSocketDisconnected)
     socket.on('control:update', applySessionPayload)
     socket.on('control:transcription', handleTranscriptionUpdate)
     socket.on('transcription:error', handleTranscriptionError)
 
     if (socket.connected) {
+      markSocketConnected()
       rejoinAndRefresh()
     } else {
+      markSocketDisconnected()
       refreshSession()
     }
 
@@ -2086,12 +2109,33 @@ const ControlPage = () => {
           }))
         }
 
-        socket.emit('transcription:audio', {
-          sessionId,
-          audio,
-          durationMs,
-          level,
-        })
+        socket.emit(
+          'transcription:audio',
+          {
+            sessionId,
+            audio,
+            durationMs,
+            level,
+          },
+          (ack) => {
+            const acknowledgedAt = Date.now()
+            setMicDiagnostics((prev) => ({
+              ...prev,
+              socketConnected: socket.connected === true,
+              lastAckAt: ack?.ok === true ? acknowledgedAt : prev.lastAckAt,
+              lastAckLevel:
+                typeof ack?.level === 'number' && Number.isFinite(ack.level)
+                  ? ack.level
+                  : prev.lastAckLevel,
+              lastRejectReason:
+                ack?.ok === true
+                  ? ''
+                  : typeof ack?.reason === 'string'
+                    ? ack.reason
+                    : prev.lastRejectReason,
+            }))
+          },
+        )
       }
 
       let captureNode = null
@@ -4325,6 +4369,22 @@ const ControlPage = () => {
               <div>
                 <span>前端送出</span>
                 <strong>{formatRelativeSeconds(micDiagnostics.lastSentAt)}</strong>
+              </div>
+              <div>
+                <span>Socket 連線</span>
+                <strong>{micDiagnostics.socketConnected ? '已連線' : '未連線'}</strong>
+              </div>
+              <div>
+                <span>後端 ack</span>
+                <strong>{formatRelativeSeconds(micDiagnostics.lastAckAt)}</strong>
+              </div>
+              <div>
+                <span>ack 音量</span>
+                <strong>{backendAckLevelLabel}</strong>
+              </div>
+              <div>
+                <span>拒收原因</span>
+                <strong>{micDiagnostics.lastRejectReason || '無'}</strong>
               </div>
               <div>
                 <span>後端音訊</span>
