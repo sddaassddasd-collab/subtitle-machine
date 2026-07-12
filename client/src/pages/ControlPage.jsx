@@ -897,6 +897,8 @@ const ControlPage = () => {
   const activeProjectorLayoutInputRef = useRef(null)
   const projectorDisplayModeDirtyRef = useRef(false)
   const projectorDisplayModeDraftRef = useRef(PROJECTOR_DISPLAY_MODES.SCRIPT)
+  const autoStartedTranscriptionRef = useRef(false)
+  const projectorStartedTranscriptionRef = useRef(false)
   const projectorRepeatRef = useRef({
     startTimer: null,
     repeatTimer: null,
@@ -1661,13 +1663,20 @@ const ControlPage = () => {
     })
   }
 
-  const handleSetSubtitleControlMode = (mode) => {
+  const handleSetSubtitleControlMode = async (mode) => {
     if (!socketRef.current || !sessionId) return
     const nextMode =
       mode === SUBTITLE_CONTROL_MODES.AUTO
         ? SUBTITLE_CONTROL_MODES.AUTO
         : SUBTITLE_CONTROL_MODES.MANUAL
     if (nextMode === subtitleControlMode) return
+
+    if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) {
+      const started = await handleStartLiveTranscription({ autoFollow: true })
+      if (!started) return
+    } else if (autoStartedTranscriptionRef.current) {
+      handleStopLiveTranscription({ autoFollow: true })
+    }
 
     socketRef.current.emit('setSubtitleControlMode', {
       sessionId,
@@ -1685,7 +1694,7 @@ const ControlPage = () => {
       kind: 'info',
       message:
         nextMode === SUBTITLE_CONTROL_MODES.AUTO
-          ? '已切換為自動模式；聲音對齊引擎尚未啟用'
+          ? '已切換為自動模式；投影仍使用固定劇本字幕'
           : '已切換為手動模式',
     })
   }
@@ -1910,15 +1919,16 @@ const ControlPage = () => {
     handleShiftCurrentIndex,
   ])
 
-  const handleStartLiveTranscription = async () => {
+  const handleStartLiveTranscription = async (options = {}) => {
+    const autoFollow = options.autoFollow === true
     if (!socketRef.current || !sessionId) {
       setStatus({ kind: 'error', message: '尚未連上工作區，無法啟動語音辨識' })
-      return
+      return false
     }
 
     if (!apiKey) {
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
-      return
+      return false
     }
 
     if (
@@ -1930,17 +1940,32 @@ const ControlPage = () => {
         kind: 'error',
         message: '目前瀏覽器不支援麥克風錄音功能',
       })
-      return
+      return false
     }
 
     if (transcription.active || transcription.status === 'connecting') {
-      setStatus({ kind: 'info', message: '語音辨識已啟動' })
-      return
+      if (autoFollow) {
+        autoStartedTranscriptionRef.current = false
+      } else {
+        projectorStartedTranscriptionRef.current = false
+      }
+      setStatus({
+        kind: 'info',
+        message: autoFollow
+          ? '已切換為自動模式；沿用目前收音做自動跟戲'
+          : '語音辨識已啟動',
+      })
+      return true
     }
 
     try {
       releaseMicrophoneCapture()
-      setStatus({ kind: 'info', message: '正在啟動即時語音辨識…' })
+      setStatus({
+        kind: 'info',
+        message: autoFollow
+          ? '正在啟動自動跟戲收音…'
+          : '正在啟動即時語音辨識…',
+      })
       setTranscription((prev) => ({
         ...prev,
         status: 'connecting',
@@ -2066,7 +2091,18 @@ const ControlPage = () => {
         speakerRecognitionEnabled:
           transcription.speakerRecognitionEnabled === true,
       })
+      autoStartedTranscriptionRef.current = autoFollow
+      projectorStartedTranscriptionRef.current = !autoFollow
+      setStatus({
+        kind: 'info',
+        message: autoFollow
+          ? '自動模式已啟用，正在收音跟戲'
+          : '已啟動即時語音辨識',
+      })
+      return true
     } catch (error) {
+      autoStartedTranscriptionRef.current = false
+      projectorStartedTranscriptionRef.current = false
       releaseMicrophoneCapture()
       socketRef.current?.emit('transcription:stop', { sessionId })
       setTranscription((prev) => ({
@@ -2079,14 +2115,23 @@ const ControlPage = () => {
         kind: 'error',
         message: error?.message || '無法啟動語音辨識',
       })
+      return false
     }
   }
 
-  const handleStopLiveTranscription = () => {
+  const handleStopLiveTranscription = (options = {}) => {
     if (!sessionId) return
     releaseMicrophoneCapture()
     socketRef.current?.emit('transcription:stop', { sessionId })
-    setStatus({ kind: 'info', message: '已停止即時語音辨識' })
+    autoStartedTranscriptionRef.current = false
+    projectorStartedTranscriptionRef.current = false
+    setStatus({
+      kind: 'info',
+      message:
+        options.autoFollow === true
+          ? '已停止自動跟戲收音'
+          : '已停止即時語音辨識',
+    })
   }
 
   const handleJumpToLine = (index) => {
@@ -3256,9 +3301,19 @@ const ControlPage = () => {
     onBlur: clearProjectorRepeat,
   })
 
-  const handleProjectorDisplayModeChange = (event) => {
+  const handleProjectorDisplayModeChange = async (event) => {
     if (!socketRef.current || !sessionId) return
     const nextDisplayMode = normalizeProjectorDisplayMode(event.target.value)
+    if (nextDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION) {
+      const started = await handleStartLiveTranscription()
+      if (!started) return
+    } else if (
+      projectorStartedTranscriptionRef.current &&
+      subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO
+    ) {
+      handleStopLiveTranscription()
+    }
+
     projectorDisplayModeDirtyRef.current = true
     projectorDisplayModeDraftRef.current = nextDisplayMode
     setProjectorDisplayMode(nextDisplayMode)
