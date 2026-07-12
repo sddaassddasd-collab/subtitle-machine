@@ -8827,8 +8827,8 @@ app.post(
     const session = getOwnedSessionFromRequest(req, res);
     if (!session) return;
 
-    const cell = session.cells.find((entry) => entry.id === req.params.cellId);
-    if (!cell) {
+    const requestedCellId = req.params.cellId;
+    if (!session.cells.some((entry) => entry.id === requestedCellId)) {
       return res.status(404).json({ error: '找不到儲存格' });
     }
 
@@ -8894,22 +8894,29 @@ app.post(
         throw emptyLinesError;
       }
 
+      const targetCell = session.cells.find((entry) => entry.id === requestedCellId);
+      if (!targetCell) {
+        const missingCellError = new Error('解析完成，但找不到目前字幕本');
+        missingCellError.code = 'CELL_NOT_FOUND_AFTER_PARSE';
+        throw missingCellError;
+      }
+
       const nextLines = buildSequentialSecondaryLanguageTimeline({
         session,
-        timelineLines: cell.lines,
+        timelineLines: targetCell.lines,
         parsedLines: normalizedParsedLines,
         languageId: language.id,
       });
 
       pushSessionHistory(session);
-      setCellLanguageSource(cell, language.id, normalizedParsedLines, {
+      setCellLanguageSource(targetCell, language.id, normalizedParsedLines, {
         text: rawScriptText,
       });
-      cell.lines = normalizeScriptLines(nextLines, {
+      targetCell.lines = normalizeScriptLines(nextLines, {
         keepEmpty: true,
         primaryLanguageId: 'primary',
       }).filter((line) => lineHasAnyLanguageText(line));
-      session.selectedCellId = cell.id;
+      session.selectedCellId = targetCell.id;
       syncSelectedCellLines(session);
       persistSession(session);
       broadcastControlState(session.id);
@@ -8952,8 +8959,7 @@ app.post(
       return res.status(400).json({ error: '缺少劇本文字內容' });
     }
 
-    const cell = session.cells.find((entry) => entry.id === cellId);
-    if (!cell) {
+    if (!session.cells.some((entry) => entry.id === cellId)) {
       return res.status(404).json({ error: '找不到儲存格' });
     }
 
@@ -8994,15 +9000,22 @@ app.post(
         throw emptyLinesError;
       }
 
+      const targetCell = session.cells.find((entry) => entry.id === cellId);
+      if (!targetCell) {
+        const missingCellError = new Error('解析完成，但找不到目前字幕本');
+        missingCellError.code = 'CELL_NOT_FOUND_AFTER_PARSE';
+        throw missingCellError;
+      }
+
       pushSessionHistory(session);
-      cell.lines = normalizedLines;
-      session.selectedCellId = cell.id;
+      targetCell.lines = normalizedLines;
+      session.selectedCellId = targetCell.id;
       session.currentIndex = 0;
       session.displayEnabled = true;
       syncSelectedCellLines(session);
       const controlPayload = buildVerifiedControlPayloadAfterLineWrite(
         session,
-        cell,
+        targetCell,
         normalizedLines.length,
         '解析劇本',
       );
