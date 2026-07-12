@@ -3723,6 +3723,15 @@ function validateImportedSessionConflict(session) {
   }
 }
 
+function regenerateImportedSessionIdentity(session) {
+  if (!session || typeof session !== 'object') return session;
+  session.id = generateId('session');
+  session.viewerToken = createOpaqueToken(18);
+  session.viewerAlias = '';
+  session.projectorToken = createOpaqueToken(18);
+  return ensureSessionStructure(session);
+}
+
 function hydrateApplicationStore(persistedStore) {
   users.clear();
   authSessions.clear();
@@ -3772,7 +3781,6 @@ function hydrateApplicationStore(persistedStore) {
     sessions.set(normalized.id, normalized);
   });
 
-  collapseToGlobalSession();
   cleanupExpiredAuthSessions();
   ensureAdminBootstrapUser();
 }
@@ -3780,7 +3788,6 @@ function hydrateApplicationStore(persistedStore) {
 async function initializeApplicationStore() {
   const persistedStore = await loadStore();
   hydrateApplicationStore(persistedStore);
-  collapseToGlobalSession();
   await persistApplicationStore({ throwOnError: true });
 }
 
@@ -6310,18 +6317,11 @@ function getProjectorLayoutPayload(session) {
  * Returns or creates a session state bucket.
  */
 function ensureSession(sessionId, ownerUserId = '') {
-  if (sessionId === DEFAULT_SESSION_ID) {
-    const existingGlobal = sessions.get(DEFAULT_SESSION_ID);
-    if (!existingGlobal) {
-      const session = createGlobalSessionRecord(ownerUserId || SHARED_ACCESS_USER_ID);
-      sessions.clear();
-      sessions.set(DEFAULT_SESSION_ID, session);
-    }
-    return ensureSessionStructure(sessions.get(DEFAULT_SESSION_ID));
-  }
-
   if (!sessions.has(sessionId)) {
-    const session = createSessionRecord(ownerUserId);
+    const session =
+      sessionId === DEFAULT_SESSION_ID
+        ? createGlobalSessionRecord(ownerUserId || SHARED_ACCESS_USER_ID)
+        : createSessionRecord(ownerUserId);
     session.id = sessionId;
     session.ownerUserId = ownerUserId || session.ownerUserId;
     clearPublicSessionTombstones(session);
@@ -6384,17 +6384,38 @@ function getViewerEntryRedirectPath(session) {
 }
 
 function getOwnedSession(sessionId, userId) {
-  if (sessionId === DEFAULT_SESSION_ID) {
-    return ensureSession(DEFAULT_SESSION_ID, userId || SHARED_ACCESS_USER_ID);
-  }
-
   const session = getSession(sessionId);
   if (!session) return null;
   if (!userId) return null;
-  if (userId !== SHARED_ACCESS_USER_ID && session.ownerUserId !== userId) {
+  const user = users.get(userId) || null;
+  if (
+    userId !== SHARED_ACCESS_USER_ID &&
+    !isAdminUser(user) &&
+    session.ownerUserId !== userId
+  ) {
     return null;
   }
   return session;
+}
+
+function getVisibleSessionsForUser(user) {
+  if (!user) return [];
+  const normalizedSessions = Array.from(sessions.values())
+    .map((session) => ensureSessionStructure(session))
+    .filter(Boolean);
+
+  if (isAdminUser(user)) {
+    return normalizedSessions;
+  }
+
+  if (isSharedAccessUser(user)) {
+    const sharedSession = sessions.get(DEFAULT_SESSION_ID)
+      ? ensureSessionStructure(sessions.get(DEFAULT_SESSION_ID))
+      : ensureSession(DEFAULT_SESSION_ID, SHARED_ACCESS_USER_ID);
+    return sharedSession ? [sharedSession] : [];
+  }
+
+  return normalizedSessions.filter((session) => session.ownerUserId === user.id);
 }
 
 function touchSession(session) {
@@ -6406,9 +6427,6 @@ function storeSessionInMemory(session) {
   if (!session) return;
   touchSession(session);
   clearPublicSessionTombstones(session);
-  if (session.id === DEFAULT_SESSION_ID) {
-    sessions.clear();
-  }
   sessions.set(session.id, session);
 }
 
@@ -7973,12 +7991,14 @@ app.delete('/api/admin/users/:userId', requireAdmin, (req, res) => {
 });
 
 app.get('/api/sessions', requireAuth, (req, res) => {
-  const globalSession = ensureSession(DEFAULT_SESSION_ID, req.authUser?.id);
-  res.json({ sessions: [getSessionSummary(globalSession)] });
+  const visibleSessions = getVisibleSessionsForUser(req.authUser)
+    .map((session) => getSessionSummary(session))
+    .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
+  res.json({ sessions: visibleSessions });
 });
 
 app.post('/api/session', requireSessionManager, (req, res) => {
-  const session = ensureSession(DEFAULT_SESSION_ID, req.authUser?.id);
+  const session = createSessionRecord(req.authUser?.id || SHARED_ACCESS_USER_ID);
   const requestedTitle = sanitizeLineText(req.body?.title || '');
   if (requestedTitle) {
     session.title = requestedTitle.slice(0, 60);
@@ -7989,19 +8009,18 @@ app.post('/api/session', requireSessionManager, (req, res) => {
 
 app.post('/api/session/import', requireSessionManager, (req, res) => {
   try {
-    const session = createImportedSessionFromBackup(req.body, req.authUser);
-    stopTranscriptionStream(DEFAULT_SESSION_ID, {
+    const session = regenerateImportedSessionIdentity(
+      createImportedSessionFromBackup(req.body, req.authUser),
+    );
+    stopTranscriptionStream(session.id, {
       keepText: false,
       reason: 'workspace import',
     });
-    session.id = DEFAULT_SESSION_ID;
-    session.ownerUserId = SHARED_ACCESS_USER_ID;
     session.transcription = defaultTranscriptionState();
     session.history = { past: [], future: [] };
     syncSelectedCellLines(session);
     clearPublicSessionTombstones(session);
-    sessions.clear();
-    sessions.set(DEFAULT_SESSION_ID, ensureSessionStructure(session));
+    sessions.set(session.id, ensureSessionStructure(session));
     persistSession(session);
     res.status(201).json(getControlPayload(session));
   } catch (error) {

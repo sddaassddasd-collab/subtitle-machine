@@ -13,7 +13,8 @@ function App() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/admin" element={<AdminPage />} />
-      <Route path="/control" element={<ControlPage />} />
+      <Route path="/control/:sessionId" element={<ControlPage />} />
+      <Route path="/control" element={<Navigate to="/" replace />} />
       <Route path="/projector/:projectorToken" element={<ProjectorPage />} />
       <Route path="/projector" element={<ProjectorPage />} />
       <Route path="/prompter/:viewerToken" element={<PrompterPage />} />

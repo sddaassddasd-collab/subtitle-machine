@@ -1962,6 +1962,20 @@
   gap: 1rem;
 }
 
+.workspace-create-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+}
+
+.workspace-create-form input {
+  padding: 0.75rem 0.9rem;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.95);
+  color: #0f172a;
+}
+
 .session-card {
   background: rgba(255, 255, 255, 0.95);
   border-radius: 22px;
@@ -2067,7 +2081,8 @@
 
 @media (max-width: 720px) {
   .inline-auth-row,
-  .account-form-grid {
+  .account-form-grid,
+  .workspace-create-form {
     grid-template-columns: 1fr;
   }
 

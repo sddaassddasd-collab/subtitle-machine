@@ -8,8 +8,12 @@ const HomePage = () => {
   const [password, setPassword] = useState('')
   const [sharedPassword, setSharedPassword] = useState('')
   const [user, setUser] = useState(null)
+  const [sessions, setSessions] = useState([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [newWorkspaceTitle, setNewWorkspaceTitle] = useState('')
   const [authLoading, setAuthLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false)
   const [unlockingSharedAccess, setUnlockingSharedAccess] = useState(false)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
@@ -40,6 +44,33 @@ const HomePage = () => {
       cancelled = true
     }
   }, [])
+
+  const loadSessions = async () => {
+    setSessionsLoading(true)
+    setError('')
+
+    try {
+      const response = await fetch('/api/sessions')
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '無法載入工作區')
+      }
+      setSessions(Array.isArray(data?.sessions) ? data.sessions : [])
+    } catch (loadError) {
+      setError(loadError.message || '無法載入工作區')
+    } finally {
+      setSessionsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!user) {
+      setSessions([])
+      return
+    }
+
+    void loadSessions()
+  }, [user])
 
   const handleLoginSubmit = async (event) => {
     event.preventDefault()
@@ -110,6 +141,7 @@ const HomePage = () => {
       })
     } finally {
       setUser(null)
+      setSessions([])
       setUsername('')
       setPassword('')
       setSharedPassword('')
@@ -142,7 +174,12 @@ const HomePage = () => {
       }
 
       setNotice('工作區備份已匯入')
-      navigate('/control')
+      const nextSessionId = data?.sessionId || data?.session?.id
+      if (nextSessionId) {
+        navigate(`/control/${encodeURIComponent(nextSessionId)}`)
+      } else {
+        await loadSessions()
+      }
     } catch (importError) {
       setError(importError.message || '匯入工作區備份失敗')
     } finally {
@@ -150,6 +187,42 @@ const HomePage = () => {
       if (backupInputRef.current) {
         backupInputRef.current.value = ''
       }
+    }
+  }
+
+  const handleCreateWorkspace = async (event) => {
+    event.preventDefault()
+    setCreatingWorkspace(true)
+    setError('')
+    setNotice('')
+
+    try {
+      const response = await fetch('/api/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: newWorkspaceTitle,
+        }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '建立工作區失敗')
+      }
+
+      const nextSessionId = data?.sessionId || data?.session?.id
+      setNewWorkspaceTitle('')
+      if (nextSessionId) {
+        navigate(`/control/${encodeURIComponent(nextSessionId)}`)
+      } else {
+        await loadSessions()
+        setNotice('工作區已建立')
+      }
+    } catch (createError) {
+      setError(createError.message || '建立工作區失敗')
+    } finally {
+      setCreatingWorkspace(false)
     }
   }
 
@@ -229,8 +302,8 @@ const HomePage = () => {
       <div className="dashboard-shell">
         <section className="dashboard-header-card">
           <div>
-            <h1>全域字幕工作區</h1>
-            <p>目前所有控制頁都會連到同一份字幕狀態，不再切換場次。</p>
+            <h1>字幕工作區</h1>
+            <p>不同劇組、案子與使用者會使用各自的工作區，字幕資料互不影響。</p>
           </div>
           <div className="dashboard-actions">
             {user.role === 'admin' && (
@@ -242,9 +315,6 @@ const HomePage = () => {
                 管理帳號
               </button>
             )}
-            <button type="button" onClick={() => navigate('/control')}>
-              進入控制端
-            </button>
             <button
               type="button"
               className="subtle-button"
@@ -257,9 +327,77 @@ const HomePage = () => {
 
         <section className="dashboard-settings-card">
           <div>
+            <h2>建立工作區</h2>
+            <p>每個工作區都有自己的字幕、語言、投影設定與分享連結。</p>
+          </div>
+          <form className="workspace-create-form" onSubmit={handleCreateWorkspace}>
+            <input
+              type="text"
+              value={newWorkspaceTitle}
+              onChange={(event) => setNewWorkspaceTitle(event.target.value)}
+              placeholder="例如：劇組 A / 正式演出 / 彩排"
+            />
+            <button type="submit" disabled={creatingWorkspace}>
+              {creatingWorkspace ? '建立中…' : '建立並進入'}
+            </button>
+          </form>
+        </section>
+
+        <section className="session-grid">
+          {sessionsLoading && (
+            <article className="session-card empty">載入工作區中…</article>
+          )}
+          {!sessionsLoading && sessions.length === 0 && (
+            <article className="session-card empty">
+              尚未建立工作區，請先建立第一個劇組或案子的工作區。
+            </article>
+          )}
+          {!sessionsLoading &&
+            sessions.map((session) => (
+              <article key={session.id} className="session-card">
+                <div className="session-card-head">
+                  <div>
+                    <h2>{session.title || '未命名工作區'}</h2>
+                    <p>
+                      更新時間：
+                      {session.updatedAt
+                        ? new Date(session.updatedAt).toLocaleString('zh-TW', {
+                            hour12: false,
+                          })
+                        : '未知'}
+                    </p>
+                  </div>
+                  <span
+                    className={`session-state-badge ${
+                      session.status === 'ended' ? 'ended' : 'active'
+                    }`}
+                  >
+                    {session.status === 'ended' ? '已結束' : '使用中'}
+                  </span>
+                </div>
+                <div className="session-card-meta">
+                  <span>{Array.isArray(session.cells) ? session.cells.length : 0} 個儲存格</span>
+                  <span>{Array.isArray(session.languages) ? session.languages.length : 0} 種語言</span>
+                </div>
+                <div className="session-card-actions">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(`/control/${encodeURIComponent(session.id)}`)
+                    }
+                  >
+                    進入控制端
+                  </button>
+                </div>
+              </article>
+            ))}
+        </section>
+
+        <section className="dashboard-settings-card">
+          <div>
             <h2>工作區備份</h2>
             <p>
-              匯入備份會直接覆蓋目前這份全域工作區，包含語言、儲存格、字幕內容與投影設定。
+              匯入備份會建立一份新的工作區副本，包含語言、儲存格、字幕內容與投影設定。
             </p>
           </div>
           <div className="dashboard-actions">

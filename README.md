@@ -121,7 +121,9 @@ client/  Vite + React 控制端/檢視端前端
   - 若有設定 `DATABASE_URL`，優先使用 PostgreSQL
   - 若未設定 `DATABASE_URL`，才 fallback 到本機 SQLite
 - 首頁目前採用封閉式帳號登入；公開註冊預設關閉，新帳號需由管理員後台建立。第一次部署請設定 `ADMIN_BOOTSTRAP_USERNAME` 與 `ADMIN_BOOTSTRAP_PASSWORD` 來建立初始管理員。
+- 登入後會先進入工作區列表；不同工作區各自保存字幕、語言、儲存格、投影設定、viewer/projector 連結。管理員可看到所有工作區，操作員只看到自己建立的工作區。
 - 共用控制密碼仍保留為臨時入口；若未設定環境變數，預設密碼為 `20141017`。可用 `SUBTITLE_MACHINE_ACCESS_PASSWORD` 覆寫。
+- 匯入工作區備份會建立一份新的工作區副本，不會覆蓋既有工作區。
 - Render 部署建議直接綁定 Render Postgres，平台會自動提供 `DATABASE_URL`，此時帳號、登入 session 與字幕場次資料都會寫進 Postgres，不會因 redeploy 消失。
 - 若你使用 Render 免費 Web Service，又不打算加購 Persistent Disk / Postgres，請把「場次備份 JSON 匯出 / 匯入」當成正式備份流程；免費環境的本機檔案系統不適合長期保存字幕資料。
 - SQLite fallback 模式的預設資料庫位置不在 repo 內，而是在系統使用者資料夾：

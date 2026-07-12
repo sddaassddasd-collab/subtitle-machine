@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
 import {
@@ -97,7 +97,6 @@ const PROJECTOR_REPEAT_INTERVAL_MS = 85
 const CUE_CONFIRM_TIMEOUT_MS = 2000
 
 const TARGET_SAMPLE_RATE = 24000
-const GLOBAL_SESSION_ID = 'default'
 const MIC_CAPTURE_WORKLET_URL = new URL(
   '../worklets/mic-capture-processor.js',
   import.meta.url,
@@ -731,10 +730,14 @@ const formatStatusTimestamp = (timestamp) => {
 
 const ControlPage = () => {
   const navigate = useNavigate()
+  const params = useParams()
 
   const [user, setUser] = useState(null)
   const [authReady, setAuthReady] = useState(false)
-  const sessionId = GLOBAL_SESSION_ID
+  const sessionId =
+    typeof params.sessionId === 'string' && params.sessionId.trim()
+      ? params.sessionId.trim()
+      : ''
   const [sessionMeta, setSessionMeta] = useState(null)
   const [lines, setLines] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -1380,7 +1383,7 @@ const ControlPage = () => {
       try {
         const response = await fetch(`/api/session/${sessionId}`)
         if (!response.ok) {
-          throw new Error('無法載入全域字幕工作區')
+          throw new Error('無法載入字幕工作區')
         }
         const data = await response.json()
         if (disposed) return
@@ -1389,7 +1392,7 @@ const ControlPage = () => {
         if (!disposed) {
           setStatus({
             kind: 'error',
-            message: error?.message || '無法載入全域字幕工作區',
+            message: error?.message || '無法載入字幕工作區',
           })
         }
       }
@@ -1474,7 +1477,7 @@ const ControlPage = () => {
     if (!sessionId) return
     const response = await fetch(`/api/session/${sessionId}`)
     if (!response.ok) {
-      throw new Error('無法重新載入全域字幕工作區')
+      throw new Error('無法重新載入字幕工作區')
     }
     const data = await response.json()
     applySessionPayload(data)
@@ -1746,7 +1749,7 @@ const ControlPage = () => {
 
   const handleStartLiveTranscription = async () => {
     if (!socketRef.current || !sessionId) {
-      setStatus({ kind: 'error', message: '尚未連上全域工作區，無法啟動語音辨識' })
+      setStatus({ kind: 'error', message: '尚未連上工作區，無法啟動語音辨識' })
       return
     }
 
@@ -2697,7 +2700,12 @@ const ControlPage = () => {
         kind: 'success',
         message: '工作區備份已匯入',
       })
-      navigate('/control')
+      const nextSessionId = data?.sessionId || data?.session?.id
+      if (nextSessionId) {
+        navigate(`/control/${encodeURIComponent(nextSessionId)}`)
+      } else {
+        await requestSessionRefresh()
+      }
     } catch (error) {
       setStatus({
         kind: 'error',
@@ -3314,6 +3322,19 @@ const ControlPage = () => {
     return null
   }
 
+  if (!sessionId) {
+    return (
+      <div className="page">
+        <div className="home-intro">
+          <p>請先從首頁選擇一個字幕工作區。</p>
+          <button type="button" onClick={() => navigate('/')}>
+            返回工作區列表
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       className={`control-page ${
@@ -3345,11 +3366,11 @@ const ControlPage = () => {
             <header className="control-header">
               <div className="session-title-row">
                 <div>
-                  <h1>{sessionMeta?.title || '全域字幕工作區'}</h1>
+                  <h1>{sessionMeta?.title || '字幕工作區'}</h1>
                   <p className="input-note">
                     {sessionMeta?.status === 'ended'
                       ? '已停止外部字幕輸出；檢視端與投影端網址仍可使用'
-                      : '全域工作區啟用中'}
+                      : '工作區啟用中'}
                   </p>
                 </div>
                 <span className={`session-state-badge ${sessionMeta?.status || 'active'}`}>
@@ -3388,7 +3409,7 @@ const ControlPage = () => {
               <div className="input-group">
                 <label htmlFor="viewer-alias">檢視端分享網址</label>
                 <p className="input-note">
-                  觀眾掃進去後會直接連到目前這份全域字幕工作區。
+                  觀眾掃進去後會直接連到目前這份字幕工作區。
                 </p>
                 <div className="viewer-link">
                   <span>{viewerShareUrl || '尚未載入工作區'}</span>
