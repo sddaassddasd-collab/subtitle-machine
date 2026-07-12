@@ -783,6 +783,7 @@ const ControlPage = () => {
   const [draftInputs, setDraftInputs] = useState({})
   const [parsingPrimary, setParsingPrimary] = useState(false)
   const [parsingLanguageId, setParsingLanguageId] = useState('')
+  const [clearingSubtitles, setClearingSubtitles] = useState(false)
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
   const [editingCell, setEditingCell] = useState(null)
@@ -2643,6 +2644,38 @@ const ControlPage = () => {
     setStatus({ kind: 'success', message: '字幕 JSON 已匯出' })
   }
 
+  const handleClearCurrentCellSubtitles = async () => {
+    if (!sessionId || !selectedCellId || clearingSubtitles) return
+    if (!lines.length) {
+      setStatus({ kind: 'info', message: '目前字幕本已經是空的' })
+      return
+    }
+
+    const confirmed = window.confirm(
+      '確定要清空目前字幕本的所有字幕嗎？這會刪除已解析字幕 / cues，但不會刪除工作區或帳號。',
+    )
+    if (!confirmed) return
+
+    try {
+      setClearingSubtitles(true)
+      await performSessionMutation(
+        () =>
+          fetch(`/api/session/${sessionId}/lines`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cellId: selectedCellId }),
+          }),
+        { successMessage: '目前字幕本已清空' },
+      )
+      setEditingCell(null)
+      setRoleEditor(null)
+      setPendingMusicRangeStartIndex(null)
+      setAutoCenterEnabled(false)
+    } finally {
+      setClearingSubtitles(false)
+    }
+  }
+
   const handleExportSessionBackup = async () => {
     if (!sessionId) return
 
@@ -3847,6 +3880,14 @@ const ControlPage = () => {
             </label>
             <button type="button" className="subtle-button" onClick={handleAddLine}>
               新增字幕格
+            </button>
+            <button
+              type="button"
+              className="subtle-button danger-button"
+              onClick={handleClearCurrentCellSubtitles}
+              disabled={clearingSubtitles || lines.length === 0}
+            >
+              {clearingSubtitles ? '清空中…' : '清空字幕'}
             </button>
           </div>
         </header>

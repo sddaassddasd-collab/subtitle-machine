@@ -464,9 +464,11 @@ const PrompterPage = () => {
             {lines.map((line, index) => {
               const isActive = index === currentIndex
               const isDirection = line.type === 'direction'
-              const text = isDirection
-                ? ''
-                : resolveLineText(line, selectedLanguageId)
+              const lineText = resolveLineText(line, selectedLanguageId)
+              const text =
+                !isDirection && line.role && lineText
+                  ? `${line.role}：${lineText}`
+                  : lineText
               const roleColor =
                 roleColorEnabled && isActive && !isDirection
                   ? roleToColor(line.role)

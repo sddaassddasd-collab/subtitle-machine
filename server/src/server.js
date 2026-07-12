@@ -9004,6 +9004,29 @@ app.put('/api/session/:sessionId/lines', requireAuth, (req, res) => {
   res.json(getControlPayload(session));
 });
 
+app.delete('/api/session/:sessionId/lines', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const cellId =
+    typeof req.body?.cellId === 'string' ? req.body.cellId : session.selectedCellId;
+  const cell = session.cells.find((entry) => entry.id === cellId);
+  if (!cell) {
+    return res.status(404).json({ error: '找不到儲存格' });
+  }
+
+  pushSessionHistory(session);
+  cell.lines = [];
+  cell.languageSources = {};
+  session.selectedCellId = cell.id;
+  session.currentIndex = 0;
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
 app.post('/api/session/:sessionId/current', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
