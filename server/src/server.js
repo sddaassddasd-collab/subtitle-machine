@@ -7138,6 +7138,19 @@ function findAutoDialogueIndexAfter(session, startIndex) {
   return findAutoDialogueIndexAtOrAfter(session, start);
 }
 
+function findImmediateDirectionIndexAfter(session, startIndex) {
+  const lines = ensureSessionLines(session);
+  const nextIndex = Number.isInteger(startIndex) ? startIndex + 1 : 0;
+  if (
+    nextIndex >= 0 &&
+    nextIndex < lines.length &&
+    lines[nextIndex]?.type === LINE_TYPES.DIRECTION
+  ) {
+    return nextIndex;
+  }
+  return null;
+}
+
 function scoreAutoFollowText(heardText, targetText) {
   const heard = normalizeAutoFollowMatchText(heardText);
   const target = normalizeAutoFollowMatchText(targetText);
@@ -7210,6 +7223,21 @@ function advanceAutoFollowToIndex(session, index, patch = {}) {
   if (!Number.isInteger(index)) return false;
   updateAutoFollowState(session.id, patch);
   return applyCurrentIndexChange(session, index);
+}
+
+function advanceAutoFollowToFollowingDirection(session, fromIndex, patch = {}) {
+  const directionIndex = findImmediateDirectionIndexAfter(session, fromIndex);
+  if (!Number.isInteger(directionIndex)) return false;
+
+  const line = ensureSessionLines(session)[directionIndex];
+  return advanceAutoFollowToIndex(session, directionIndex, {
+    ...patch,
+    status: AUTO_FOLLOW_STATUS.ADVANCED,
+    lastAdvancedAt: Date.now(),
+    lastCandidateIndex: directionIndex,
+    lastCandidateText: getAutoFollowDisplayText(line),
+    message: '台詞已核對，已進到下一段舞台指示。',
+  });
 }
 
 function handleAutoFollowAudioLevel(sessionId, level) {
@@ -7328,8 +7356,31 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   };
 
   if (shouldCorrect) {
-    advanceAutoFollowToIndex(session, best.index, patch);
+    const moved = advanceAutoFollowToIndex(session, best.index, patch);
+    if (moved && isFinal) {
+      const updatedSession = getSession(sessionId);
+      if (updatedSession) {
+        advanceAutoFollowToFollowingDirection(updatedSession, best.index, {
+          ...patch,
+          started: true,
+        });
+      }
+    }
     return;
+  }
+
+  if (isFinal && best.index === session.currentIndex) {
+    const movedToDirection = advanceAutoFollowToFollowingDirection(
+      session,
+      best.index,
+      {
+        ...patch,
+        started: true,
+      },
+    );
+    if (movedToDirection) {
+      return;
+    }
   }
 
   updateAutoFollowState(sessionId, patch);
