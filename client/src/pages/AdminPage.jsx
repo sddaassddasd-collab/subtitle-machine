@@ -26,6 +26,12 @@ const AdminPage = () => {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [passwordDrafts, setPasswordDrafts] = useState({})
+  const [creatingUser, setCreatingUser] = useState(false)
+  const [newUserForm, setNewUserForm] = useState({
+    username: '',
+    password: '',
+    role: 'operator',
+  })
 
   const loadUsers = async () => {
     setLoadingUsers(true)
@@ -115,6 +121,42 @@ const AdminPage = () => {
       setError(patchError.message || '更新帳號失敗')
     } finally {
       setSavingUserId('')
+    }
+  }
+
+  const handleCreateUser = async (event) => {
+    event.preventDefault()
+    setCreatingUser(true)
+    setError('')
+    setNotice('')
+
+    try {
+      const response = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(newUserForm),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '建立帳號失敗')
+      }
+
+      setUsers((prev) => [
+        data.user,
+        ...prev.filter((user) => user.id !== data.user.id),
+      ])
+      setNewUserForm({
+        username: '',
+        password: '',
+        role: 'operator',
+      })
+      setNotice(`已建立帳號 ${data.user.username}`)
+    } catch (createError) {
+      setError(createError.message || '建立帳號失敗')
+    } finally {
+      setCreatingUser(false)
     }
   }
 
@@ -209,6 +251,70 @@ const AdminPage = () => {
 
         {notice && <div className="status-success">{notice}</div>}
         {error && <div className="status-error">{error}</div>}
+
+        <section className="dashboard-settings-card">
+          <div>
+            <h2>建立帳號</h2>
+            <p>公開註冊已關閉，新使用者由管理員在這裡建立。</p>
+          </div>
+          <form className="account-create-form" onSubmit={handleCreateUser}>
+            <div className="account-form-grid">
+              <label className="admin-inline-field">
+                <span>帳號</span>
+                <input
+                  type="text"
+                  value={newUserForm.username}
+                  onChange={(event) =>
+                    setNewUserForm((prev) => ({
+                      ...prev,
+                      username: event.target.value,
+                    }))
+                  }
+                  placeholder="至少 3 個字"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="admin-inline-field">
+                <span>初始密碼</span>
+                <input
+                  type="password"
+                  value={newUserForm.password}
+                  onChange={(event) =>
+                    setNewUserForm((prev) => ({
+                      ...prev,
+                      password: event.target.value,
+                    }))
+                  }
+                  placeholder="至少 6 個字"
+                  autoComplete="new-password"
+                />
+              </label>
+              <label className="admin-inline-field">
+                <span>權限</span>
+                <select
+                  value={newUserForm.role}
+                  onChange={(event) =>
+                    setNewUserForm((prev) => ({
+                      ...prev,
+                      role: event.target.value,
+                    }))
+                  }
+                >
+                  {ROLE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="dashboard-actions">
+              <button type="submit" disabled={creatingUser}>
+                {creatingUser ? '建立中…' : '建立帳號'}
+              </button>
+            </div>
+          </form>
+        </section>
 
         <section className="admin-grid">
           {users.map((account) => (

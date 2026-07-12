@@ -120,7 +120,8 @@ client/  Vite + React 控制端/檢視端前端
 - 後端目前採用雙儲存策略：
   - 若有設定 `DATABASE_URL`，優先使用 PostgreSQL
   - 若未設定 `DATABASE_URL`，才 fallback 到本機 SQLite
-- 首頁目前採用單一共用密碼入口；若未設定環境變數，預設密碼為 `20141017`。可用 `SUBTITLE_MACHINE_ACCESS_PASSWORD` 覆寫。
+- 首頁目前採用封閉式帳號登入；公開註冊預設關閉，新帳號需由管理員後台建立。第一次部署請設定 `ADMIN_BOOTSTRAP_USERNAME` 與 `ADMIN_BOOTSTRAP_PASSWORD` 來建立初始管理員。
+- 共用控制密碼仍保留為臨時入口；若未設定環境變數，預設密碼為 `20141017`。可用 `SUBTITLE_MACHINE_ACCESS_PASSWORD` 覆寫。
 - Render 部署建議直接綁定 Render Postgres，平台會自動提供 `DATABASE_URL`，此時帳號、登入 session 與字幕場次資料都會寫進 Postgres，不會因 redeploy 消失。
 - 若你使用 Render 免費 Web Service，又不打算加購 Persistent Disk / Postgres，請把「場次備份 JSON 匯出 / 匯入」當成正式備份流程；免費環境的本機檔案系統不適合長期保存字幕資料。
 - SQLite fallback 模式的預設資料庫位置不在 repo 內，而是在系統使用者資料夾：
@@ -133,6 +134,8 @@ client/  Vite + React 控制端/檢視端前端
 - 忘記密碼流程已改成「送出申請，請管理員於後台協助重設」，前台不再直接取得重設碼。
 - 若要部署到正式環境，至少應設定：
   - `ALLOWED_ORIGINS=https://你的網域`
+  - `ADMIN_BOOTSTRAP_USERNAME=你的管理員帳號`
+  - `ADMIN_BOOTSTRAP_PASSWORD=你的管理員密碼`
   - `COOKIE_SECURE=true`
   - `COOKIE_SAME_SITE=lax`（若前後端真的跨站，才考慮 `none`，且必須同時開 `COOKIE_SECURE=true`）
   - `TRUST_PROXY=1`（若前面有 Nginx / reverse proxy / platform proxy）
@@ -140,6 +143,8 @@ client/  Vite + React 控制端/檢視端前端
   - `DATABASE_URL`：Render 會自動注入
   - `POSTGRES_SSL=true`：若連的是需要 SSL 的 Postgres 連線
   - `ALLOWED_ORIGINS=https://你的正式網域`
+  - `ADMIN_BOOTSTRAP_USERNAME=你的管理員帳號`
+  - `ADMIN_BOOTSTRAP_PASSWORD=你的管理員密碼`
   - `COOKIE_SECURE=true`
   - `TRUST_PROXY=1`
   - 使用 Postgres 時不需要再掛 Persistent Disk 來保存帳號或場次資料

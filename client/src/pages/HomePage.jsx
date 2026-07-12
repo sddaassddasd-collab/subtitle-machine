@@ -4,10 +4,13 @@ import { useNavigate } from 'react-router-dom'
 const HomePage = () => {
   const navigate = useNavigate()
   const backupInputRef = useRef(null)
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [sharedPassword, setSharedPassword] = useState('')
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  const [unlockingSharedAccess, setUnlockingSharedAccess] = useState(false)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -38,9 +41,41 @@ const HomePage = () => {
     }
   }, [])
 
-  const handleAccessSubmit = async (event) => {
+  const handleLoginSubmit = async (event) => {
     event.preventDefault()
     setSubmitting(true)
+    setError('')
+    setNotice('')
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username,
+          password,
+        }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data.error || '登入失敗')
+      }
+
+      setUser(data?.user || null)
+      setUsername('')
+      setPassword('')
+    } catch (accessError) {
+      setError(accessError.message || '登入失敗')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleSharedAccessSubmit = async (event) => {
+    event.preventDefault()
+    setUnlockingSharedAccess(true)
     setError('')
     setNotice('')
 
@@ -51,20 +86,20 @@ const HomePage = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          password,
+          password: sharedPassword,
         }),
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '密碼錯誤')
+        throw new Error(data.error || '共用密碼錯誤')
       }
 
       setUser(data?.user || null)
-      setPassword('')
+      setSharedPassword('')
     } catch (accessError) {
-      setError(accessError.message || '密碼錯誤')
+      setError(accessError.message || '共用密碼錯誤')
     } finally {
-      setSubmitting(false)
+      setUnlockingSharedAccess(false)
     }
   }
 
@@ -75,7 +110,9 @@ const HomePage = () => {
       })
     } finally {
       setUser(null)
+      setUsername('')
       setPassword('')
+      setSharedPassword('')
       setError('')
       setNotice('')
     }
@@ -131,24 +168,53 @@ const HomePage = () => {
           <section className="home-hero-card">
             <div>
               <h1>劇場字幕機</h1>
-              <p>登入系統已暫時隱藏，目前改為共用密碼進入控制端。</p>
+              <p>請使用管理員建立的帳號登入控制端。</p>
             </div>
             <div className="info-panel compact">
-              <strong>進入後會直接接到同一份全域字幕工作區</strong>
-              <span>不再切換場次，控制端、檢視端與投影端都共用這一份狀態。</span>
+              <strong>封閉式帳號系統</strong>
+              <span>公開註冊已關閉，新帳號需由管理員在後台建立。</span>
             </div>
-            <form className="auth-form" onSubmit={handleAccessSubmit}>
-              <label htmlFor="shared-password">密碼</label>
+            <form className="auth-form" onSubmit={handleLoginSubmit}>
+              <label htmlFor="account-username">帳號</label>
               <input
-                id="shared-password"
+                id="account-username"
+                type="text"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="輸入帳號"
+                autoComplete="username"
+              />
+              <label htmlFor="account-password">密碼</label>
+              <input
+                id="account-password"
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                placeholder="輸入控制密碼"
+                placeholder="輸入密碼"
+                autoComplete="current-password"
               />
               <button type="submit" disabled={submitting}>
-                {submitting ? '驗證中…' : '進入系統'}
+                {submitting ? '登入中…' : '登入'}
               </button>
+            </form>
+            <form className="auth-form secondary-auth-form" onSubmit={handleSharedAccessSubmit}>
+              <label htmlFor="shared-password">共用控制密碼</label>
+              <div className="inline-auth-row">
+                <input
+                  id="shared-password"
+                  type="password"
+                  value={sharedPassword}
+                  onChange={(event) => setSharedPassword(event.target.value)}
+                  placeholder="臨時進入控制端"
+                />
+                <button
+                  type="submit"
+                  className="subtle-button"
+                  disabled={unlockingSharedAccess}
+                >
+                  {unlockingSharedAccess ? '驗證中…' : '共用進入'}
+                </button>
+              </div>
             </form>
             {notice && <div className="status-success">{notice}</div>}
             {error && <div className="status-error">{error}</div>}
@@ -167,6 +233,15 @@ const HomePage = () => {
             <p>目前所有控制頁都會連到同一份字幕狀態，不再切換場次。</p>
           </div>
           <div className="dashboard-actions">
+            {user.role === 'admin' && (
+              <button
+                type="button"
+                className="subtle-button"
+                onClick={() => navigate('/admin')}
+              >
+                管理帳號
+              </button>
+            )}
             <button type="button" onClick={() => navigate('/control')}>
               進入控制端
             </button>

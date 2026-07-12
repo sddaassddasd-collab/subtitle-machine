@@ -45,6 +45,10 @@ const TRUST_PROXY_SETTING = normalizeTrustProxySetting(
   process.env.TRUST_PROXY,
   IS_PRODUCTION ? 1 : false,
 );
+const PUBLIC_REGISTRATION_ENABLED = normalizeBooleanEnv(
+  process.env.PUBLIC_REGISTRATION_ENABLED,
+  false,
+);
 const rateLimitBuckets = new Map();
 let lastRateLimitSweepAt = 0;
 
@@ -7710,6 +7714,12 @@ app.post('/api/access/unlock', accessUnlockRateLimit, (req, res) => {
 });
 
 app.post('/api/auth/register', registerRateLimit, (req, res) => {
+  if (!PUBLIC_REGISTRATION_ENABLED) {
+    return res.status(410).json({
+      error: '此系統已關閉公開註冊，請由管理員建立帳號',
+    });
+  }
+
   const username = normalizeDisplayName(req.body?.username);
   const usernameNormalized = normalizeUsername(req.body?.username);
   const password = normalizePassword(req.body?.password);
@@ -7738,6 +7748,33 @@ app.post('/api/auth/register', registerRateLimit, (req, res) => {
   persistApplicationStore();
   setAuthCookie(res, token);
   res.json({ user: serializeUser(user) });
+});
+
+app.post('/api/admin/users', requireAdmin, registerRateLimit, (req, res) => {
+  const username = normalizeDisplayName(req.body?.username);
+  const usernameNormalized = normalizeUsername(req.body?.username);
+  const password = normalizePassword(req.body?.password);
+  const role = normalizeUserRole(req.body?.role, USER_ROLES.OPERATOR);
+
+  if (username.length < 3) {
+    return res.status(400).json({ error: '帳號至少需要 3 個字' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密碼至少需要 6 個字' });
+  }
+  if (findUserByNormalizedUsername(usernameNormalized)) {
+    return res.status(409).json({ error: '此帳號已存在' });
+  }
+
+  const user = createUserRecord({
+    username,
+    usernameNormalized,
+    password,
+    role,
+  });
+  users.set(user.id, user);
+  persistApplicationStore();
+  res.status(201).json({ user: getAdminUserPayload(user) });
 });
 
 app.post('/api/auth/login', loginRateLimit, (req, res) => {
