@@ -807,6 +807,9 @@ const formatRelativeSeconds = (timestamp) => {
   return `${seconds} 秒前`
 }
 
+const safeFiniteNumber = (value, fallback = 0) =>
+  typeof value === 'number' && Number.isFinite(value) ? value : fallback
+
 const formatMutationErrorMessage = (data, fallbackMessage = '操作失敗') => {
   const message = data?.details || data?.error || fallbackMessage
   const diagnostics =
@@ -1045,19 +1048,22 @@ const ControlPage = () => {
     typeof autoFollow.confidence === 'number'
       ? ` ${(autoFollow.confidence * 100).toFixed(0)}%`
       : ''
-  const autoFollowTriggerThreshold =
-    typeof autoFollow.triggerThreshold === 'number'
-      ? autoFollow.triggerThreshold
-      : DEFAULT_AUTO_FOLLOW_STATE.triggerThreshold
+  const autoFollowTriggerThreshold = safeFiniteNumber(
+    autoFollow.triggerThreshold,
+    DEFAULT_AUTO_FOLLOW_STATE.triggerThreshold,
+  )
   const transcriptionBusy =
     transcription.active || transcription.status === 'connecting'
   const audioDiagnosticsVisible =
     subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || transcriptionBusy
-  const micLevelLabel = micDiagnostics.lastLevel.toFixed(3)
-  const backendLevelLabel = autoFollow.lastAudioLevel.toFixed(3)
-  const backendAckLevelLabel = micDiagnostics.lastAckLevel.toFixed(3)
+  const micLevel = safeFiniteNumber(micDiagnostics.lastLevel)
+  const backendLevel = safeFiniteNumber(autoFollow.lastAudioLevel)
+  const backendAckLevel = safeFiniteNumber(micDiagnostics.lastAckLevel)
+  const micLevelLabel = micLevel.toFixed(3)
+  const backendLevelLabel = backendLevel.toFixed(3)
+  const backendAckLevelLabel = backendAckLevel.toFixed(3)
   const micHasTriggerLevel =
-    micDiagnostics.active && micDiagnostics.lastLevel >= autoFollowTriggerThreshold
+    micDiagnostics.active && micLevel >= autoFollowTriggerThreshold
   const micHasRecentSignal =
     micDiagnostics.active &&
     micDiagnostics.lastHeardAt &&
