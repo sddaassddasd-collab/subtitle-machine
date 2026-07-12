@@ -93,6 +93,9 @@ const DEFAULT_AUTO_FOLLOW_STATE = {
   listening: false,
   started: false,
   lastAudioLevel: 0,
+  lastAudioAt: null,
+  triggerThreshold: 0.04,
+  releaseThreshold: 0.018,
   lastOnsetAt: null,
   lastAdvancedAt: null,
   lastVerifiedAt: null,
@@ -122,6 +125,18 @@ const normalizeAutoFollowState = (raw) => {
       typeof raw.lastAudioLevel === 'number' && Number.isFinite(raw.lastAudioLevel)
         ? raw.lastAudioLevel
         : 0,
+    lastAudioAt:
+      typeof raw.lastAudioAt === 'number' && Number.isFinite(raw.lastAudioAt)
+        ? raw.lastAudioAt
+        : null,
+    triggerThreshold:
+      typeof raw.triggerThreshold === 'number' && Number.isFinite(raw.triggerThreshold)
+        ? raw.triggerThreshold
+        : DEFAULT_AUTO_FOLLOW_STATE.triggerThreshold,
+    releaseThreshold:
+      typeof raw.releaseThreshold === 'number' && Number.isFinite(raw.releaseThreshold)
+        ? raw.releaseThreshold
+        : DEFAULT_AUTO_FOLLOW_STATE.releaseThreshold,
     lastHeardText:
       typeof raw.lastHeardText === 'string' ? raw.lastHeardText : '',
     lastCandidateText:
@@ -785,6 +800,13 @@ const formatStatusTimestamp = (timestamp) => {
   return new Date(timestamp).toLocaleString('zh-TW', { hour12: false })
 }
 
+const formatRelativeSeconds = (timestamp) => {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '尚未收到'
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000))
+  if (seconds <= 0) return '剛剛'
+  return `${seconds} 秒前`
+}
+
 const formatMutationErrorMessage = (data, fallbackMessage = '操作失敗') => {
   const message = data?.details || data?.error || fallbackMessage
   const diagnostics =
@@ -847,6 +869,13 @@ const ControlPage = () => {
     DEFAULT_TRANSCRIPTION_STATE,
   )
   const [autoFollow, setAutoFollow] = useState(DEFAULT_AUTO_FOLLOW_STATE)
+  const [micDiagnostics, setMicDiagnostics] = useState({
+    active: false,
+    lastLevel: 0,
+    lastSentAt: null,
+    lastHeardAt: null,
+  })
+  const [audioDiagnosticsOpen, setAudioDiagnosticsOpen] = useState(false)
   const [status, setStatus] = useState({ kind: 'info', message: '' })
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return ''
@@ -899,6 +928,7 @@ const ControlPage = () => {
   const projectorDisplayModeDraftRef = useRef(PROJECTOR_DISPLAY_MODES.SCRIPT)
   const autoStartedTranscriptionRef = useRef(false)
   const projectorStartedTranscriptionRef = useRef(false)
+  const micDiagnosticsUpdateRef = useRef(0)
   const projectorRepeatRef = useRef({
     startTimer: null,
     repeatTimer: null,
@@ -1011,6 +1041,33 @@ const ControlPage = () => {
     typeof autoFollow.confidence === 'number'
       ? ` ${(autoFollow.confidence * 100).toFixed(0)}%`
       : ''
+  const autoFollowTriggerThreshold =
+    typeof autoFollow.triggerThreshold === 'number'
+      ? autoFollow.triggerThreshold
+      : DEFAULT_AUTO_FOLLOW_STATE.triggerThreshold
+  const transcriptionBusy =
+    transcription.active || transcription.status === 'connecting'
+  const audioDiagnosticsVisible =
+    subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || transcriptionBusy
+  const micLevelLabel = micDiagnostics.lastLevel.toFixed(3)
+  const backendLevelLabel = autoFollow.lastAudioLevel.toFixed(3)
+  const micHasTriggerLevel =
+    micDiagnostics.active && micDiagnostics.lastLevel >= autoFollowTriggerThreshold
+  const micHasRecentSignal =
+    micDiagnostics.active &&
+    micDiagnostics.lastHeardAt &&
+    Date.now() - micDiagnostics.lastHeardAt < 2500
+  const backendHasRecentAudio =
+    autoFollow.lastAudioAt && Date.now() - autoFollow.lastAudioAt < 3000
+  const audioBriefLabel = !transcriptionBusy && !micDiagnostics.active
+    ? '未收音'
+    : micHasTriggerLevel
+      ? `有聲音 ${micLevelLabel}`
+      : micHasRecentSignal
+        ? `低音量 ${micLevelLabel}`
+        : backendHasRecentAudio || micDiagnostics.active
+          ? `收音中 ${micLevelLabel}`
+          : '未收到聲音'
   const existingRoleOptions = useMemo(() => {
     const roles = new Set()
     lines.forEach((line) => {
@@ -1294,6 +1351,11 @@ const ControlPage = () => {
       captureNode: null,
       silenceNode: null,
     }
+    setMicDiagnostics((prev) => ({
+      ...prev,
+      active: false,
+      lastLevel: 0,
+    }))
   }
 
   const clearPendingLineClick = useCallback(() => {
@@ -2013,6 +2075,16 @@ const ControlPage = () => {
         if (!audio) return
         const durationMs = (pcm16.length / TARGET_SAMPLE_RATE) * 1000
         const level = computeSignalLevel(downsampled)
+        const now = Date.now()
+        if (now - micDiagnosticsUpdateRef.current > 120) {
+          micDiagnosticsUpdateRef.current = now
+          setMicDiagnostics((prev) => ({
+            active: true,
+            lastLevel: Number(level.toFixed(4)),
+            lastSentAt: now,
+            lastHeardAt: level > 0.003 ? now : prev.lastHeardAt,
+          }))
+        }
 
         socket.emit('transcription:audio', {
           sessionId,
@@ -3497,8 +3569,6 @@ const ControlPage = () => {
   }
   const transcriptionStatusLabel =
     transcriptionStatusLabelMap[transcription.status] || transcription.status
-  const transcriptionBusy =
-    transcription.active || transcription.status === 'connecting'
   const speakerRecognitionEnabled =
     transcription.speakerRecognitionEnabled === true
   const currentLineMusicActive = isLineMarkedMusic(currentLine)
@@ -4166,12 +4236,22 @@ const ControlPage = () => {
                 {autoFollowConfidenceLabel && (
                   <span>{autoFollowConfidenceLabel}</span>
                 )}
+                <span>{audioBriefLabel}</span>
                 {autoFollow.lastCandidateText && (
                   <span className="auto-follow-candidate">
                     {autoFollow.lastCandidateText}
                   </span>
                 )}
               </div>
+            )}
+            {audioDiagnosticsVisible && (
+              <button
+                type="button"
+                className="subtle-button audio-diagnostics-toggle"
+                onClick={() => setAudioDiagnosticsOpen((prev) => !prev)}
+              >
+                {audioDiagnosticsOpen ? '收合診斷' : '收音診斷'}
+              </button>
             )}
             <button
               type="button"
@@ -4232,6 +4312,42 @@ const ControlPage = () => {
           >
             {status.message}
           </div>
+          {audioDiagnosticsVisible && audioDiagnosticsOpen && (
+            <div className="audio-diagnostics-panel">
+              <div>
+                <span>前端麥克風</span>
+                <strong>{micDiagnostics.active ? '已啟動' : '未啟動'}</strong>
+              </div>
+              <div>
+                <span>前端音量</span>
+                <strong>{micLevelLabel}</strong>
+              </div>
+              <div>
+                <span>前端送出</span>
+                <strong>{formatRelativeSeconds(micDiagnostics.lastSentAt)}</strong>
+              </div>
+              <div>
+                <span>後端音訊</span>
+                <strong>{formatRelativeSeconds(autoFollow.lastAudioAt)}</strong>
+              </div>
+              <div>
+                <span>後端音量</span>
+                <strong>{backendLevelLabel}</strong>
+              </div>
+              <div>
+                <span>觸發門檻</span>
+                <strong>{autoFollowTriggerThreshold.toFixed(3)}</strong>
+              </div>
+              <div>
+                <span>最近觸發</span>
+                <strong>{formatRelativeSeconds(autoFollow.lastOnsetAt)}</strong>
+              </div>
+              <div>
+                <span>辨識狀態</span>
+                <strong>{transcriptionStatusLabel}</strong>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="script-list">

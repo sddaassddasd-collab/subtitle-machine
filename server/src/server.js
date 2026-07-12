@@ -7037,6 +7037,7 @@ function createAutoFollowState() {
     started: false,
     waitingForRelease: false,
     lastAudioLevel: 0,
+    lastAudioAt: null,
     lastOnsetAt: null,
     lastAdvancedAt: null,
     lastVerifiedAt: null,
@@ -7081,6 +7082,9 @@ function getPublicAutoFollowState(session) {
     lastAudioLevel: Number.isFinite(state.lastAudioLevel)
       ? Number(state.lastAudioLevel.toFixed(4))
       : 0,
+    lastAudioAt: state.lastAudioAt,
+    triggerThreshold: AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD,
+    releaseThreshold: AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD,
     lastOnsetAt: state.lastOnsetAt,
     lastAdvancedAt: state.lastAdvancedAt,
     lastVerifiedAt: state.lastVerifiedAt,
@@ -7252,6 +7256,7 @@ function handleAutoFollowAudioLevel(sessionId, level) {
   const listeningPatch = {
     listening: true,
     lastAudioLevel: normalizedLevel,
+    lastAudioAt: now,
     status:
       state.status === AUTO_FOLLOW_STATUS.IDLE
         ? AUTO_FOLLOW_STATUS.LISTENING

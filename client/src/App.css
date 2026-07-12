@@ -569,6 +569,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  flex-wrap: wrap;
   padding: 0.65rem;
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.72);
@@ -1234,6 +1235,42 @@
   overflow: hidden;
   max-width: 10rem;
   color: #e2e8f0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-diagnostics-toggle {
+  min-height: 2.35rem;
+}
+
+.audio-diagnostics-panel {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.audio-diagnostics-panel div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.audio-diagnostics-panel span {
+  color: #94a3b8;
+  font-size: 0.74rem;
+}
+
+.audio-diagnostics-panel strong {
+  overflow: hidden;
+  color: #e2e8f0;
+  font-size: 0.92rem;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
