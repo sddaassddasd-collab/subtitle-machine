@@ -2153,6 +2153,28 @@ function extractRoleFromDialogueText(text) {
   };
 }
 
+function extractStandaloneRoleMarker(text) {
+  const sanitized = sanitizeLineText(text);
+  if (!sanitized) return null;
+
+  const colonIndex = Math.max(sanitized.indexOf('：'), sanitized.indexOf(':'));
+  if (colonIndex < 1 || colonIndex !== sanitized.length - 1 || colonIndex > 12) {
+    return null;
+  }
+
+  const rawRole = sanitized.slice(0, colonIndex).trim();
+  if (
+    !rawRole ||
+    /[，。！？!?「」『』（）()]/u.test(rawRole) ||
+    /\s{2,}/u.test(rawRole) ||
+    isLikelyDirection(rawRole)
+  ) {
+    return null;
+  }
+
+  return normalizeRoleName(rawRole);
+}
+
 function normalizeTranslationsMap(
   rawTranslations,
   primaryLanguageId = 'primary',
@@ -4161,6 +4183,12 @@ function buildAnnotatedLinesFromUnits(units, annotations, previousRole = null) {
   annotations.forEach((annotation) => {
     const unit = unitById.get(annotation.id);
     if (!unit) return;
+
+    const standaloneRole = extractStandaloneRoleMarker(unit.text);
+    if (standaloneRole) {
+      activeRole = standaloneRole;
+      return;
+    }
 
     const type = normalizeAnnotationType(annotation.type, unit.text);
     const extracted =
