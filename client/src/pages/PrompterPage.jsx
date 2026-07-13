@@ -103,7 +103,7 @@ const PrompterPage = () => {
         ? data.reason.trim()
         : ''
     const message =
-      data?.error || data?.message || fallbackMessage || '無法載入題詞'
+      data?.error || data?.message || fallbackMessage || '無法載入提詞'
     const isTerminalReason = reason === 'ended' || reason === 'deleted'
     const fatal =
       isTerminalReason ||
@@ -114,7 +114,7 @@ const PrompterPage = () => {
 
   useEffect(() => {
     if (!resolvedViewerToken) {
-      setFatalError('缺少題詞頁連結')
+      setFatalError('缺少提詞頁連結')
       return
     }
 
@@ -124,7 +124,7 @@ const PrompterPage = () => {
         const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
-          const failure = classifyPublicFailure(response, data, '無法載入題詞')
+          const failure = classifyPublicFailure(response, data, '無法載入提詞')
           if (cancelled) return
           if (failure.fatal) {
             setFatalError(failure.message)
@@ -138,7 +138,7 @@ const PrompterPage = () => {
         }
       } catch (fetchError) {
         if (!cancelled) {
-          setConnectionIssue(fetchError.message || '無法載入題詞')
+          setConnectionIssue(fetchError.message || '無法載入提詞')
         }
       }
     }
@@ -172,7 +172,7 @@ const PrompterPage = () => {
         const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
-          const failure = classifyPublicFailure(response, data, '無法載入題詞')
+          const failure = classifyPublicFailure(response, data, '無法載入提詞')
           if (failure.fatal) {
             setFatalError(failure.message)
           } else {
@@ -320,7 +320,7 @@ const PrompterPage = () => {
     return (
       <div className="prompter-page">
         <div className="no-session">
-          <h2>無法載入題詞</h2>
+          <h2>無法載入提詞</h2>
           <p>{fatalError}</p>
         </div>
       </div>

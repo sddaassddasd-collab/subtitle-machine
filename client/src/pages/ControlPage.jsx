@@ -3230,11 +3230,11 @@ const ControlPage = () => {
     if (!prompterUrl) return
     try {
       await navigator.clipboard.writeText(prompterUrl)
-      setStatus({ kind: 'success', message: '題詞頁網址已複製' })
+      setStatus({ kind: 'success', message: '提詞頁網址已複製' })
     } catch {
       setStatus({
         kind: 'error',
-        message: '無法複製，請手動複製題詞頁網址',
+        message: '無法複製，請手動複製提詞頁網址',
       })
     }
   }
@@ -3828,7 +3828,7 @@ const ControlPage = () => {
                 <div className="viewer-link viewer-link-secondary">
                   <span>{prompterUrl || '尚未載入工作區'}</span>
                   <button type="button" onClick={handleCopyPrompterLink}>
-                    複製題詞頁
+                    複製提詞頁
                   </button>
                 </div>
                 {viewerShareUrl && (
