@@ -4,6 +4,7 @@ import { io } from 'socket.io-client'
 import {
   normalizeDisplayPayload,
   resolveAvailableLanguageId,
+  resolveLanguageDisplayList,
   resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
@@ -15,6 +16,7 @@ const MAX_VIEWER_FONT_PERCENT = 180
 const VIEWER_FONT_STEP = 10
 const PUBLIC_STATE_REFRESH_INTERVAL_MS = 15000
 const PUBLIC_RECOVERY_RETRY_DELAY_MS = 1200
+const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 
 const getInitialViewerFontPercent = () => {
   if (typeof window === 'undefined') return DEFAULT_VIEWER_FONT_PERCENT
@@ -208,7 +210,7 @@ const ViewerPage = () => {
       const message =
         typeof payload?.message === 'string' && payload.message.trim()
           ? payload.message.trim()
-          : '本場次已結束'
+          : '本節目已結束'
 
       if (reason === 'ended' || reason === 'deleted' || !hasLoadedStateRef.current) {
         setFatalError(message)
@@ -232,9 +234,9 @@ const ViewerPage = () => {
       languages,
       viewerDefaultLanguageId,
     )
-    const selectedLanguageStillAvailable = languages.some(
-      (language) => language.id === selectedLanguageId,
-    )
+    const selectedLanguageStillAvailable =
+      selectedLanguageId === ALL_LANGUAGES_OPTION_ID ||
+      languages.some((language) => language.id === selectedLanguageId)
 
     if (!hasLanguageOverride) {
       if (selectedLanguageId !== fallbackLanguageId) {
@@ -306,7 +308,15 @@ const ViewerPage = () => {
   const displayText = displayEnabled
     ? isStageDirection
       ? '\u00a0'
-      : resolveLineText(line, selectedLanguageId)
+      : selectedLanguageId === ALL_LANGUAGES_OPTION_ID
+        ? resolveLanguageDisplayList(languages, viewerDefaultLanguageId, 'all')
+            .map((language) => ({
+              id: language.id,
+              name: language.name,
+              text: resolveLineText(line, language.id),
+            }))
+            .filter((entry) => entry.text.trim())
+        : resolveLineText(line, selectedLanguageId)
     : '\u00a0'
 
   const textClass = `viewer-text${
@@ -322,7 +332,9 @@ const ViewerPage = () => {
   }`
   const viewerFontScale = viewerFontPercent / 100
   const selectedLanguageName =
-    languages.find((language) => language.id === selectedLanguageId)?.name || '語言'
+    selectedLanguageId === ALL_LANGUAGES_OPTION_ID
+      ? '全部語言'
+      : languages.find((language) => language.id === selectedLanguageId)?.name || '語言'
 
   return (
     <div
@@ -366,6 +378,7 @@ const ViewerPage = () => {
               }}
               aria-label="切換語言"
             >
+              <option value={ALL_LANGUAGES_OPTION_ID}>全部語言</option>
               {languages.map((language) => (
                 <option key={language.id} value={language.id}>
                   {language.name}
@@ -434,7 +447,14 @@ const ViewerPage = () => {
         </div>
       ) : (
         <div className={textClass} style={roleColor ? { color: roleColor } : undefined}>
-          {displayText}
+          {Array.isArray(displayText)
+            ? displayText.map((entry) => (
+                <div key={entry.id} className="viewer-language-line">
+                  <span>{entry.name}</span>
+                  <strong>{entry.text}</strong>
+                </div>
+              ))
+            : displayText}
         </div>
       )}
     </div>

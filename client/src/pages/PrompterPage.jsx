@@ -217,7 +217,7 @@ const PrompterPage = () => {
       const message =
         typeof payload?.message === 'string' && payload.message.trim()
           ? payload.message.trim()
-          : '本場次已結束'
+          : '本節目已結束'
 
       if (
         reason === 'ended' ||

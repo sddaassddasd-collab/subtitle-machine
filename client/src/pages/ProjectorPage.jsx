@@ -7,6 +7,7 @@ import {
   normalizeProjectorLayout,
   normalizeProjectorRevision,
   resolveAvailableLanguageId,
+  resolveLanguageDisplayList,
   resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
@@ -32,6 +33,7 @@ const ProjectorPage = () => {
   const [lineSource, setLineSource] = useState('script')
   const [languages, setLanguages] = useState([])
   const [projectorLanguageId, setProjectorLanguageId] = useState('primary')
+  const [projectorLanguageMode, setProjectorLanguageMode] = useState('single')
   const [layout, setLayout] = useState(DEFAULT_PROJECTOR_LAYOUT)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [, setFatalError] = useState('')
@@ -137,6 +139,7 @@ const ProjectorPage = () => {
       setProjectorLanguageId(
         resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
       )
+      setProjectorLanguageMode(next.languageMode)
       applyProjectorLayoutPayload(next.layout, next.revision)
       setRoleColorEnabled(next.roleColorEnabled)
       hasLoadedStateRef.current = true
@@ -315,7 +318,7 @@ const ProjectorPage = () => {
       const message =
         typeof payload?.message === 'string' && payload.message.trim()
           ? payload.message.trim()
-          : '本場次已結束'
+          : '本節目已結束'
       reportProjectorStatus({
         level: 'error',
         code: reason || 'expired',
@@ -503,11 +506,18 @@ const ProjectorPage = () => {
     line &&
     line.type !== 'direction'
   const scriptText = shouldRenderScriptText
-    ? resolveLineText(
-        line,
+    ? resolveLanguageDisplayList(
+        languages,
         resolveAvailableLanguageId(languages, projectorLanguageId),
-      ) || ''
-    : ''
+        projectorLanguageMode,
+      )
+        .map((language) => ({
+          id: language.id,
+          name: language.name,
+          text: resolveLineText(line, language.id),
+        }))
+        .filter((entry) => entry.text.trim())
+    : []
   const scriptTextColor =
     roleColorEnabled && shouldRenderScriptText ? roleToColor(line?.role) : ''
   const entries =
@@ -548,10 +558,21 @@ const ProjectorPage = () => {
             </div>
           ) : (
             <div
-              className="projector-text"
+              className={`projector-text${
+                scriptText.length > 1 ? ' projector-text-stack' : ''
+              }`}
               style={scriptTextColor ? { color: scriptTextColor } : undefined}
             >
-              {scriptText}
+              {scriptText.length > 0
+                ? scriptText.map((entry) => (
+                    <div key={entry.id} className="projector-language-line">
+                      {scriptText.length > 1 && (
+                        <span>{entry.name}</span>
+                      )}
+                      <strong>{entry.text}</strong>
+                    </div>
+                  ))
+                : ''}
             </div>
           )}
         </div>

@@ -183,7 +183,7 @@ const AdminPage = () => {
 
       setUsers((prev) => prev.filter((user) => user.id !== targetUser.id))
       setNotice(
-        `已刪除帳號，並移除 ${data?.removedSessionCount ?? 0} 個場次`,
+        `已刪除帳號，並移除 ${data?.removedSessionCount ?? 0} 個節目`,
       )
     } catch (deleteError) {
       setError(deleteError.message || '刪除帳號失敗')
@@ -341,8 +341,8 @@ const AdminPage = () => {
 
               <div className="admin-user-meta">
                 <span>帳號 ID：{account.id}</span>
-                <span>場次數：{account.sessionCount || 0}</span>
-                <span>{account.canManageSessions ? '可管理場次' : '不可管理場次'}</span>
+                <span>節目數：{account.sessionCount || 0}</span>
+                <span>{account.canManageSessions ? '可管理節目' : '不可管理節目'}</span>
               </div>
 
               {account.passwordReset && (

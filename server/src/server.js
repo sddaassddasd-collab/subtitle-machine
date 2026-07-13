@@ -167,6 +167,11 @@ const PROJECTOR_DISPLAY_MODES = Object.freeze({
   SCRIPT: 'script',
   TRANSCRIPTION: 'transcription',
 });
+const PROJECTOR_LANGUAGE_MODES = Object.freeze({
+  SINGLE: 'single',
+  BILINGUAL: 'bilingual',
+  ALL: 'all',
+});
 const SUBTITLE_CONTROL_MODES = Object.freeze({
   MANUAL: 'manual',
   AUTO: 'auto',
@@ -824,6 +829,16 @@ function normalizeProjectorDisplayMode(rawMode) {
     : PROJECTOR_DISPLAY_MODES.SCRIPT;
 }
 
+function normalizeProjectorLanguageMode(rawMode) {
+  if (rawMode === PROJECTOR_LANGUAGE_MODES.BILINGUAL) {
+    return PROJECTOR_LANGUAGE_MODES.BILINGUAL;
+  }
+  if (rawMode === PROJECTOR_LANGUAGE_MODES.ALL) {
+    return PROJECTOR_LANGUAGE_MODES.ALL;
+  }
+  return PROJECTOR_LANGUAGE_MODES.SINGLE;
+}
+
 function normalizeSubtitleControlMode(rawMode) {
   return rawMode === SUBTITLE_CONTROL_MODES.AUTO
     ? SUBTITLE_CONTROL_MODES.AUTO
@@ -1353,7 +1368,7 @@ function requireSessionManager(req, res, next) {
     return res.status(401).json({ error: '請先登入' });
   }
   if (!canManageSessions(req.authUser)) {
-    return res.status(403).json({ error: '目前權限無法管理控制端場次' });
+    return res.status(403).json({ error: '目前權限無法管理控制端節目' });
   }
   return next();
 }
@@ -1475,7 +1490,7 @@ function getPublicSessionUnavailablePayload(
   const roleLabel = role === 'projector' ? '投影端' : '檢視端';
 
   if (reason === 'deleted') {
-    const message = `本場次已被移除，${roleLabel}已失效`;
+    const message = `本節目已被移除，${roleLabel}已失效`;
     return {
       reason: 'deleted',
       message,
@@ -1484,7 +1499,7 @@ function getPublicSessionUnavailablePayload(
   }
 
   if (session && session.status === 'ended') {
-    const message = `本場次已結束，${roleLabel}已失效`;
+    const message = `本節目已結束，${roleLabel}已失效`;
     return {
       reason: 'ended',
       message,
@@ -1500,7 +1515,7 @@ function getPublicSessionUnavailablePayload(
     const message =
       typeof tombstone.message === 'string' && tombstone.message.trim()
         ? tombstone.message.trim()
-        : `本場次已被移除，${roleLabel}已失效`;
+        : `本節目已被移除，${roleLabel}已失效`;
     return {
       reason:
         typeof tombstone.reason === 'string' && tombstone.reason.trim()
@@ -1513,7 +1528,7 @@ function getPublicSessionUnavailablePayload(
 
   if (!session && IS_PRODUCTION && PERSISTENCE_BACKEND !== 'postgres') {
     const message =
-      '場次不存在；若剛發生服務重啟或重新部署，且未使用資料庫保存場次，資料可能已遺失';
+      '節目不存在；若剛發生服務重啟或重新部署，且未使用資料庫保存節目，資料可能已遺失';
     return {
       reason: 'storage_lost',
       message,
@@ -1521,7 +1536,7 @@ function getPublicSessionUnavailablePayload(
     };
   }
 
-  const message = '場次不存在';
+  const message = '節目不存在';
   return {
     reason: 'missing',
     message,
@@ -3322,7 +3337,7 @@ function createCellDefinition(
   primaryLanguageId = 'primary',
   languages = [],
 ) {
-  const name = sanitizeLineText(rawCell.name || `儲存格 ${index + 1}`).slice(0, 48);
+  const name = sanitizeLineText(rawCell.name || `場次 ${index + 1}`).slice(0, 48);
   const rawLines = Array.isArray(rawCell.lines) ? rawCell.lines : [];
 
   return {
@@ -3330,7 +3345,7 @@ function createCellDefinition(
       typeof rawCell.id === 'string' && rawCell.id.trim()
         ? rawCell.id.trim()
         : generateId('cell'),
-    name: name || `儲存格 ${index + 1}`,
+    name: name || `場次 ${index + 1}`,
     lines: normalizeScriptLines(rawLines, {
       keepEmpty: true,
       primaryLanguageId,
@@ -3352,6 +3367,81 @@ function getSelectedCell(session) {
       ? session.cells.find((cell) => cell.id === session.selectedCellId)
       : null;
   return selected || session.cells[0] || null;
+}
+
+function normalizeRoleName(rawRole) {
+  return sanitizeLineText(rawRole || '').slice(0, 48);
+}
+
+function collectSessionRoleNames(session) {
+  const roles = new Set();
+  if (Array.isArray(session?.roles)) {
+    session.roles.forEach((role) => {
+      const normalizedRole = normalizeRoleName(role);
+      if (normalizedRole) roles.add(normalizedRole);
+    });
+  }
+  if (Array.isArray(session?.cells)) {
+    session.cells.forEach((cell) => {
+      if (!Array.isArray(cell?.lines)) return;
+      cell.lines.forEach((line) => {
+        if (!line || typeof line !== 'object' || line.type === LINE_TYPES.DIRECTION) {
+          return;
+        }
+        const normalizedRole = normalizeRoleName(line.role);
+        if (normalizedRole) roles.add(normalizedRole);
+      });
+    });
+  }
+  return Array.from(roles).sort((left, right) => left.localeCompare(right, 'zh-Hant'));
+}
+
+function ensureSessionRoles(session) {
+  if (!session || typeof session !== 'object') return [];
+  session.roles = collectSessionRoleNames(session);
+  return session.roles;
+}
+
+function renameSessionRole(session, previousRole, nextRole) {
+  const oldName = normalizeRoleName(previousRole);
+  const newName = normalizeRoleName(nextRole);
+  if (!oldName || !newName) return false;
+
+  if (Array.isArray(session?.cells)) {
+    session.cells.forEach((cell) => {
+      if (!Array.isArray(cell?.lines)) return;
+      cell.lines.forEach((line) => {
+        if (line && typeof line === 'object' && normalizeRoleName(line.role) === oldName) {
+          line.role = newName;
+        }
+      });
+    });
+  }
+
+  session.roles = collectSessionRoleNames({
+    ...session,
+    roles: [...(Array.isArray(session.roles) ? session.roles : []), newName],
+  }).filter((role) => role !== oldName);
+  return true;
+}
+
+function deleteSessionRole(session, roleName) {
+  const targetRole = normalizeRoleName(roleName);
+  if (!targetRole) return false;
+
+  if (Array.isArray(session?.cells)) {
+    session.cells.forEach((cell) => {
+      if (!Array.isArray(cell?.lines)) return;
+      cell.lines.forEach((line) => {
+        if (line && typeof line === 'object' && normalizeRoleName(line.role) === targetRole) {
+          line.role = null;
+        }
+      });
+    });
+  }
+
+  session.roles = collectSessionRoleNames(session).filter((role) => role !== targetRole);
+  return true;
 }
 
 function syncSelectedCellLines(session) {
@@ -3391,6 +3481,7 @@ function captureSessionSnapshot(session) {
   return JSON.parse(
     JSON.stringify({
       languages: session.languages,
+      roles: session.roles,
       cells: session.cells,
       selectedCellId: session.selectedCellId,
       currentIndex: session.currentIndex,
@@ -3401,6 +3492,7 @@ function captureSessionSnapshot(session) {
       viewerDefaultLanguageId: session.viewerDefaultLanguageId,
       projectorDefaultLanguageId: session.projectorDefaultLanguageId,
       projectorDisplayMode: session.projectorDisplayMode,
+      projectorLanguageMode: session.projectorLanguageMode,
       status: session.status,
       endedAt: session.endedAt || null,
     }),
@@ -3421,6 +3513,7 @@ function restoreSessionSnapshot(session, snapshot) {
   session.languages = Array.isArray(snapshot.languages)
     ? snapshot.languages
     : session.languages;
+  session.roles = Array.isArray(snapshot.roles) ? snapshot.roles : session.roles;
   session.cells = Array.isArray(snapshot.cells) ? snapshot.cells : session.cells;
   session.selectedCellId =
     typeof snapshot.selectedCellId === 'string'
@@ -3445,6 +3538,9 @@ function restoreSessionSnapshot(session, snapshot) {
       : session.projectorDefaultLanguageId;
   session.projectorDisplayMode = normalizeProjectorDisplayMode(
     snapshot.projectorDisplayMode || session.projectorDisplayMode,
+  );
+  session.projectorLanguageMode = normalizeProjectorLanguageMode(
+    snapshot.projectorLanguageMode || session.projectorLanguageMode,
   );
   session.status = snapshot.status === 'ended' ? 'ended' : 'active';
   session.endedAt =
@@ -3497,7 +3593,7 @@ function ensureSessionStructure(session) {
       : session.ownerUserId || '';
   session.title =
     sanitizeLineText(session.title || '') ||
-    `場次 ${new Date(createdAt).toLocaleString('zh-TW', {
+    `節目 ${new Date(createdAt).toLocaleString('zh-TW', {
       hour12: false,
     })}`;
   session.viewerToken =
@@ -3526,6 +3622,9 @@ function ensureSessionStructure(session) {
   session.projectorDisplayMode = normalizeProjectorDisplayMode(
     session.projectorDisplayMode,
   );
+  session.projectorLanguageMode = normalizeProjectorLanguageMode(
+    session.projectorLanguageMode,
+  );
   session.projectorRevision = normalizeProjectorRevision(session.projectorRevision);
   ensureProjectorStatus(session);
 
@@ -3546,7 +3645,7 @@ function ensureSessionStructure(session) {
       : [
           {
             id: generateId('cell'),
-            name: '儲存格 1',
+            name: '場次 1',
             lines: Array.isArray(session.lines) ? session.lines : [],
           },
         ];
@@ -3554,6 +3653,7 @@ function ensureSessionStructure(session) {
   session.cells = rawCells.map((cell, index) =>
     createCellDefinition(cell, index, primaryLanguageId, session.languages),
   );
+  ensureSessionRoles(session);
 
   const selectedCell = getSelectedCell(session);
   session.selectedCellId = selectedCell?.id || session.cells[0].id;
@@ -3589,9 +3689,11 @@ function createSessionRecord(ownerUserId) {
     projectorDefaultLanguageId: 'primary',
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
     projectorDisplayMode: PROJECTOR_DISPLAY_MODES.SCRIPT,
+    projectorLanguageMode: PROJECTOR_LANGUAGE_MODES.SINGLE,
     projectorRevision: 0,
     projectorStatus: { ...DEFAULT_PROJECTOR_STATUS },
     languages: [createLanguageDefinition({}, 0)],
+    roles: [],
     selectedCellId: null,
     currentIndex: 0,
     subtitleControlMode: SUBTITLE_CONTROL_MODES.MANUAL,
@@ -3604,7 +3706,7 @@ function createGlobalSessionRecord(ownerUserId = SHARED_ACCESS_USER_ID) {
   session.id = DEFAULT_SESSION_ID;
   session.ownerUserId = ownerUserId || SHARED_ACCESS_USER_ID;
   if (!sanitizeLineText(session.title || '')) {
-    session.title = '全域字幕工作區';
+    session.title = '全域字幕節目';
   }
   return ensureSessionStructure(session);
 }
@@ -3635,7 +3737,7 @@ function collapseToGlobalSession() {
 
   nextSession.id = DEFAULT_SESSION_ID;
   if (!sanitizeLineText(nextSession.title || '')) {
-    nextSession.title = '全域字幕工作區';
+    nextSession.title = '全域字幕節目';
   }
   clearPublicSessionTombstones(nextSession);
   sessions.clear();
@@ -3663,6 +3765,7 @@ function serializeSessionForStorage(session) {
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorLayout: normalized.projectorLayout,
     projectorDisplayMode: normalized.projectorDisplayMode,
+    projectorLanguageMode: normalized.projectorLanguageMode,
     projectorRevision: normalized.projectorRevision,
     projectorStatus: normalized.projectorStatus,
     selectedCellId: normalized.selectedCellId,
@@ -3674,6 +3777,7 @@ function serializeSessionForStorage(session) {
       code: language.code,
       isPrimary: language.isPrimary === true,
     })),
+    roles: normalized.roles,
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
@@ -3719,7 +3823,7 @@ function getSessionBackupSource(payload) {
     return payload;
   }
 
-  throw new Error('備份檔內沒有可還原的場次資料');
+  throw new Error('備份檔內沒有可還原的節目資料');
 }
 
 function resolveImportedSessionOwnerUserId(rawOwnerUserId, authUser) {
@@ -3745,7 +3849,7 @@ function createImportedSessionFromBackup(payload, authUser) {
     typeof rawSession.id !== 'string' ||
     rawSession.id.trim().length === 0
   ) {
-    throw new Error('備份檔缺少場次 ID，無法保留原本場次');
+    throw new Error('備份檔缺少節目 ID，無法保留原本節目');
   }
 
   rawSession.ownerUserId = resolveImportedSessionOwnerUserId(
@@ -3763,22 +3867,22 @@ function createImportedSessionFromBackup(payload, authUser) {
 
 function validateImportedSessionConflict(session) {
   if (sessions.has(session.id)) {
-    throw new Error('相同場次 ID 已存在，無法匯入此備份');
+    throw new Error('相同節目 ID 已存在，無法匯入此備份');
   }
 
   const viewerTokenSession = getSessionByViewerToken(session.viewerToken);
   if (viewerTokenSession) {
-    throw new Error('viewer 連結已被其他場次使用，無法還原此備份');
+    throw new Error('viewer 連結已被其他節目使用，無法還原此備份');
   }
 
   const viewerAliasSession = getSessionByViewerAlias(session.viewerAlias);
   if (session.viewerAlias && viewerAliasSession) {
-    throw new Error('檢視端入口名稱已被其他場次使用，無法還原此備份');
+    throw new Error('檢視端入口名稱已被其他節目使用，無法還原此備份');
   }
 
   const projectorTokenSession = getSessionByProjectorToken(session.projectorToken);
   if (projectorTokenSession) {
-    throw new Error('projector 連結已被其他場次使用，無法還原此備份');
+    throw new Error('projector 連結已被其他節目使用，無法還原此備份');
   }
 }
 
@@ -6497,6 +6601,7 @@ function getSessionSummary(session) {
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorDisplayMode: normalized.projectorDisplayMode,
+    projectorLanguageMode: normalized.projectorLanguageMode,
     projectorRevision: normalized.projectorRevision,
     projectorStatus: getPublicProjectorStatus(normalized),
     cells: normalized.cells.map((cell) => ({
@@ -6505,6 +6610,7 @@ function getSessionSummary(session) {
       lineCount: Array.isArray(cell.lines) ? cell.lines.length : 0,
     })),
     languages: normalized.languages,
+    roles: normalized.roles,
   };
 }
 
@@ -6530,6 +6636,7 @@ function getControlPayload(session) {
       token: normalized.projectorToken,
       layout: normalized.projectorLayout,
       displayMode: normalized.projectorDisplayMode,
+      languageMode: normalized.projectorLanguageMode,
       revision: normalized.projectorRevision,
     },
     transcription: getPublicTranscriptionState(normalized),
@@ -6574,7 +6681,7 @@ function buildVerifiedControlPayloadAfterLineWrite(
       payloadLineCount <= 0)
   ) {
     const error = new Error(
-      `${operationLabel}完成，但字幕沒有成功寫入目前字幕本`,
+      `${operationLabel}完成，但字幕沒有成功寫入目前場次`,
     );
     error.code = 'LINES_NOT_PERSISTED';
     error.diagnostics = diagnostics;
@@ -6739,6 +6846,9 @@ function getProjectorPayload(session) {
   const projectorDisplayMode = normalizeProjectorDisplayMode(
     normalized.projectorDisplayMode,
   );
+  const projectorLanguageMode = normalizeProjectorLanguageMode(
+    normalized.projectorLanguageMode,
+  );
 
   if (!normalized.displayEnabled) {
     return {
@@ -6758,6 +6868,7 @@ function getProjectorPayload(session) {
       source: 'hidden',
       layout: normalized.projectorLayout,
       displayMode: projectorDisplayMode,
+      languageMode: projectorLanguageMode,
       revision: normalized.projectorRevision,
       transcription,
     };
@@ -6785,6 +6896,7 @@ function getProjectorPayload(session) {
         source: 'transcription',
         layout: normalized.projectorLayout,
         displayMode: projectorDisplayMode,
+        languageMode: projectorLanguageMode,
         revision: normalized.projectorRevision,
         transcription,
       };
@@ -6811,6 +6923,7 @@ function getProjectorPayload(session) {
     source: 'script',
     layout: normalized.projectorLayout,
     displayMode: projectorDisplayMode,
+    languageMode: projectorLanguageMode,
     revision: normalized.projectorRevision,
     transcription,
   };
@@ -8581,7 +8694,7 @@ async function alignSecondaryLanguageWithOpenAI({
 
 function getOwnedSessionFromRequest(req, res) {
   if (!canManageSessions(req.authUser)) {
-    res.status(403).json({ error: '目前權限無法管理控制端場次' });
+    res.status(403).json({ error: '目前權限無法管理控制端節目' });
     return null;
   }
   const sessionId =
@@ -8591,7 +8704,7 @@ function getOwnedSessionFromRequest(req, res) {
   const userId = req.authUser?.id;
   const session = getOwnedSession(sessionId, userId);
   if (!session) {
-    res.status(404).json({ error: '找不到場次' });
+    res.status(404).json({ error: '找不到節目' });
     return null;
   }
   return session;
@@ -8942,7 +9055,7 @@ app.post('/api/session/import', requireSessionManager, (req, res) => {
     res.status(201).json(getControlPayload(session));
   } catch (error) {
     res.status(400).json({
-      error: error?.message || '匯入工作區備份失敗',
+      error: error?.message || '匯入節目備份失敗',
     });
   }
 });
@@ -8957,6 +9070,90 @@ app.get('/api/session/:sessionId/backup', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
   res.json(buildSessionBackupPayload(session));
+});
+
+app.put('/api/session/:sessionId/title', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const nextTitle = sanitizeLineText(req.body?.title || '').slice(0, 60);
+  if (!nextTitle) {
+    return res.status(400).json({ error: '請輸入節目名稱' });
+  }
+  if (session.title === nextTitle) {
+    return res.json(getControlPayload(session));
+  }
+
+  pushSessionHistory(session);
+  session.title = nextTitle;
+  persistSession(session);
+  broadcastControlState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.post('/api/session/:sessionId/roles', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const roleName = normalizeRoleName(req.body?.name);
+  if (!roleName) {
+    return res.status(400).json({ error: '請輸入角色名稱' });
+  }
+  if (session.roles.includes(roleName)) {
+    return res.json(getControlPayload(session));
+  }
+
+  pushSessionHistory(session);
+  session.roles = collectSessionRoleNames({
+    ...session,
+    roles: [...session.roles, roleName],
+  });
+  persistSession(session);
+  broadcastControlState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.put('/api/session/:sessionId/roles/:roleName', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const previousRole = normalizeRoleName(req.params.roleName);
+  const nextRole = normalizeRoleName(req.body?.name);
+  if (!previousRole || !session.roles.includes(previousRole)) {
+    return res.status(404).json({ error: '找不到角色' });
+  }
+  if (!nextRole) {
+    return res.status(400).json({ error: '請輸入角色名稱' });
+  }
+  if (previousRole === nextRole) {
+    return res.json(getControlPayload(session));
+  }
+
+  pushSessionHistory(session);
+  renameSessionRole(session, previousRole, nextRole);
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
+});
+
+app.delete('/api/session/:sessionId/roles/:roleName', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+
+  const roleName = normalizeRoleName(req.params.roleName);
+  if (!roleName || !session.roles.includes(roleName)) {
+    return res.status(404).json({ error: '找不到角色' });
+  }
+
+  pushSessionHistory(session);
+  deleteSessionRole(session, roleName);
+  syncSelectedCellLines(session);
+  persistSession(session);
+  broadcastControlState(session.id);
+  broadcastViewerState(session.id);
+  res.json(getControlPayload(session));
 });
 
 app.get('/api/session/:sessionId/viewer', requireAuth, (req, res) => {
@@ -9034,7 +9231,7 @@ app.put('/api/session/:sessionId/viewer-alias', requireAuth, (req, res) => {
   const aliasOwner = getSessionByViewerAlias(nextViewerAlias);
   if (aliasOwner && aliasOwner.id !== session.id) {
     return res.status(409).json({
-      error: '此檢視端入口名稱已被其他場次使用',
+      error: '此檢視端入口名稱已被其他節目使用',
     });
   }
 
@@ -9096,7 +9293,7 @@ app.post('/api/session/:sessionId/cells', requireAuth, (req, res) => {
   if (!session) return;
   pushSessionHistory(session);
   const cell = createCellDefinition(
-    { name: req.body?.name || `儲存格 ${session.cells.length + 1}` },
+    { name: req.body?.name || `場次 ${session.cells.length + 1}` },
     session.cells.length,
     getPrimaryLanguageId(session),
   );
@@ -9115,11 +9312,11 @@ app.put('/api/session/:sessionId/cells/:cellId', requireAuth, (req, res) => {
   if (!session) return;
   const cell = session.cells.find((entry) => entry.id === req.params.cellId);
   if (!cell) {
-    return res.status(404).json({ error: '找不到儲存格' });
+    return res.status(404).json({ error: '找不到場次' });
   }
   const nextName = sanitizeLineText(req.body?.name || '').slice(0, 48);
   if (!nextName) {
-    return res.status(400).json({ error: '請輸入儲存格名稱' });
+    return res.status(400).json({ error: '請輸入場次名稱' });
   }
   pushSessionHistory(session);
   cell.name = nextName;
@@ -9133,7 +9330,7 @@ app.post('/api/session/:sessionId/cells/:cellId/select', requireAuth, (req, res)
   if (!session) return;
   const cell = session.cells.find((entry) => entry.id === req.params.cellId);
   if (!cell) {
-    return res.status(404).json({ error: '找不到儲存格' });
+    return res.status(404).json({ error: '找不到場次' });
   }
   session.selectedCellId = cell.id;
   session.currentIndex = Math.min(session.currentIndex, Math.max(cell.lines.length - 1, 0));
@@ -9148,11 +9345,11 @@ app.delete('/api/session/:sessionId/cells/:cellId', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
   if (session.cells.length <= 1) {
-    return res.status(400).json({ error: '至少要保留一個儲存格' });
+    return res.status(400).json({ error: '至少要保留一個場次' });
   }
   const targetIndex = session.cells.findIndex((entry) => entry.id === req.params.cellId);
   if (targetIndex === -1) {
-    return res.status(404).json({ error: '找不到儲存格' });
+    return res.status(404).json({ error: '找不到場次' });
   }
   pushSessionHistory(session);
   session.cells.splice(targetIndex, 1);
@@ -9273,7 +9470,7 @@ app.post(
 
     const requestedCellId = req.params.cellId;
     if (!session.cells.some((entry) => entry.id === requestedCellId)) {
-      return res.status(404).json({ error: '找不到儲存格' });
+      return res.status(404).json({ error: '找不到場次' });
     }
 
     const language = session.languages.find(
@@ -9340,7 +9537,7 @@ app.post(
 
       const targetCell = session.cells.find((entry) => entry.id === requestedCellId);
       if (!targetCell) {
-        const missingCellError = new Error('解析完成，但找不到目前字幕本');
+        const missingCellError = new Error('解析完成，但找不到目前場次');
         missingCellError.code = 'CELL_NOT_FOUND_AFTER_PARSE';
         throw missingCellError;
       }
@@ -9404,7 +9601,7 @@ app.post(
     }
 
     if (!session.cells.some((entry) => entry.id === cellId)) {
-      return res.status(404).json({ error: '找不到儲存格' });
+      return res.status(404).json({ error: '找不到場次' });
     }
 
     const primaryLanguageCode = session.languages?.[0]?.code || '';
@@ -9446,7 +9643,7 @@ app.post(
 
       const targetCell = session.cells.find((entry) => entry.id === cellId);
       if (!targetCell) {
-        const missingCellError = new Error('解析完成，但找不到目前字幕本');
+        const missingCellError = new Error('解析完成，但找不到目前場次');
         missingCellError.code = 'CELL_NOT_FOUND_AFTER_PARSE';
         throw missingCellError;
       }
@@ -9496,7 +9693,7 @@ app.put('/api/session/:sessionId/lines', requireAuth, (req, res) => {
 
   const cell = session.cells.find((entry) => entry.id === cellId);
   if (!cell) {
-    return res.status(404).json({ error: '找不到儲存格' });
+    return res.status(404).json({ error: '找不到場次' });
   }
 
   pushSessionHistory(session);
@@ -9526,7 +9723,7 @@ app.delete('/api/session/:sessionId/lines', requireAuth, (req, res) => {
     typeof req.body?.cellId === 'string' ? req.body.cellId : session.selectedCellId;
   const cell = session.cells.find((entry) => entry.id === cellId);
   if (!cell) {
-    return res.status(404).json({ error: '找不到儲存格' });
+    return res.status(404).json({ error: '找不到場次' });
   }
 
   pushSessionHistory(session);
@@ -9975,7 +10172,7 @@ io.on('connection', (socket) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) {
       socket.emit('transcription:error', {
-        message: '無法存取此場次',
+        message: '無法存取此節目',
       });
       return;
     }
@@ -10051,7 +10248,7 @@ io.on('connection', (socket) => {
       const active = transcriptionStreams.get(sessionId);
       if (active && active.socketId !== socket.id) {
         socket.emit('transcription:error', {
-          message: '此場次已有其他控制端在進行語音辨識',
+          message: '此節目已有其他控制端在進行語音辨識',
         });
         return;
       }
@@ -10285,6 +10482,25 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
+  socket.on('setProjectorLanguageMode', ({ sessionId, languageMode }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+
+    const nextLanguageMode = normalizeProjectorLanguageMode(languageMode);
+    if (session.projectorLanguageMode === nextLanguageMode) {
+      return;
+    }
+
+    pushSessionHistory(session);
+    session.projectorLanguageMode = nextLanguageMode;
+    session.projectorRevision = normalizeProjectorRevision(
+      session.projectorRevision + 1,
+    );
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastProjectorState(sessionId);
+  });
+
   socket.on('setProjectorDisplayMode', ({ sessionId, displayMode }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
@@ -10474,6 +10690,7 @@ io.on('connection', (socket) => {
       },
       'primary',
     );
+    ensureSessionRoles(session);
 
     persistSession(session);
     broadcastControlState(sessionId);

@@ -53,11 +53,11 @@ const HomePage = () => {
       const response = await fetch('/api/sessions')
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '無法載入工作區')
+        throw new Error(data.error || '無法載入節目')
       }
       setSessions(Array.isArray(data?.sessions) ? data.sessions : [])
     } catch (loadError) {
-      setError(loadError.message || '無法載入工作區')
+      setError(loadError.message || '無法載入節目')
     } finally {
       setSessionsLoading(false)
     }
@@ -170,10 +170,10 @@ const HomePage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '匯入工作區備份失敗')
+        throw new Error(data.error || '匯入節目備份失敗')
       }
 
-      setNotice('工作區備份已匯入')
+      setNotice('節目備份已匯入')
       const nextSessionId = data?.sessionId || data?.session?.id
       if (nextSessionId) {
         navigate(`/control/${encodeURIComponent(nextSessionId)}`)
@@ -181,7 +181,7 @@ const HomePage = () => {
         await loadSessions()
       }
     } catch (importError) {
-      setError(importError.message || '匯入工作區備份失敗')
+      setError(importError.message || '匯入節目備份失敗')
     } finally {
       setImporting(false)
       if (backupInputRef.current) {
@@ -208,7 +208,7 @@ const HomePage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '建立工作區失敗')
+        throw new Error(data.error || '建立節目失敗')
       }
 
       const nextSessionId = data?.sessionId || data?.session?.id
@@ -217,10 +217,10 @@ const HomePage = () => {
         navigate(`/control/${encodeURIComponent(nextSessionId)}`)
       } else {
         await loadSessions()
-        setNotice('工作區已建立')
+        setNotice('節目已建立')
       }
     } catch (createError) {
-      setError(createError.message || '建立工作區失敗')
+      setError(createError.message || '建立節目失敗')
     } finally {
       setCreatingWorkspace(false)
     }
@@ -302,8 +302,8 @@ const HomePage = () => {
       <div className="dashboard-shell">
         <section className="dashboard-header-card">
           <div>
-            <h1>字幕工作區</h1>
-            <p>不同劇組、案子與使用者會使用各自的工作區，字幕資料互不影響。</p>
+            <h1>字幕節目</h1>
+            <p>不同劇組、案子與使用者會使用各自的節目，字幕資料互不影響。</p>
           </div>
           <div className="dashboard-actions">
             {user.role === 'admin' && (
@@ -327,8 +327,8 @@ const HomePage = () => {
 
         <section className="dashboard-settings-card">
           <div>
-            <h2>建立工作區</h2>
-            <p>每個工作區都有自己的字幕、語言、投影設定與分享連結。</p>
+            <h2>建立節目</h2>
+            <p>每個節目都有自己的場次、字幕、語言、角色、投影設定與分享連結。</p>
           </div>
           <form className="workspace-create-form" onSubmit={handleCreateWorkspace}>
             <input
@@ -345,11 +345,11 @@ const HomePage = () => {
 
         <section className="session-grid">
           {sessionsLoading && (
-            <article className="session-card empty">載入工作區中…</article>
+            <article className="session-card empty">載入節目中…</article>
           )}
           {!sessionsLoading && sessions.length === 0 && (
             <article className="session-card empty">
-              尚未建立工作區，請先建立第一個劇組或案子的工作區。
+              尚未建立節目，請先建立第一個劇組或案子的節目。
             </article>
           )}
           {!sessionsLoading &&
@@ -357,7 +357,7 @@ const HomePage = () => {
               <article key={session.id} className="session-card">
                 <div className="session-card-head">
                   <div>
-                    <h2>{session.title || '未命名工作區'}</h2>
+                    <h2>{session.title || '未命名節目'}</h2>
                     <p>
                       更新時間：
                       {session.updatedAt
@@ -376,7 +376,7 @@ const HomePage = () => {
                   </span>
                 </div>
                 <div className="session-card-meta">
-                  <span>{Array.isArray(session.cells) ? session.cells.length : 0} 個儲存格</span>
+                  <span>{Array.isArray(session.cells) ? session.cells.length : 0} 個場次</span>
                   <span>{Array.isArray(session.languages) ? session.languages.length : 0} 種語言</span>
                 </div>
                 <div className="session-card-actions">
@@ -395,9 +395,9 @@ const HomePage = () => {
 
         <section className="dashboard-settings-card">
           <div>
-            <h2>工作區備份</h2>
+            <h2>節目備份</h2>
             <p>
-              匯入備份會建立一份新的工作區副本，包含語言、儲存格、字幕內容與投影設定。
+              匯入備份會建立一份新的節目副本，包含語言、角色、場次、字幕內容與投影設定。
             </p>
           </div>
           <div className="dashboard-actions">
@@ -407,7 +407,7 @@ const HomePage = () => {
               onClick={() => backupInputRef.current?.click()}
               disabled={importing}
             >
-              {importing ? '匯入中…' : '匯入工作區備份 JSON'}
+              {importing ? '匯入中…' : '匯入節目備份 JSON'}
             </button>
             <input
               ref={backupInputRef}

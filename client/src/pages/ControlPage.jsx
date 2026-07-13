@@ -5,9 +5,12 @@ import { io } from 'socket.io-client'
 import {
   areProjectorLayoutsEqual,
   normalizeProjectorDisplayMode,
+  normalizeProjectorLanguageMode,
   normalizeProjectorLayout,
   normalizeProjectorRevision,
   PROJECTOR_DISPLAY_MODES,
+  PROJECTOR_LANGUAGE_MODES,
+  resolveLanguageDisplayList,
   resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
@@ -45,6 +48,7 @@ const ALLOWED_SCRIPT_PARSE_MODELS = new Set(
 )
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
 const PRIMARY_ONLY_OPTION_ID = '__primary_only__'
+const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 const NEW_ROLE_OPTION_ID = '__new_role__'
 const ALLOWED_TRANSCRIPTION_MODELS = new Set([
   'gpt-4o-transcribe',
@@ -864,6 +868,9 @@ const ControlPage = () => {
   const [projectorDisplayMode, setProjectorDisplayMode] = useState(
     PROJECTOR_DISPLAY_MODES.SCRIPT,
   )
+  const [projectorLanguageMode, setProjectorLanguageMode] = useState(
+    PROJECTOR_LANGUAGE_MODES.SINGLE,
+  )
   const [historyState, setHistoryState] = useState({
     canUndo: false,
     canRedo: false,
@@ -917,6 +924,7 @@ const ControlPage = () => {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
   const [viewerAliasInput, setViewerAliasInput] = useState('')
+  const [programTitleInput, setProgramTitleInput] = useState('')
   const [importingSessionBackup, setImportingSessionBackup] = useState(false)
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
@@ -1017,9 +1025,12 @@ const ControlPage = () => {
   const extraLanguages = languages.filter((language) => language.id !== 'primary')
   const comparisonLanguage =
     extraLanguages.find((language) => language.id === comparisonLanguageId) || null
-  const visibleLanguages = comparisonLanguage
-    ? [primaryLanguage, comparisonLanguage]
-    : [primaryLanguage]
+  const visibleLanguages =
+    comparisonLanguageId === ALL_LANGUAGES_OPTION_ID
+      ? languages
+      : comparisonLanguage
+        ? [primaryLanguage, comparisonLanguage]
+        : [primaryLanguage]
   const primaryLanguageName = primaryLanguage?.name || '第一語言'
   const selectedScriptParseModel =
     SCRIPT_PARSE_MODEL_OPTIONS.find((model) => model.id === scriptParseModel) ||
@@ -1028,6 +1039,9 @@ const ControlPage = () => {
     sessionMeta?.viewerDefaultLanguageId || languages[0]?.id || 'primary'
   const projectorDefaultLanguageId =
     sessionMeta?.projectorDefaultLanguageId || languages[0]?.id || 'primary'
+  const selectedProjectorLanguageMode = normalizeProjectorLanguageMode(
+    sessionMeta?.projectorLanguageMode || projectorLanguageMode,
+  )
   const musicEffectEnabled = sessionMeta?.musicEffectEnabled !== false
   const subtitleControlMode =
     sessionMeta?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
@@ -1081,6 +1095,12 @@ const ControlPage = () => {
           : '未收到聲音'
   const existingRoleOptions = useMemo(() => {
     const roles = new Set()
+    if (Array.isArray(sessionMeta?.roles)) {
+      sessionMeta.roles.forEach((role) => {
+        const normalizedRole = normalizeRoleInput(role)
+        if (normalizedRole) roles.add(normalizedRole)
+      })
+    }
     lines.forEach((line) => {
       if (!line || typeof line !== 'object' || line.type === 'direction') return
       const role = normalizeRoleInput(line.role)
@@ -1089,7 +1109,7 @@ const ControlPage = () => {
       }
     })
     return Array.from(roles).sort((left, right) => left.localeCompare(right, 'zh-Hant'))
-  }, [lines])
+  }, [lines, sessionMeta?.roles])
 
   const setDraftInputValue = (cellId, languageId, value) => {
     if (!cellId || !languageId) return
@@ -1181,6 +1201,10 @@ const ControlPage = () => {
     setViewerAliasInput(sessionMeta?.viewerAlias || '')
   }, [sessionMeta?.viewerAlias])
 
+  useEffect(() => {
+    setProgramTitleInput(sessionMeta?.title || '')
+  }, [sessionMeta?.title])
+
   useEffect(() => clearProjectorRepeat, [clearProjectorRepeat])
 
   useEffect(() => {
@@ -1218,6 +1242,9 @@ const ControlPage = () => {
     if (!projectorPayload || typeof projectorPayload !== 'object') return
     const nextLayout = normalizeProjectorLayout(projectorPayload?.layout)
     const nextDisplayMode = normalizeProjectorDisplayMode(projectorPayload?.displayMode)
+    const nextLanguageMode = normalizeProjectorLanguageMode(
+      projectorPayload?.languageMode,
+    )
     const nextRevision = normalizeProjectorRevision(projectorPayload?.revision)
 
     if (nextRevision < projectorRevisionRef.current) {
@@ -1245,6 +1272,7 @@ const ControlPage = () => {
     projectorDisplayModeDraftRef.current = nextDisplayMode
     setProjectorLayout(nextLayout)
     setProjectorDisplayMode(nextDisplayMode)
+    setProjectorLanguageMode(nextLanguageMode)
   }, [])
 
   const applySessionPayload = useCallback(
@@ -1465,7 +1493,10 @@ const ControlPage = () => {
       return
     }
 
-    if (comparisonLanguageId === PRIMARY_ONLY_OPTION_ID) {
+    if (
+      comparisonLanguageId === PRIMARY_ONLY_OPTION_ID ||
+      comparisonLanguageId === ALL_LANGUAGES_OPTION_ID
+    ) {
       return
     }
 
@@ -1573,7 +1604,7 @@ const ControlPage = () => {
       try {
         const response = await fetch(`/api/session/${sessionId}`)
         if (!response.ok) {
-          throw new Error('無法載入字幕工作區')
+          throw new Error('無法載入節目')
         }
         const data = await response.json()
         if (disposed) return
@@ -1582,7 +1613,7 @@ const ControlPage = () => {
         if (!disposed) {
           setStatus({
             kind: 'error',
-            message: error?.message || '無法載入字幕工作區',
+            message: error?.message || '無法載入節目',
           })
         }
       }
@@ -1686,7 +1717,7 @@ const ControlPage = () => {
     if (!sessionId) return
     const response = await fetch(`/api/session/${sessionId}`)
     if (!response.ok) {
-      throw new Error('無法重新載入字幕工作區')
+      throw new Error('無法重新載入節目')
     }
     const data = await response.json()
     applySessionPayload(data)
@@ -1855,6 +1886,28 @@ const ControlPage = () => {
     })
   }
 
+  const handleProjectorLanguageModeChange = (event) => {
+    if (!socketRef.current || !sessionId) return
+    const nextLanguageMode = normalizeProjectorLanguageMode(event.target.value)
+    socketRef.current.emit('setProjectorLanguageMode', {
+      sessionId,
+      languageMode: nextLanguageMode,
+    })
+    setProjectorLanguageMode(nextLanguageMode)
+    setSessionMeta((prev) =>
+      prev
+        ? {
+            ...prev,
+            projectorLanguageMode: nextLanguageMode,
+          }
+        : prev,
+    )
+    setStatus({
+      kind: 'info',
+      message: '投影端語言顯示模式已更新',
+    })
+  }
+
   const handleUndo = async () => {
     if (!sessionId || !historyState.canUndo) return
     await performSessionMutation(
@@ -2013,7 +2066,7 @@ const ControlPage = () => {
   const handleStartLiveTranscription = async (options = {}) => {
     const autoFollow = options.autoFollow === true
     if (!socketRef.current || !sessionId) {
-      setStatus({ kind: 'error', message: '尚未連上工作區，無法啟動語音辨識' })
+      setStatus({ kind: 'error', message: '尚未連上節目，無法啟動語音辨識' })
       return false
     }
 
@@ -2976,12 +3029,12 @@ const ControlPage = () => {
   const handleClearCurrentCellSubtitles = async () => {
     if (!sessionId || !selectedCellId || clearingSubtitles) return
     if (!lines.length) {
-      setStatus({ kind: 'info', message: '目前字幕本已經是空的' })
+      setStatus({ kind: 'info', message: '目前場次已經是空的' })
       return
     }
 
     const confirmed = window.confirm(
-      '確定要清空目前字幕本的所有字幕嗎？這會刪除已解析字幕 / cues，但不會刪除工作區或帳號。',
+      '確定要清空目前場次的所有字幕嗎？這會刪除已解析字幕 / cues，但不會刪除節目或帳號。',
     )
     if (!confirmed) return
 
@@ -2994,7 +3047,7 @@ const ControlPage = () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cellId: selectedCellId }),
           }),
-        { successMessage: '目前字幕本已清空' },
+        { successMessage: '目前場次已清空' },
       )
       setEditingCell(null)
       setRoleEditor(null)
@@ -3012,7 +3065,7 @@ const ControlPage = () => {
       const response = await fetch(`/api/session/${sessionId}/backup`)
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '匯出工作區備份失敗')
+        throw new Error(data.error || '匯出節目備份失敗')
       }
 
       const payload = JSON.stringify(data, null, 2)
@@ -3028,11 +3081,11 @@ const ControlPage = () => {
       link.click()
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
-      setStatus({ kind: 'success', message: '工作區備份 JSON 已匯出' })
+      setStatus({ kind: 'success', message: '節目備份 JSON 已匯出' })
     } catch (error) {
       setStatus({
         kind: 'error',
-        message: error.message || '匯出工作區備份失敗',
+        message: error.message || '匯出節目備份失敗',
       })
     }
   }
@@ -3055,12 +3108,12 @@ const ControlPage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '匯入工作區備份失敗')
+        throw new Error(data.error || '匯入節目備份失敗')
       }
 
       setStatus({
         kind: 'success',
-        message: '工作區備份已匯入',
+        message: '節目備份已匯入',
       })
       const nextSessionId = data?.sessionId || data?.session?.id
       if (nextSessionId) {
@@ -3071,7 +3124,7 @@ const ControlPage = () => {
     } catch (error) {
       setStatus({
         kind: 'error',
-        message: error.message || '匯入工作區備份失敗',
+        message: error.message || '匯入節目備份失敗',
       })
     } finally {
       setImportingSessionBackup(false)
@@ -3123,7 +3176,7 @@ const ControlPage = () => {
         ? refreshedData.lines.length
         : 0
       if (parsedLineCount > 0 && loadedLineCount === 0) {
-        throw new Error('解析完成，但字幕沒有成功寫入目前字幕本')
+        throw new Error('解析完成，但字幕沒有成功寫入目前場次')
       }
       setStatus({
         kind: data?.warning ? 'info' : 'success',
@@ -3239,6 +3292,19 @@ const ControlPage = () => {
     }
   }
 
+  const handleSaveProgramTitle = async () => {
+    if (!sessionId) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/title`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: programTitleInput }),
+        }),
+      { successMessage: '節目名稱已更新' },
+    )
+  }
+
   const handleSaveViewerAlias = async () => {
     if (!sessionId) return
     const data = await performSessionMutation(
@@ -3257,6 +3323,51 @@ const ControlPage = () => {
         ? `檢視端入口已更新為 ${viewerAliasBaseUrl}${nextAlias}`
         : '檢視端入口已清除，已改回固定亂碼網址',
     })
+  }
+
+  const handleAddRole = async () => {
+    if (!sessionId) return
+    const name = window.prompt('新增角色名稱', '')
+    if (name == null) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/roles`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }),
+      { successMessage: '已新增角色' },
+    )
+  }
+
+  const handleRenameRole = async (roleName) => {
+    if (!sessionId || !roleName) return
+    const name = window.prompt('重新命名角色', roleName)
+    if (name == null) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/roles/${encodeURIComponent(roleName)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }),
+      { successMessage: '角色名稱已更新' },
+    )
+  }
+
+  const handleDeleteRole = async (roleName) => {
+    if (!sessionId || !roleName) return
+    const confirmed = window.confirm(
+      `要刪除「${roleName}」嗎？相關字幕行會改成無角色。`,
+    )
+    if (!confirmed) return
+    await performSessionMutation(
+      () =>
+        fetch(`/api/session/${sessionId}/roles/${encodeURIComponent(roleName)}`, {
+          method: 'DELETE',
+        }),
+      { successMessage: '角色已刪除' },
+    )
   }
 
   const handleClearViewerAlias = async () => {
@@ -3482,7 +3593,7 @@ const ControlPage = () => {
 
   const handleCreateCell = async () => {
     if (!sessionId) return
-    const name = window.prompt('字幕本名稱', `字幕本 ${cells.length + 1}`)
+    const name = window.prompt('場次名稱', `場次 ${cells.length + 1}`)
     if (name == null) return
     await performSessionMutation(
       () =>
@@ -3491,13 +3602,13 @@ const ControlPage = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         }),
-      { successMessage: '已新增字幕本' },
+      { successMessage: '已新增場次' },
     )
   }
 
   const handleRenameCell = async (cell) => {
     if (!sessionId || !cell) return
-    const name = window.prompt('重新命名字幕本', cell.name || '')
+    const name = window.prompt('重新命名場次', cell.name || '')
     if (name == null) return
     await performSessionMutation(
       () =>
@@ -3506,7 +3617,7 @@ const ControlPage = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         }),
-      { successMessage: '已更新字幕本名稱' },
+      { successMessage: '已更新場次名稱' },
     )
   }
 
@@ -3530,7 +3641,7 @@ const ControlPage = () => {
         fetch(`/api/session/${sessionId}/cells/${cell.id}`, {
           method: 'DELETE',
         }),
-      { successMessage: '字幕本已刪除' },
+      { successMessage: '場次已刪除' },
     )
   }
 
@@ -3607,6 +3718,8 @@ const ControlPage = () => {
     : ''
   const comparisonLanguagePreviewNote = comparisonLanguage
     ? `${comparisonLanguage.name} 欄顯示目前字幕清單結果；要更新內容請在左側輸入區重新解析。`
+    : comparisonLanguageId === ALL_LANGUAGES_OPTION_ID
+      ? '全部語言欄顯示目前字幕清單結果；要更新內容請在左側輸入區重新解析。'
     : ''
   lineRefs.current = {}
   rowRefs.current = []
@@ -3633,14 +3746,25 @@ const ControlPage = () => {
       : transcriptionBusy
         ? '請開始說話…'
         : '尚未啟動即時語音辨識'
-  const projectorPreviewText =
+  const projectorPreviewLanguages = resolveLanguageDisplayList(
+    languages,
+    projectorDefaultLanguageId,
+    selectedProjectorLanguageMode,
+  )
+  const projectorPreviewTexts =
     !displayEnabled
-      ? '\u00a0'
-      : currentLine?.type === 'direction'
-        ? '舞台指示不投影'
+      ? []
+    : currentLine?.type === 'direction'
+        ? [{ id: 'direction', name: '', text: '舞台指示不投影' }]
         : currentLine
-          ? resolveLineText(currentLine, projectorDefaultLanguageId)
-          : '尚未載入字幕'
+          ? projectorPreviewLanguages
+              .map((language) => ({
+                id: language.id,
+                name: language.name,
+                text: resolveLineText(currentLine, language.id),
+              }))
+              .filter((entry) => entry.text.trim())
+          : [{ id: 'empty', name: '', text: '尚未載入字幕' }]
   const projectorStatus = sessionMeta?.projectorStatus || null
   const projectorConnected = projectorStatus?.connected === true
   const projectorRealtimeConnected = projectorStatus?.realtimeConnected === true
@@ -3703,9 +3827,9 @@ const ControlPage = () => {
     return (
       <div className="page">
         <div className="home-intro">
-          <p>請先從首頁選擇一個字幕工作區。</p>
+          <p>請先從首頁選擇一個節目。</p>
           <button type="button" onClick={() => navigate('/')}>
-            返回工作區列表
+            返回節目列表
           </button>
         </div>
       </div>
@@ -3743,11 +3867,11 @@ const ControlPage = () => {
             <header className="control-header">
               <div className="session-title-row">
                 <div>
-                  <h1>{sessionMeta?.title || '字幕工作區'}</h1>
+                  <h1>{sessionMeta?.title || '未命名節目'}</h1>
                   <p className="input-note">
                     {sessionMeta?.status === 'ended'
                       ? '已停止外部字幕輸出；檢視端與投影端網址仍可使用'
-                      : '工作區啟用中'}
+                      : '節目啟用中'}
                   </p>
                 </div>
                 <span className={`session-state-badge ${sessionMeta?.status || 'active'}`}>
@@ -3761,6 +3885,24 @@ const ControlPage = () => {
         {!leftPanelCollapsed && (
           <>
             <div className="control-sidebar-scroll">
+              <ControlSection title="節目" defaultOpen>
+                <div className="input-group">
+                  <label htmlFor="program-title">節目名稱</label>
+                  <div className="viewer-alias-editor">
+                    <input
+                      id="program-title"
+                      type="text"
+                      value={programTitleInput}
+                      maxLength={60}
+                      onChange={(event) => setProgramTitleInput(event.target.value)}
+                    />
+                    <button type="button" onClick={handleSaveProgramTitle}>
+                      儲存
+                    </button>
+                  </div>
+                </div>
+              </ControlSection>
+
               <ControlSection title="系統連線" defaultOpen>
               <div className="input-group">
                 <label htmlFor="openai-key">OpenAI API Key</label>
@@ -3786,10 +3928,10 @@ const ControlPage = () => {
               <div className="input-group">
                 <label htmlFor="viewer-alias">檢視端分享網址</label>
                 <p className="input-note">
-                  觀眾掃進去後會直接連到目前這份字幕工作區。
+                  觀眾掃進去後會直接連到目前這個節目。
                 </p>
                 <div className="viewer-link">
-                  <span>{viewerShareUrl || '尚未載入工作區'}</span>
+                  <span>{viewerShareUrl || '尚未載入節目'}</span>
                   <button type="button" onClick={handleCopyViewerLink}>
                     複製
                   </button>
@@ -3820,13 +3962,13 @@ const ControlPage = () => {
                   可用中文、英文、數字、-、_；空白會自動轉成 -。未設定時會直接使用固定亂碼網址。
                 </p>
                 <div className="viewer-link viewer-link-secondary">
-                  <span>{viewerUrl || '尚未載入工作區'}</span>
+                  <span>{viewerUrl || '尚未載入節目'}</span>
                   <button type="button" onClick={handleCopyViewerFixedLink}>
                     複製固定網址
                   </button>
                 </div>
                 <div className="viewer-link viewer-link-secondary">
-                  <span>{prompterUrl || '尚未載入工作區'}</span>
+                  <span>{prompterUrl || '尚未載入節目'}</span>
                   <button type="button" onClick={handleCopyPrompterLink}>
                     複製提詞頁
                   </button>
@@ -3844,7 +3986,7 @@ const ControlPage = () => {
               <div className="input-group">
                 <label>投影端網址</label>
                 <div className="viewer-link">
-                  <span>{projectorUrl || '尚未載入工作區'}</span>
+                  <span>{projectorUrl || '尚未載入節目'}</span>
                   <button type="button" onClick={handleCopyProjectorLink}>
                     複製
                   </button>
@@ -3860,12 +4002,12 @@ const ControlPage = () => {
               </div>
             </ControlSection>
 
-            <ControlSection title="字幕本與語言" defaultOpen>
+            <ControlSection title="場次、角色與語言" defaultOpen>
             <div className="input-group">
               <div className="section-header-inline">
-                <label>字幕本</label>
+                <label>場次</label>
                 <button type="button" className="subtle-button" onClick={handleCreateCell}>
-                  新增字幕本
+                  新增場次
                 </button>
               </div>
               <div className="cell-list">
@@ -3902,6 +4044,42 @@ const ControlPage = () => {
                   </div>
                 ))}
               </div>
+            </div>
+
+            <div className="input-group">
+              <div className="section-header-inline">
+                <label>角色</label>
+                <button type="button" className="subtle-button" onClick={handleAddRole}>
+                  新增角色
+                </button>
+              </div>
+              <div className="language-pill-list">
+                {existingRoleOptions.length === 0 && (
+                  <span className="input-note">尚未建立角色</span>
+                )}
+                {existingRoleOptions.map((roleName) => (
+                  <div key={roleName} className="language-pill">
+                    <span>{roleName}</span>
+                    <button
+                      type="button"
+                      className="language-pill-rename"
+                      onClick={() => handleRenameRole(roleName)}
+                    >
+                      改名
+                    </button>
+                    <button
+                      type="button"
+                      className="language-pill-delete"
+                      onClick={() => handleDeleteRole(roleName)}
+                    >
+                      刪除
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <span className="input-note">
+                改名會同步更新所有場次裡使用此角色的字幕行。
+              </span>
             </div>
 
             <div className="input-group">
@@ -3970,9 +4148,21 @@ const ControlPage = () => {
                     ))}
                   </select>
                 </label>
+                <label className="input-group" htmlFor="projector-language-mode">
+                  <span>投影端模式</span>
+                  <select
+                    id="projector-language-mode"
+                    value={selectedProjectorLanguageMode}
+                    onChange={handleProjectorLanguageModeChange}
+                  >
+                    <option value={PROJECTOR_LANGUAGE_MODES.SINGLE}>單語</option>
+                    <option value={PROJECTOR_LANGUAGE_MODES.BILINGUAL}>雙語並置</option>
+                    <option value={PROJECTOR_LANGUAGE_MODES.ALL}>全部語言並置</option>
+                  </select>
+                </label>
               </div>
               <span className="input-note">
-                檢視端初次進入會先套用預設語言，但觀眾之後仍可自行切換；投影端則會持續跟著這裡的設定。
+                檢視端初次進入會先套用預設語言，但觀眾之後仍可自行切換；投影端會持續跟著這裡的語言與模式設定。
               </span>
             </div>
             </ControlSection>
@@ -4001,7 +4191,7 @@ const ControlPage = () => {
               <textarea
                 id="script-text-primary"
                 rows={8}
-                placeholder={`貼上 ${primaryLanguageName} 全文，系統會解析角色、分段並寫入目前字幕本。`}
+                placeholder={`貼上 ${primaryLanguageName} 全文，系統會解析角色、分段並寫入目前場次。`}
                 value={primaryScriptInput}
                 onChange={(event) =>
                   setDraftInputValue(selectedCellId, 'primary', event.target.value)
@@ -4057,13 +4247,13 @@ const ControlPage = () => {
 
             <ControlSection title="匯入與備份">
             <div className="input-group">
-              <label>目前字幕本 JSON 匯入 / 匯出</label>
+              <label>目前場次 JSON 匯入 / 匯出</label>
               <div className="json-actions">
                 <button type="button" onClick={() => jsonInputRef.current?.click()}>
-                  匯入目前字幕本 JSON
+                  匯入目前場次 JSON
                 </button>
                 <button type="button" onClick={handleExportJson}>
-                  匯出目前字幕本 JSON
+                  匯出目前場次 JSON
                 </button>
                 <input
                   ref={jsonInputRef}
@@ -4074,22 +4264,22 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                這裡只會處理目前選取字幕本的內容，不包含整個工作區設定。
+                這裡只會處理目前選取場次的內容，不包含整個節目設定。
               </span>
             </div>
 
             <div className="input-group">
-              <label>工作區備份 JSON</label>
+              <label>節目備份 JSON</label>
               <div className="json-actions">
                 <button
                   type="button"
                   onClick={() => sessionBackupInputRef.current?.click()}
                   disabled={importingSessionBackup}
                 >
-                  {importingSessionBackup ? '匯入中…' : '匯入工作區備份 JSON'}
+                  {importingSessionBackup ? '匯入中…' : '匯入節目備份 JSON'}
                 </button>
                 <button type="button" onClick={handleExportSessionBackup}>
-                  匯出工作區備份 JSON
+                  匯出節目備份 JSON
                 </button>
                 <input
                   ref={sessionBackupInputRef}
@@ -4100,7 +4290,7 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                可直接在控制端匯入或匯出整個工作區的語言、所有字幕本、字幕內容與投影設定。
+                可直接在控制端匯入或匯出整個節目的語言、所有場次、字幕內容與投影設定。
               </span>
             </div>
             </ControlSection>
@@ -4182,7 +4372,7 @@ const ControlPage = () => {
         <header className="script-header">
           <div className="script-heading">
             <div className="script-title-line">
-              <h2>{selectedCell?.name || '劇本字幕清單'}</h2>
+              <h2>{selectedCell?.name || '場次字幕清單'}</h2>
               <span className="script-cue-pill">
                 {lines.length
                   ? `CUE ${liveCurrentIndex + 1} / ${lines.length}`
@@ -4210,6 +4400,9 @@ const ControlPage = () => {
                 onChange={(event) => setComparisonLanguageId(event.target.value)}
               >
                 <option value={PRIMARY_ONLY_OPTION_ID}>只顯示 {primaryLanguageName}</option>
+                {extraLanguages.length > 1 && (
+                  <option value={ALL_LANGUAGES_OPTION_ID}>顯示全部語言</option>
+                )}
                 {extraLanguages.map((language) => (
                   <option key={language.id} value={language.id}>
                     {primaryLanguageName} + {language.name}
@@ -4742,7 +4935,16 @@ const ControlPage = () => {
                   className="viewer-preview-text"
                   style={previewRoleColor ? { color: previewRoleColor } : undefined}
                 >
-                  {projectorPreviewText}
+                  {projectorPreviewTexts.length > 0
+                    ? projectorPreviewTexts.map((entry) => (
+                        <div key={entry.id} className="viewer-preview-language-line">
+                          {projectorPreviewTexts.length > 1 && entry.name && (
+                            <span>{entry.name}</span>
+                          )}
+                          <strong>{entry.text}</strong>
+                        </div>
+                      ))
+                    : '\u00a0'}
                 </div>
               </div>
             </div>

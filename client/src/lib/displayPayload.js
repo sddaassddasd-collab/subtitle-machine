@@ -19,6 +19,12 @@ export const PROJECTOR_DISPLAY_MODES = Object.freeze({
   TRANSCRIPTION: 'transcription',
 })
 
+export const PROJECTOR_LANGUAGE_MODES = Object.freeze({
+  SINGLE: 'single',
+  BILINGUAL: 'bilingual',
+  ALL: 'all',
+})
+
 export const normalizeProjectorLayout = (rawLayout) => {
   const source =
     rawLayout && typeof rawLayout === 'object'
@@ -54,6 +60,16 @@ export const normalizeProjectorDisplayMode = (rawMode) =>
   rawMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
     ? PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
     : PROJECTOR_DISPLAY_MODES.SCRIPT
+
+export const normalizeProjectorLanguageMode = (rawMode) => {
+  if (rawMode === PROJECTOR_LANGUAGE_MODES.BILINGUAL) {
+    return PROJECTOR_LANGUAGE_MODES.BILINGUAL
+  }
+  if (rawMode === PROJECTOR_LANGUAGE_MODES.ALL) {
+    return PROJECTOR_LANGUAGE_MODES.ALL
+  }
+  return PROJECTOR_LANGUAGE_MODES.SINGLE
+}
 
 export const normalizeProjectorRevision = (rawRevision) =>
   normalizeInt(rawRevision, 0, 0, Number.MAX_SAFE_INTEGER)
@@ -145,6 +161,7 @@ export const normalizeDisplayPayload = (payload) => {
     transcriptionIsFinal,
     layout: normalizeProjectorLayout(payload?.layout),
     displayMode: normalizeProjectorDisplayMode(payload?.displayMode),
+    languageMode: normalizeProjectorLanguageMode(payload?.languageMode),
     revision: normalizeProjectorRevision(payload?.revision),
     roleColorEnabled,
   }
@@ -178,6 +195,39 @@ export const resolveLineText = (line, languageId) => {
     return line.translations[languageId]
   }
   return ''
+}
+
+export const resolveLanguageDisplayList = (
+  languages,
+  preferredLanguageId,
+  languageMode = PROJECTOR_LANGUAGE_MODES.SINGLE,
+) => {
+  const list = Array.isArray(languages) ? languages : []
+  if (!list.length) return []
+  const mode = normalizeProjectorLanguageMode(languageMode)
+  const primaryLanguage = list[0]
+  const selectedLanguageId = resolveAvailableLanguageId(list, preferredLanguageId)
+  const selectedLanguage =
+    list.find((language) => language.id === selectedLanguageId) || primaryLanguage
+
+  if (mode === PROJECTOR_LANGUAGE_MODES.ALL) {
+    return list
+  }
+
+  if (mode === PROJECTOR_LANGUAGE_MODES.BILINGUAL) {
+    const pair = [primaryLanguage]
+    if (selectedLanguage && selectedLanguage.id !== primaryLanguage.id) {
+      pair.push(selectedLanguage)
+    } else {
+      const firstExtraLanguage = list.find(
+        (language) => language.id !== primaryLanguage.id,
+      )
+      if (firstExtraLanguage) pair.push(firstExtraLanguage)
+    }
+    return pair
+  }
+
+  return selectedLanguage ? [selectedLanguage] : [primaryLanguage]
 }
 
 export const roleToColor = (role) => {
