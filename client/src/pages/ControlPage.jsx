@@ -1176,16 +1176,11 @@ const ControlPage = () => {
   }, [])
 
   const viewerUrl = useMemo(() => {
-    if (typeof window === 'undefined' || !sessionMeta?.viewerToken) return ''
-    return `${window.location.origin}/viewer/${sessionMeta.viewerToken}`
-  }, [sessionMeta?.viewerToken])
+    if (typeof window === 'undefined' || !selectedCell?.viewerToken) return ''
+    return `${window.location.origin}/viewer/${selectedCell.viewerToken}`
+  }, [selectedCell?.viewerToken])
 
-  const viewerAliasUrl = useMemo(() => {
-    if (typeof window === 'undefined' || !sessionMeta?.viewerAlias) return ''
-    return `${window.location.origin}/v/${encodeURIComponent(sessionMeta.viewerAlias)}`
-  }, [sessionMeta?.viewerAlias])
-
-  const viewerShareUrl = viewerAliasUrl || viewerUrl
+  const viewerShareUrl = viewerUrl
 
   const prompterUrl = useMemo(() => {
     if (typeof window === 'undefined' || !sessionMeta?.viewerToken) return ''
@@ -3577,7 +3572,7 @@ const ControlPage = () => {
     try {
       const link = document.createElement('a')
       link.href = qrCodeUrl
-      link.download = `${sessionMeta?.title || 'viewer'}-qr.png`
+      link.download = `${sessionMeta?.title || 'viewer'}-${selectedCell?.name || '場次'}-qr.png`
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
@@ -3588,6 +3583,43 @@ const ControlPage = () => {
         kind: 'info',
         message: '無法直接下載，已改為開啟 QR code 圖片',
       })
+    }
+  }
+
+  const getCellViewerUrl = (cell) => {
+    if (typeof window === 'undefined' || !cell?.viewerToken) return ''
+    return `${window.location.origin}/viewer/${cell.viewerToken}`
+  }
+
+  const handleCopyCellViewerLink = async (cell) => {
+    const url = getCellViewerUrl(cell)
+    if (!url) return
+    try {
+      await navigator.clipboard.writeText(url)
+      setStatus({ kind: 'success', message: `${cell.name}觀眾連結已複製` })
+    } catch {
+      setStatus({ kind: 'error', message: '無法複製，請手動複製連結' })
+    }
+  }
+
+  const handleDownloadCellQrCode = async (cell) => {
+    const url = getCellViewerUrl(cell)
+    if (!url) return
+    try {
+      const dataUrl = await QRCode.toDataURL(url, {
+        errorCorrectionLevel: 'M',
+        margin: 1,
+        width: 512,
+      })
+      const link = document.createElement('a')
+      link.href = dataUrl
+      link.download = `${sessionMeta?.title || 'viewer'}-${cell.name}-qr.png`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      setStatus({ kind: 'success', message: `${cell.name} QR code 已下載` })
+    } catch {
+      setStatus({ kind: 'error', message: '無法產生 QR code' })
     }
   }
 
@@ -3926,12 +3958,12 @@ const ControlPage = () => {
 
             <ControlSection title="分享與投影連結" defaultOpen>
               <div className="input-group">
-                <label htmlFor="viewer-alias">檢視端分享網址</label>
+                <label htmlFor="viewer-alias">目前場次觀眾網址</label>
                 <p className="input-note">
-                  觀眾掃進去後會直接連到目前這個節目。
+                  每個場次都有固定網址與 QR code；切換控制場次不會改變已印出的 QR code。
                 </p>
                 <div className="viewer-link">
-                  <span>{viewerShareUrl || '尚未載入節目'}</span>
+                  <span>{viewerShareUrl || '尚未載入場次'}</span>
                   <button type="button" onClick={handleCopyViewerLink}>
                     複製
                   </button>
@@ -3959,7 +3991,7 @@ const ControlPage = () => {
                   </button>
                 </div>
                 <p className="input-note">
-                  可用中文、英文、數字、-、_；空白會自動轉成 -。未設定時會直接使用固定亂碼網址。
+                  此節目入口保留供舊連結使用；新觀眾請使用上方目前場次的固定網址。
                 </p>
                 <div className="viewer-link viewer-link-secondary">
                   <span>{viewerUrl || '尚未載入節目'}</span>
@@ -4022,9 +4054,26 @@ const ControlPage = () => {
                       onClick={() => handleSelectCell(cell.id)}
                     >
                       <strong>{cell.name}</strong>
-                      <span>{cell.lineCount || 0} 行字幕</span>
+                      <span>
+                        {cell.id === selectedCellId ? '目前控制場次' : '等待控制'} ·{' '}
+                        {cell.lineCount || 0} 行字幕
+                      </span>
                     </button>
                     <div className="cell-card-actions">
+                      <button
+                        type="button"
+                        className="subtle-button"
+                        onClick={() => handleCopyCellViewerLink(cell)}
+                      >
+                        複製觀眾連結
+                      </button>
+                      <button
+                        type="button"
+                        className="subtle-button"
+                        onClick={() => handleDownloadCellQrCode(cell)}
+                      >
+                        下載 QR
+                      </button>
                       <button
                         type="button"
                         className="subtle-button"

@@ -2701,6 +2701,11 @@ function ensureSessionLines(session) {
     primaryLanguageId,
   });
   session.lines = normalized;
+  if (Array.isArray(session.cells)) {
+    session.cells.forEach((cell) => {
+      cell.lines = normalized;
+    });
+  }
   return session.lines;
 }
 
@@ -3346,6 +3351,14 @@ function createCellDefinition(
         ? rawCell.id.trim()
         : generateId('cell'),
     name: name || `場次 ${index + 1}`,
+    viewerToken:
+      typeof rawCell.viewerToken === 'string' && rawCell.viewerToken.trim()
+        ? rawCell.viewerToken.trim()
+        : createOpaqueToken(18),
+    currentIndex: Number.isInteger(rawCell.currentIndex)
+      ? Math.max(rawCell.currentIndex, 0)
+      : 0,
+    displayEnabled: rawCell.displayEnabled !== false,
     lines: normalizeScriptLines(rawLines, {
       keepEmpty: true,
       primaryLanguageId,
@@ -3455,7 +3468,6 @@ function syncSelectedCellLines(session) {
   session.selectedCellId = cell.id;
   session.lines = cell.lines;
   ensureSessionLines(session);
-  cell.lines = session.lines;
 
   if (session.currentIndex >= session.lines.length) {
     session.currentIndex = Math.max(session.lines.length - 1, 0);
@@ -3650,8 +3662,26 @@ function ensureSessionStructure(session) {
           },
         ];
 
+  const selectedRawCell = rawCells.find(
+    (cell) => cell?.id && cell.id === session.selectedCellId,
+  );
+  const sharedRawLines = Array.isArray(session.sharedLines)
+    ? session.sharedLines
+    : Array.isArray(selectedRawCell?.lines)
+      ? selectedRawCell.lines
+      : Array.isArray(session.lines)
+        ? session.lines
+        : Array.isArray(rawCells[0]?.lines)
+          ? rawCells[0].lines
+          : [];
+
   session.cells = rawCells.map((cell, index) =>
-    createCellDefinition(cell, index, primaryLanguageId, session.languages),
+    createCellDefinition(
+      { ...cell, lines: sharedRawLines },
+      index,
+      primaryLanguageId,
+      session.languages,
+    ),
   );
   ensureSessionRoles(session);
 
@@ -3781,9 +3811,12 @@ function serializeSessionForStorage(session) {
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
-      lines: cell.lines,
+      viewerToken: cell.viewerToken,
+      currentIndex: cell.currentIndex,
+      displayEnabled: cell.displayEnabled,
       languageSources: cell.languageSources,
     })),
+    sharedLines: normalized.lines,
   };
 }
 
@@ -6607,6 +6640,9 @@ function getSessionSummary(session) {
     cells: normalized.cells.map((cell) => ({
       id: cell.id,
       name: cell.name,
+      viewerToken: cell.viewerToken,
+      currentIndex: cell.currentIndex,
+      displayEnabled: cell.displayEnabled,
       lineCount: Array.isArray(cell.lines) ? cell.lines.length : 0,
     })),
     languages: normalized.languages,
@@ -6740,7 +6776,7 @@ function getSessionDisplayState(session) {
   };
 }
 
-function getViewerPayload(session) {
+function getViewerPayload(session, viewerCellId = null) {
   const {
     normalized,
     activeScriptLine,
@@ -6759,11 +6795,42 @@ function getViewerPayload(session) {
     publicLines.length > 0
       ? Math.min(Math.max(normalized.currentIndex, 0), publicLines.length - 1)
       : 0;
+  const viewerCell = viewerCellId
+    ? normalized.cells.find((cell) => cell.id === viewerCellId) || null
+    : getSelectedCell(normalized);
+  const isActiveCell = !viewerCell || viewerCell.id === normalized.selectedCellId;
+  const viewerToken = viewerCell?.viewerToken || normalized.viewerToken;
+
+  if (!isActiveCell) {
+    return {
+      sessionId: normalized.id,
+      viewerToken,
+      cellId: viewerCell.id,
+      cellName: viewerCell.name,
+      activeCellId: normalized.selectedCellId,
+      status: normalized.status,
+      languages: normalized.languages,
+      defaultLanguageId: normalized.viewerDefaultLanguageId,
+      lines: publicLines,
+      currentIndex,
+      line: null,
+      text: '',
+      liveEntries: [],
+      liveLines: [],
+      musicActive: false,
+      musicText: '',
+      displayEnabled: false,
+      roleColorEnabled: normalized.roleColorEnabled,
+      source: 'waiting',
+      waitingMessage: '本場次尚未開始',
+      transcription,
+    };
+  }
 
   if (!normalized.displayEnabled) {
     return {
       sessionId: normalized.id,
-      viewerToken: normalized.viewerToken,
+      viewerToken,
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
@@ -6785,7 +6852,7 @@ function getViewerPayload(session) {
   if (hasLiveText) {
     return {
       sessionId: normalized.id,
-      viewerToken: normalized.viewerToken,
+      viewerToken,
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
@@ -6809,7 +6876,7 @@ function getViewerPayload(session) {
 
   return {
     sessionId: normalized.id,
-    viewerToken: normalized.viewerToken,
+    viewerToken,
     status: normalized.status,
     languages: normalized.languages,
     defaultLanguageId: normalized.viewerDefaultLanguageId,
@@ -6971,6 +7038,20 @@ function getSessionByViewerToken(viewerToken) {
   );
 }
 
+function getViewerTargetByToken(viewerToken) {
+  if (typeof viewerToken !== 'string' || !viewerToken.trim()) return null;
+  const token = viewerToken.trim();
+  for (const rawSession of sessions.values()) {
+    const session = ensureSessionStructure(rawSession);
+    const cell = session.cells.find((entry) => entry.viewerToken === token);
+    if (cell) return { session, cell };
+    if (session.viewerToken === token) {
+      return { session, cell: getSelectedCell(session) };
+    }
+  }
+  return null;
+}
+
 function getSessionByViewerAlias(viewerAlias) {
   const normalizedAlias = normalizeViewerAlias(viewerAlias);
   if (!normalizedAlias) return null;
@@ -7106,6 +7187,12 @@ function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
 
+  session.cells.forEach((cell) => {
+    io.to(`viewer:${sessionId}:${cell.id}`).emit(
+      'viewer:update',
+      getViewerPayload(session, cell.id),
+    );
+  });
   io.to(`viewer:${sessionId}`).emit('viewer:update', getViewerPayload(session));
   io.to(`projector:${sessionId}`).emit(
     'projector:update',
@@ -7138,6 +7225,8 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   }
 
   session.currentIndex = nextIndex;
+  const selectedCell = getSelectedCell(session);
+  if (selectedCell) selectedCell.currentIndex = nextIndex;
   persistSessionCurrentIndexSoon(session);
   broadcastViewerState(session.id);
   broadcastControlState(session.id);
@@ -9184,13 +9273,13 @@ app.get('/api/viewer-entry/:viewerAlias', (req, res) => {
 app.get('/api/viewer/:viewerToken', (req, res) => {
   const viewerToken =
     typeof req.params.viewerToken === 'string' ? req.params.viewerToken.trim() : '';
-  const session = getSessionByViewerToken(viewerToken);
-  if (!session) {
+  const target = getViewerTargetByToken(viewerToken);
+  if (!target) {
     return res
       .status(410)
-      .json(getPublicSessionUnavailablePayload('viewer', { session, token: viewerToken }));
+      .json(getPublicSessionUnavailablePayload('viewer', { session: null, token: viewerToken }));
   }
-  res.json(getViewerPayload(session));
+  res.json(getViewerPayload(target.session, target.cell?.id));
 });
 
 app.get('/api/projector/:projectorToken', (req, res) => {
@@ -9293,7 +9382,10 @@ app.post('/api/session/:sessionId/cells', requireAuth, (req, res) => {
   if (!session) return;
   pushSessionHistory(session);
   const cell = createCellDefinition(
-    { name: req.body?.name || `場次 ${session.cells.length + 1}` },
+    {
+      name: req.body?.name || `場次 ${session.cells.length + 1}`,
+      lines: session.lines,
+    },
     session.cells.length,
     getPrimaryLanguageId(session),
   );
@@ -9332,8 +9424,17 @@ app.post('/api/session/:sessionId/cells/:cellId/select', requireAuth, (req, res)
   if (!cell) {
     return res.status(404).json({ error: '找不到場次' });
   }
+  const previousCell = getSelectedCell(session);
+  if (previousCell) {
+    previousCell.currentIndex = session.currentIndex;
+    previousCell.displayEnabled = session.displayEnabled;
+  }
   session.selectedCellId = cell.id;
-  session.currentIndex = Math.min(session.currentIndex, Math.max(cell.lines.length - 1, 0));
+  session.currentIndex = Math.min(
+    Number.isInteger(cell.currentIndex) ? cell.currentIndex : 0,
+    Math.max(cell.lines.length - 1, 0),
+  );
+  session.displayEnabled = cell.displayEnabled !== false;
   syncSelectedCellLines(session);
   persistSession(session);
   broadcastControlState(session.id);
@@ -9758,6 +9859,8 @@ app.post('/api/session/:sessionId/display', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
   session.displayEnabled = Boolean(req.body?.displayEnabled);
+  const selectedCell = getSelectedCell(session);
+  if (selectedCell) selectedCell.displayEnabled = session.displayEnabled;
   persistSession(session);
   broadcastControlState(session.id);
   broadcastViewerState(session.id);
@@ -10118,9 +10221,8 @@ io.on('connection', (socket) => {
 
   socket.on('join', ({ sessionId, role, viewerToken, projectorToken }) => {
     if (role === 'viewer') {
-      const viewerSession = viewerToken
-        ? getSessionByViewerToken(viewerToken)
-        : getSession(sessionId);
+      const viewerTarget = viewerToken ? getViewerTargetByToken(viewerToken) : null;
+      const viewerSession = viewerTarget?.session || getSession(sessionId);
       if (!viewerSession) {
         socket.emit(
           'viewer:expired',
@@ -10131,10 +10233,16 @@ io.on('connection', (socket) => {
         );
         return;
       }
-      socket.join(`viewer:${viewerSession.id}`);
+      const viewerCell = viewerTarget?.cell || getSelectedCell(viewerSession);
+      if (viewerCell) {
+        socket.join(`viewer:${viewerSession.id}:${viewerCell.id}`);
+        socket.data.viewerCellId = viewerCell.id;
+      } else {
+        socket.join(`viewer:${viewerSession.id}`);
+      }
       socket.data.publicRole = 'viewer';
       socket.data.viewerSessionId = viewerSession.id;
-      broadcastViewerState(viewerSession.id);
+      socket.emit('viewer:update', getViewerPayload(viewerSession, viewerCell?.id));
       return;
     }
 
@@ -10425,6 +10533,8 @@ io.on('connection', (socket) => {
     if (!session) return;
 
     session.displayEnabled = Boolean(displayEnabled);
+    const selectedCell = getSelectedCell(session);
+    if (selectedCell) selectedCell.displayEnabled = session.displayEnabled;
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);

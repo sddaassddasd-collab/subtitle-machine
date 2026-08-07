@@ -44,6 +44,7 @@ const ViewerPage = () => {
   const [musicText, setMusicText] = useState('此處有音樂')
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
+  const [waitingMessage, setWaitingMessage] = useState('')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [languages, setLanguages] = useState([])
   const [viewerDefaultLanguageId, setViewerDefaultLanguageId] = useState('primary')
@@ -76,6 +77,11 @@ const ViewerPage = () => {
 
   const applyViewerPayload = useCallback((payload) => {
     const next = normalizeDisplayPayload(payload)
+    setWaitingMessage(
+      payload?.source === 'waiting'
+        ? payload?.waitingMessage || '本場次尚未開始'
+        : '',
+    )
     setDisplayEnabled(next.enabled)
     setLine(next.line)
     setLiveEntries(next.liveEntries)
@@ -299,6 +305,17 @@ const ViewerPage = () => {
         <div className="no-session">
           <h2>正在重新連線</h2>
           <p>{connectionIssue}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (waitingMessage) {
+    return (
+      <div className="viewer-page">
+        <div className="no-session">
+          <h2>{waitingMessage}</h2>
+          <p>控制端開始此場次後，字幕會自動顯示。</p>
         </div>
       </div>
     )
