@@ -798,6 +798,7 @@ const buildBlankTranslations = (languages) => {
 }
 
 const getEditingCellKey = (index, languageId) => `${index}:${languageId}`
+const getLineDraftKey = (lineId, languageId) => `${lineId}:${languageId}`
 
 const formatStatusTimestamp = (timestamp) => {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return ''
@@ -913,6 +914,7 @@ const ControlPage = () => {
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
   const [editingCell, setEditingCell] = useState(null)
+  const [lineDrafts, setLineDrafts] = useState({})
   const [roleEditor, setRoleEditor] = useState(null)
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
@@ -930,6 +932,7 @@ const ControlPage = () => {
   const jsonInputRef = useRef(null)
   const sessionBackupInputRef = useRef(null)
   const lineRefs = useRef({})
+  const lineDraftsRef = useRef({})
   const rowRefs = useRef([])
   const serverDraftInputsRef = useRef({})
   const pendingLineClickTimeoutRef = useRef(null)
@@ -2448,6 +2451,44 @@ const ControlPage = () => {
     })
   }
 
+  const setLineDraft = (lineId, languageId, value) => {
+    if (!lineId || !languageId) return
+    const draftKey = getLineDraftKey(lineId, languageId)
+    const nextDrafts = {
+      ...lineDraftsRef.current,
+      [draftKey]: value,
+    }
+    lineDraftsRef.current = nextDrafts
+    setLineDrafts(nextDrafts)
+  }
+
+  const clearLineDraft = (lineId, languageId) => {
+    if (!lineId || !languageId) return
+    const draftKey = getLineDraftKey(lineId, languageId)
+    if (!Object.prototype.hasOwnProperty.call(lineDraftsRef.current, draftKey)) {
+      return
+    }
+    const nextDrafts = { ...lineDraftsRef.current }
+    delete nextDrafts[draftKey]
+    lineDraftsRef.current = nextDrafts
+    setLineDrafts(nextDrafts)
+  }
+
+  const clearLineDraftsForLine = (lineId) => {
+    if (!lineId) return
+    const prefix = `${lineId}:`
+    const nextDrafts = Object.fromEntries(
+      Object.entries(lineDraftsRef.current).filter(
+        ([draftKey]) => !draftKey.startsWith(prefix),
+      ),
+    )
+    if (Object.keys(nextDrafts).length === Object.keys(lineDraftsRef.current).length) {
+      return
+    }
+    lineDraftsRef.current = nextDrafts
+    setLineDrafts(nextDrafts)
+  }
+
   const handleLineTextClick = (event, index, languageId) => {
     event.stopPropagation()
     if (
@@ -2465,7 +2506,13 @@ const ControlPage = () => {
     event.stopPropagation()
     clearPendingLineClick()
     setRoleEditor(null)
-    setEditingCell({ index, languageId })
+    const lineId = lines[index]?.id
+    if (!lineId) return
+    setEditingCell({ index, lineId, languageId })
+  }
+
+  const handleLineInput = (event, lineId, languageId) => {
+    setLineDraft(lineId, languageId, event.currentTarget.textContent ?? '')
   }
 
   const handleLineBlur = (event, index, languageId) => {
@@ -2481,11 +2528,32 @@ const ControlPage = () => {
     ) {
       return
     }
+    const editingLineId = editingCell.lineId || lines[index]?.id
+    const currentIndex = lines.findIndex((line) => line?.id === editingLineId)
+    if (editingCell.lineId && currentIndex < 0) {
+      setEditingCell(null)
+      setStatus({
+        kind: 'error',
+        message: '這句字幕已被其他操作刪除或重建；輸入草稿已保留',
+      })
+      return
+    }
+    const resolvedIndex = currentIndex >= 0 ? currentIndex : index
     setEditingCell(null)
-    const newText = normalizeEditableSegment(event.currentTarget.textContent ?? '')
-    const currentLine = lines[index]
+    const draftKey = getLineDraftKey(editingLineId, languageId)
+    const draftText = Object.prototype.hasOwnProperty.call(
+      lineDraftsRef.current,
+      draftKey,
+    )
+      ? lineDraftsRef.current[draftKey]
+      : event.currentTarget.textContent ?? ''
+    const newText = normalizeEditableSegment(draftText)
+    const currentLine = lines[resolvedIndex]
     const currentText = getLineLanguageText(currentLine, languageId)
-    if (newText === currentText || !socketRef.current || !sessionId) return
+    if (newText === currentText || !socketRef.current || !sessionId) {
+      clearLineDraft(editingLineId, languageId)
+      return
+    }
     const shouldRemoveLine = shouldRemoveLineAfterLanguageUpdate(
       currentLine,
       languageId,
@@ -2494,20 +2562,27 @@ const ControlPage = () => {
 
     socketRef.current.emit('updateLine', {
       sessionId,
-      index,
+      index: resolvedIndex,
+      lineId: editingLineId,
       text: newText,
       languageId,
     })
     setLines((prev) => {
-      const next = applyLineLanguageTextUpdate(prev, index, languageId, newText)
-      if (!shouldRemoveLine || index < 0 || index >= next.length) {
+      const next = applyLineLanguageTextUpdate(
+        prev,
+        resolvedIndex,
+        languageId,
+        newText,
+      )
+      if (!shouldRemoveLine || resolvedIndex < 0 || resolvedIndex >= next.length) {
         return next
       }
-      return next.filter((_, lineIndex) => lineIndex !== index)
+      return next.filter((_, lineIndex) => lineIndex !== resolvedIndex)
     })
     if (shouldRemoveLine) {
-      shiftIndexesAfterLineRemoval(index)
+      shiftIndexesAfterLineRemoval(resolvedIndex)
     }
+    clearLineDraft(editingLineId, languageId)
     setStatus({ kind: 'success', message: '字幕內容已更新' })
   }
 
@@ -2624,6 +2699,7 @@ const ControlPage = () => {
       index > 0
     ) {
       event.preventDefault()
+      clearLineDraftsForLine(currentLine?.id)
       const currentText = normalizedFull
       const mergePreview = applyLineLanguageMergeIntoPrevious(
         lines,
@@ -2668,6 +2744,7 @@ const ControlPage = () => {
     event.preventDefault()
 
     if (!afterText) {
+      clearLineDraft(currentLine?.id, languageId)
       if (beforeText !== currentLanguageText) {
         socketRef.current.emit('updateLine', {
           sessionId,
@@ -2711,6 +2788,7 @@ const ControlPage = () => {
     }
 
     skipBlurRef.current.add(cellKey)
+    clearLineDraft(currentLine?.id, languageId)
     if (node.textContent !== beforeText) {
       node.textContent = beforeText
     }
@@ -2782,6 +2860,7 @@ const ControlPage = () => {
     event.stopPropagation()
     if (!socketRef.current || !sessionId || !lines[index]) return
 
+    clearLineDraftsForLine(lines[index]?.id)
     setLines((prev) => prev.filter((_, lineIndex) => lineIndex !== index))
     shiftIndexesAfterLineRemoval(index)
     setRoleEditor(null)
@@ -2837,6 +2916,7 @@ const ControlPage = () => {
     const currentLine = lines[index]
     if (!socketRef.current || !sessionId || !currentLine) return
     if (!getLineLanguageText(currentLine, languageId).trim()) return
+    clearLineDraft(currentLine.id, languageId)
 
     if (languageId !== 'primary') {
       const shiftResult = applyLineLanguageClearAndShiftUp(lines, index, languageId)
@@ -4792,6 +4872,13 @@ const ControlPage = () => {
                   {visibleLanguages.map((language) => {
                     const text = getLineLanguageText(line, language.id)
                     const cellKey = getEditingCellKey(index, language.id)
+                    const draftKey = getLineDraftKey(line.id, language.id)
+                    const editableText = Object.prototype.hasOwnProperty.call(
+                      lineDrafts,
+                      draftKey,
+                    )
+                      ? lineDrafts[draftKey]
+                      : text
                     const isEditing =
                       editingCell &&
                       editingCell.index === index &&
@@ -4852,11 +4939,14 @@ const ControlPage = () => {
                           onBlur={(event) =>
                             handleLineBlur(event, index, language.id)
                           }
+                          onInput={(event) =>
+                            handleLineInput(event, line.id, language.id)
+                          }
                           onKeyDown={(event) =>
                             handleLineKeyDown(event, index, language.id)
                           }
                         >
-                          {text}
+                          {editableText}
                         </div>
                       </div>
                     )

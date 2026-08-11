@@ -2701,6 +2701,7 @@ function ensureSessionLines(session) {
     primaryLanguageId,
   });
   session.lines = normalized;
+  session.sharedLines = normalized;
   if (Array.isArray(session.cells)) {
     session.cells.forEach((cell) => {
       cell.lines = normalized;
@@ -10651,18 +10652,25 @@ io.on('connection', (socket) => {
     broadcastProjectorLayoutState(sessionId);
   });
 
-  socket.on('updateLine', ({ sessionId, index, text, type, music, languageId }) => {
+  socket.on(
+    'updateLine',
+    ({ sessionId, index, lineId, text, type, music, languageId }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
+    const targetIndex =
+      typeof lineId === 'string' && lineId.trim()
+        ? session.lines.findIndex((line) => line?.id === lineId.trim())
+        : index;
+
     if (
-      Number.isInteger(index) &&
-      index >= 0 &&
-      index < session.lines.length &&
+      Number.isInteger(targetIndex) &&
+      targetIndex >= 0 &&
+      targetIndex < session.lines.length &&
       typeof text === 'string'
     ) {
       pushSessionHistory(session);
-      const existingRaw = session.lines[index];
+      const existingRaw = session.lines[targetIndex];
       const sanitized = sanitizeLineText(text);
       const explicitType = clampLineType(type);
       const targetLanguageId =
@@ -10708,15 +10716,15 @@ io.on('connection', (socket) => {
         'primary',
       );
       if (lineHasAnyLanguageText(nextLine)) {
-        session.lines[index] = nextLine;
+        session.lines[targetIndex] = nextLine;
       } else {
-        session.lines.splice(index, 1);
+        session.lines.splice(targetIndex, 1);
         if (session.currentIndex >= session.lines.length) {
           session.currentIndex = Math.max(session.lines.length - 1, 0);
-        } else if (session.currentIndex > index) {
+        } else if (session.currentIndex > targetIndex) {
           session.currentIndex -= 1;
-        } else if (session.currentIndex === index) {
-          session.currentIndex = Math.max(index - 1, 0);
+        } else if (session.currentIndex === targetIndex) {
+          session.currentIndex = Math.max(targetIndex - 1, 0);
         }
       }
 
@@ -10724,7 +10732,8 @@ io.on('connection', (socket) => {
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
     }
-  });
+    },
+  );
 
   socket.on('setLineType', ({ sessionId, index, type }) => {
     const session = getOwnedSocketSession(sessionId);
