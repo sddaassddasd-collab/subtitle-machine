@@ -852,6 +852,8 @@ const ControlPage = () => {
       : ''
   const [sessionMeta, setSessionMeta] = useState(null)
   const [lines, setLines] = useState([])
+  const linesRef = useRef(lines)
+  linesRef.current = lines
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
@@ -914,7 +916,6 @@ const ControlPage = () => {
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
   const [editingCell, setEditingCell] = useState(null)
-  const [lineDrafts, setLineDrafts] = useState({})
   const [roleEditor, setRoleEditor] = useState(null)
   const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
     useState(null)
@@ -933,6 +934,8 @@ const ControlPage = () => {
   const sessionBackupInputRef = useRef(null)
   const lineRefs = useRef({})
   const lineDraftsRef = useRef({})
+  const frozenLineTextRef = useRef({})
+  const composingLineDraftsRef = useRef(new Set())
   const rowRefs = useRef([])
   const serverDraftInputsRef = useRef({})
   const pendingLineClickTimeoutRef = useRef(null)
@@ -1505,8 +1508,11 @@ const ControlPage = () => {
 
   useEffect(() => {
     if (!editingCell) return
+    const targetLineId =
+      editingCell.lineId || linesRef.current[editingCell.index]?.id
+    if (!targetLineId) return
     const node =
-      lineRefs.current[getEditingCellKey(editingCell.index, editingCell.languageId)]
+      lineRefs.current[getLineDraftKey(targetLineId, editingCell.languageId)]
     if (!node) return
 
     requestAnimationFrame(() => {
@@ -1520,7 +1526,7 @@ const ControlPage = () => {
         selection.addRange(range)
       }
     })
-  }, [editingCell, lines])
+  }, [editingCell])
 
   useEffect(() => {
     if (editingCell && editingCell.index >= lines.length) {
@@ -2454,46 +2460,38 @@ const ControlPage = () => {
   const setLineDraft = (lineId, languageId, value) => {
     if (!lineId || !languageId) return
     const draftKey = getLineDraftKey(lineId, languageId)
-    const nextDrafts = {
-      ...lineDraftsRef.current,
-      [draftKey]: value,
-    }
-    lineDraftsRef.current = nextDrafts
-    setLineDrafts(nextDrafts)
+    lineDraftsRef.current[draftKey] = value
   }
 
   const clearLineDraft = (lineId, languageId) => {
     if (!lineId || !languageId) return
     const draftKey = getLineDraftKey(lineId, languageId)
+    delete frozenLineTextRef.current[draftKey]
+    composingLineDraftsRef.current.delete(draftKey)
     if (!Object.prototype.hasOwnProperty.call(lineDraftsRef.current, draftKey)) {
       return
     }
-    const nextDrafts = { ...lineDraftsRef.current }
-    delete nextDrafts[draftKey]
-    lineDraftsRef.current = nextDrafts
-    setLineDrafts(nextDrafts)
+    delete lineDraftsRef.current[draftKey]
   }
 
   const clearLineDraftsForLine = (lineId) => {
     if (!lineId) return
     const prefix = `${lineId}:`
-    const nextDrafts = Object.fromEntries(
-      Object.entries(lineDraftsRef.current).filter(
-        ([draftKey]) => !draftKey.startsWith(prefix),
-      ),
-    )
-    if (Object.keys(nextDrafts).length === Object.keys(lineDraftsRef.current).length) {
-      return
-    }
-    lineDraftsRef.current = nextDrafts
-    setLineDrafts(nextDrafts)
+    Object.keys(lineDraftsRef.current).forEach((draftKey) => {
+      if (draftKey.startsWith(prefix)) delete lineDraftsRef.current[draftKey]
+    })
+    Object.keys(frozenLineTextRef.current).forEach((draftKey) => {
+      if (draftKey.startsWith(prefix)) delete frozenLineTextRef.current[draftKey]
+    })
   }
 
   const handleLineTextClick = (event, index, languageId) => {
     event.stopPropagation()
     if (
       editingCell &&
-      editingCell.index === index &&
+      (editingCell.lineId
+        ? editingCell.lineId === lines[index]?.id
+        : editingCell.index === index) &&
       editingCell.languageId === languageId
     ) {
       return
@@ -2508,11 +2506,26 @@ const ControlPage = () => {
     setRoleEditor(null)
     const lineId = lines[index]?.id
     if (!lineId) return
+    const draftKey = getLineDraftKey(lineId, languageId)
+    frozenLineTextRef.current[draftKey] = getLineLanguageText(
+      lines[index],
+      languageId,
+    )
     setEditingCell({ index, lineId, languageId })
   }
 
   const handleLineInput = (event, lineId, languageId) => {
     setLineDraft(lineId, languageId, event.currentTarget.textContent ?? '')
+  }
+
+  const handleLineCompositionStart = (lineId, languageId) => {
+    composingLineDraftsRef.current.add(getLineDraftKey(lineId, languageId))
+  }
+
+  const handleLineCompositionEnd = (event, lineId, languageId) => {
+    const draftKey = getLineDraftKey(lineId, languageId)
+    setLineDraft(lineId, languageId, event.currentTarget.textContent ?? '')
+    composingLineDraftsRef.current.delete(draftKey)
   }
 
   const handleLineBlur = (event, index, languageId) => {
@@ -2523,7 +2536,9 @@ const ControlPage = () => {
     }
     if (
       !editingCell ||
-      editingCell.index !== index ||
+      (editingCell.lineId
+        ? editingCell.lineId !== lines[index]?.id
+        : editingCell.index !== index) ||
       editingCell.languageId !== languageId
     ) {
       return
@@ -2541,6 +2556,7 @@ const ControlPage = () => {
     const resolvedIndex = currentIndex >= 0 ? currentIndex : index
     setEditingCell(null)
     const draftKey = getLineDraftKey(editingLineId, languageId)
+    composingLineDraftsRef.current.delete(draftKey)
     const draftText = Object.prototype.hasOwnProperty.call(
       lineDraftsRef.current,
       draftKey,
@@ -2583,6 +2599,7 @@ const ControlPage = () => {
       shiftIndexesAfterLineRemoval(resolvedIndex)
     }
     clearLineDraft(editingLineId, languageId)
+    delete frozenLineTextRef.current[draftKey]
     setStatus({ kind: 'success', message: '字幕內容已更新' })
   }
 
@@ -2673,7 +2690,8 @@ const ControlPage = () => {
     if (!socketRef.current || !sessionId || !window.getSelection) return
 
     const cellKey = getEditingCellKey(index, languageId)
-    const node = lineRefs.current[cellKey] ?? event.currentTarget
+    const lineId = lines[index]?.id
+    const node = lineRefs.current[getLineDraftKey(lineId, languageId)] ?? event.currentTarget
     if (!node) return
 
     const selectionContext = getCollapsedLineSelectionContext(node)
@@ -2719,7 +2737,7 @@ const ControlPage = () => {
       if (mergePreview.removedCurrentLine) {
         shiftIndexesAfterLineRemoval(index)
       }
-      setEditingCell({ index: index - 1, languageId })
+      setEditingCell({ index: index - 1, lineId: lines[index - 1]?.id, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('mergeLineIntoPrevious', {
         sessionId,
@@ -2776,7 +2794,7 @@ const ControlPage = () => {
         return next
       })
       shiftIndexesAfterLineInsertion(index)
-      setEditingCell({ index: index + 1, languageId })
+      setEditingCell({ index: index + 1, lineId: null, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('insertLineAfter', {
         sessionId,
@@ -2816,7 +2834,7 @@ const ControlPage = () => {
       if (movePreview.insertedLine) {
         shiftIndexesAfterLineInsertion(index)
       }
-      setEditingCell({ index: index + 1, languageId })
+      setEditingCell({ index: index + 1, lineId: movePreview.lines[index + 1]?.id, languageId })
       setAutoCenterEnabled(true)
       socketRef.current.emit('moveLanguageSuffixToNextLine', {
         sessionId,
@@ -2845,7 +2863,7 @@ const ControlPage = () => {
       return next
     })
     shiftIndexesAfterLineInsertion(index)
-    setEditingCell({ index: index + 1, languageId })
+    setEditingCell({ index: index + 1, lineId: null, languageId })
     setAutoCenterEnabled(true)
     socketRef.current.emit('splitLine', {
       sessionId,
@@ -2895,7 +2913,7 @@ const ControlPage = () => {
       return next
     })
     shiftIndexesAfterLineInsertion(index)
-    setEditingCell({ index: index + 1, languageId })
+    setEditingCell({ index: index + 1, lineId: draftLine.id, languageId })
     setAutoCenterEnabled(true)
     socketRef.current.emit('insertLineAfter', {
       sessionId,
@@ -3026,7 +3044,7 @@ const ControlPage = () => {
               nextIndex === 0 ? '已新增第一個字幕格' : '已新增字幕格',
           },
         )
-        setEditingCell({ index: nextIndex, languageId: 'primary' })
+        setEditingCell({ index: nextIndex, lineId: draftLine.id, languageId: 'primary' })
         setAutoCenterEnabled(true)
       } catch {
         // performSessionMutation already reports the error.
@@ -3035,7 +3053,7 @@ const ControlPage = () => {
     }
 
     setLines((prev) => [...prev, draftLine])
-    setEditingCell({ index: nextIndex, languageId: 'primary' })
+    setEditingCell({ index: nextIndex, lineId: draftLine.id, languageId: 'primary' })
     setAutoCenterEnabled(true)
     socketRef.current.emit('insertLineAfter', {
       sessionId,
@@ -4871,18 +4889,16 @@ const ControlPage = () => {
                 >
                   {visibleLanguages.map((language) => {
                     const text = getLineLanguageText(line, language.id)
-                    const cellKey = getEditingCellKey(index, language.id)
                     const draftKey = getLineDraftKey(line.id, language.id)
-                    const editableText = Object.prototype.hasOwnProperty.call(
-                      lineDrafts,
-                      draftKey,
-                    )
-                      ? lineDrafts[draftKey]
-                      : text
                     const isEditing =
                       editingCell &&
-                      editingCell.index === index &&
+                      (editingCell.lineId
+                        ? editingCell.lineId === line.id
+                        : editingCell.index === index) &&
                       editingCell.languageId === language.id
+                    const renderedText = isEditing
+                      ? frozenLineTextRef.current[draftKey] ?? text
+                      : text
 
                     return (
                       <div key={language.id} className="script-line-column">
@@ -4921,7 +4937,7 @@ const ControlPage = () => {
                         </div>
                         <div
                           ref={(node) => {
-                            lineRefs.current[cellKey] = node
+                            lineRefs.current[draftKey] = node
                           }}
                           className={`script-line-text ${
                             isEditing ? 'editing' : ''
@@ -4942,11 +4958,17 @@ const ControlPage = () => {
                           onInput={(event) =>
                             handleLineInput(event, line.id, language.id)
                           }
+                          onCompositionStart={() =>
+                            handleLineCompositionStart(line.id, language.id)
+                          }
+                          onCompositionEnd={(event) =>
+                            handleLineCompositionEnd(event, line.id, language.id)
+                          }
                           onKeyDown={(event) =>
                             handleLineKeyDown(event, index, language.id)
                           }
                         >
-                          {editableText}
+                          {renderedText}
                         </div>
                       </div>
                     )
