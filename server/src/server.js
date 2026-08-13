@@ -2487,7 +2487,7 @@ function expandStageDirectionSegments(entry) {
       previous.text = `${previous.text}${needsLeadingSpace}${sanitized}`.trim();
     } else {
       segments.push({
-        id: generateId('line'),
+        id: segments.length === 0 ? entry.id : generateId('line'),
         text: sanitized,
         type,
         music: entry.music === true,
@@ -10662,22 +10662,35 @@ io.on('connection', (socket) => {
 
   socket.on(
     'updateLine',
-    ({ sessionId, index, lineId, text, type, music, languageId }) => {
-    const session = getOwnedSocketSession(sessionId);
-    if (!session) return;
+    (
+      { sessionId, index, lineId, text, type, music, languageId, expectedText },
+      ack,
+    ) => {
+      const acknowledge = typeof ack === 'function' ? ack : () => {};
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) {
+        acknowledge({ ok: false, reason: 'session_not_allowed' });
+        return;
+      }
 
-    const targetIndex =
-      typeof lineId === 'string' && lineId.trim()
-        ? session.lines.findIndex((line) => line?.id === lineId.trim())
-        : index;
+      const targetIndex =
+        typeof lineId === 'string' && lineId.trim()
+          ? session.lines.findIndex((line) => line?.id === lineId.trim())
+          : index;
 
-    if (
-      Number.isInteger(targetIndex) &&
-      targetIndex >= 0 &&
-      targetIndex < session.lines.length &&
-      typeof text === 'string'
-    ) {
-      pushSessionHistory(session);
+      if (
+        !Number.isInteger(targetIndex) ||
+        targetIndex < 0 ||
+        targetIndex >= session.lines.length
+      ) {
+        acknowledge({ ok: false, reason: 'line_not_found' });
+        return;
+      }
+      if (typeof text !== 'string') {
+        acknowledge({ ok: false, reason: 'invalid_text' });
+        return;
+      }
+
       const existingRaw = session.lines[targetIndex];
       const sanitized = sanitizeLineText(text);
       const explicitType = clampLineType(type);
@@ -10685,6 +10698,19 @@ io.on('connection', (socket) => {
         typeof languageId === 'string' && languageId.trim()
           ? languageId.trim()
           : 'primary';
+      if (
+        typeof expectedText === 'string' &&
+        getLineLanguageText(existingRaw, targetLanguageId) !==
+          sanitizeLineText(expectedText)
+      ) {
+        acknowledge({
+          ok: false,
+          reason: 'edit_conflict',
+          currentText: getLineLanguageText(existingRaw, targetLanguageId),
+        });
+        return;
+      }
+      pushSessionHistory(session);
       const previousType =
         existingRaw &&
         typeof existingRaw === 'object' &&
@@ -10739,7 +10765,11 @@ io.on('connection', (socket) => {
       persistSession(session);
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
-    }
+      acknowledge({
+        ok: true,
+        lineId: nextLine.id,
+        removed: !lineHasAnyLanguageText(nextLine),
+      });
     },
   );
 

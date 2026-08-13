@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
@@ -800,6 +800,65 @@ const buildBlankTranslations = (languages) => {
 const getEditingCellKey = (index, languageId) => `${index}:${languageId}`
 const getLineDraftKey = (lineId, languageId) => `${lineId}:${languageId}`
 
+const EditableSubtitleText = ({
+  text,
+  lineId,
+  isEditing,
+  className,
+  onClick,
+  onDoubleClick,
+  onBlur,
+  onInput,
+  onCompositionStart,
+  onCompositionEnd,
+  onKeyDown,
+}) => {
+  const nodeRef = useRef(null)
+  const wasEditingRef = useRef(false)
+
+  useLayoutEffect(() => {
+    const node = nodeRef.current
+    if (!node) return
+
+    if (!isEditing) {
+      if (node.textContent !== text) node.textContent = text
+      wasEditingRef.current = false
+      return
+    }
+
+    if (wasEditingRef.current) return
+    wasEditingRef.current = true
+    node.focus()
+    const range = document.createRange()
+    range.selectNodeContents(node)
+    range.collapse(false)
+    const selection = window.getSelection()
+    if (selection) {
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+  }, [isEditing, text])
+
+  return (
+    <div
+      ref={nodeRef}
+      data-line-id={lineId}
+      className={className}
+      contentEditable={Boolean(isEditing)}
+      suppressContentEditableWarning
+      spellCheck={false}
+      tabIndex={0}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      onBlur={onBlur}
+      onInput={onInput}
+      onCompositionStart={onCompositionStart}
+      onCompositionEnd={onCompositionEnd}
+      onKeyDown={onKeyDown}
+    />
+  )
+}
+
 const formatStatusTimestamp = (timestamp) => {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return ''
   return new Date(timestamp).toLocaleString('zh-TW', { hour12: false })
@@ -932,9 +991,7 @@ const ControlPage = () => {
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
   const sessionBackupInputRef = useRef(null)
-  const lineRefs = useRef({})
   const lineDraftsRef = useRef({})
-  const frozenLineTextRef = useRef({})
   const composingLineDraftsRef = useRef(new Set())
   const rowRefs = useRef([])
   const serverDraftInputsRef = useRef({})
@@ -1505,28 +1562,6 @@ const ControlPage = () => {
       setComparisonLanguageId(extraLanguages[0].id)
     }
   }, [comparisonLanguageId, extraLanguages])
-
-  useEffect(() => {
-    if (!editingCell) return
-    const targetLineId =
-      editingCell.lineId || linesRef.current[editingCell.index]?.id
-    if (!targetLineId) return
-    const node =
-      lineRefs.current[getLineDraftKey(targetLineId, editingCell.languageId)]
-    if (!node) return
-
-    requestAnimationFrame(() => {
-      node.focus()
-      const range = document.createRange()
-      range.selectNodeContents(node)
-      range.collapse(false)
-      const selection = window.getSelection()
-      if (selection) {
-        selection.removeAllRanges()
-        selection.addRange(range)
-      }
-    })
-  }, [editingCell])
 
   useEffect(() => {
     if (editingCell && editingCell.index >= lines.length) {
@@ -2466,7 +2501,6 @@ const ControlPage = () => {
   const clearLineDraft = (lineId, languageId) => {
     if (!lineId || !languageId) return
     const draftKey = getLineDraftKey(lineId, languageId)
-    delete frozenLineTextRef.current[draftKey]
     composingLineDraftsRef.current.delete(draftKey)
     if (!Object.prototype.hasOwnProperty.call(lineDraftsRef.current, draftKey)) {
       return
@@ -2479,9 +2513,6 @@ const ControlPage = () => {
     const prefix = `${lineId}:`
     Object.keys(lineDraftsRef.current).forEach((draftKey) => {
       if (draftKey.startsWith(prefix)) delete lineDraftsRef.current[draftKey]
-    })
-    Object.keys(frozenLineTextRef.current).forEach((draftKey) => {
-      if (draftKey.startsWith(prefix)) delete frozenLineTextRef.current[draftKey]
     })
   }
 
@@ -2506,12 +2537,12 @@ const ControlPage = () => {
     setRoleEditor(null)
     const lineId = lines[index]?.id
     if (!lineId) return
-    const draftKey = getLineDraftKey(lineId, languageId)
-    frozenLineTextRef.current[draftKey] = getLineLanguageText(
-      lines[index],
+    setEditingCell({
+      index,
+      lineId,
       languageId,
-    )
-    setEditingCell({ index, lineId, languageId })
+      baseText: getLineLanguageText(lines[index], languageId),
+    })
   }
 
   const handleLineInput = (event, lineId, languageId) => {
@@ -2528,7 +2559,7 @@ const ControlPage = () => {
     composingLineDraftsRef.current.delete(draftKey)
   }
 
-  const handleLineBlur = (event, index, languageId) => {
+  const handleLineBlur = (event, index, lineId, languageId) => {
     const cellKey = getEditingCellKey(index, languageId)
     if (skipBlurRef.current.has(cellKey)) {
       skipBlurRef.current.delete(cellKey)
@@ -2537,14 +2568,17 @@ const ControlPage = () => {
     if (
       !editingCell ||
       (editingCell.lineId
-        ? editingCell.lineId !== lines[index]?.id
+        ? editingCell.lineId !== lineId
         : editingCell.index !== index) ||
       editingCell.languageId !== languageId
     ) {
       return
     }
-    const editingLineId = editingCell.lineId || lines[index]?.id
-    const currentIndex = lines.findIndex((line) => line?.id === editingLineId)
+    const editingLineId = editingCell.lineId || lineId
+    const latestLines = linesRef.current
+    const currentIndex = latestLines.findIndex(
+      (line) => line?.id === editingLineId,
+    )
     if (editingCell.lineId && currentIndex < 0) {
       setEditingCell(null)
       setStatus({
@@ -2564,10 +2598,23 @@ const ControlPage = () => {
       ? lineDraftsRef.current[draftKey]
       : event.currentTarget.textContent ?? ''
     const newText = normalizeEditableSegment(draftText)
-    const currentLine = lines[resolvedIndex]
+    const currentLine = latestLines[resolvedIndex]
     const currentText = getLineLanguageText(currentLine, languageId)
-    if (newText === currentText || !socketRef.current || !sessionId) {
+    if (newText === currentText) {
       clearLineDraft(editingLineId, languageId)
+      return
+    }
+    if (!socketRef.current?.connected || !sessionId) {
+      setEditingCell({
+        index: resolvedIndex,
+        lineId: editingLineId,
+        languageId,
+        baseText: currentText,
+      })
+      setStatus({
+        kind: 'error',
+        message: '目前未連線，字幕草稿已保留但尚未保存',
+      })
       return
     }
     const shouldRemoveLine = shouldRemoveLineAfterLanguageUpdate(
@@ -2576,13 +2623,57 @@ const ControlPage = () => {
       newText,
     )
 
-    socketRef.current.emit('updateLine', {
-      sessionId,
-      index: resolvedIndex,
-      lineId: editingLineId,
-      text: newText,
-      languageId,
-    })
+    socketRef.current.timeout(5000).emit(
+      'updateLine',
+      {
+        sessionId,
+        index: resolvedIndex,
+        lineId: editingLineId,
+        text: newText,
+        languageId,
+        expectedText: editingCell.baseText,
+      },
+      (ackError, result) => {
+        if (ackError) {
+          setEditingCell({
+            index: resolvedIndex,
+            lineId: editingLineId,
+            languageId,
+            baseText: editingCell.baseText,
+          })
+          setStatus({
+            kind: 'error',
+            message: '伺服器未確認保存；字幕草稿已保留',
+          })
+          return
+        }
+        if (result?.ok) {
+          clearLineDraft(editingLineId, languageId)
+          setStatus({ kind: 'success', message: '字幕內容已更新' })
+          return
+        }
+
+        setEditingCell({
+          index: resolvedIndex,
+          lineId: editingLineId,
+          languageId,
+          baseText:
+            result?.reason === 'edit_conflict' &&
+            typeof result.currentText === 'string'
+              ? result.currentText
+              : editingCell.baseText,
+        })
+        setStatus({
+          kind: 'error',
+          message:
+            result?.reason === 'line_not_found'
+              ? '這句字幕已被其他操作刪除；輸入草稿已保留'
+              : result?.reason === 'edit_conflict'
+                ? '這句字幕已被其他控制端修改；你的草稿仍保留，請確認後再保存'
+                : '字幕尚未保存，請確認連線後再試',
+        })
+      },
+    )
     setLines((prev) => {
       const next = applyLineLanguageTextUpdate(
         prev,
@@ -2598,9 +2689,7 @@ const ControlPage = () => {
     if (shouldRemoveLine) {
       shiftIndexesAfterLineRemoval(resolvedIndex)
     }
-    clearLineDraft(editingLineId, languageId)
-    delete frozenLineTextRef.current[draftKey]
-    setStatus({ kind: 'success', message: '字幕內容已更新' })
+    setStatus({ kind: 'info', message: '正在保存字幕…' })
   }
 
   const handleToggleLineType = (event, index) => {
@@ -2690,8 +2779,7 @@ const ControlPage = () => {
     if (!socketRef.current || !sessionId || !window.getSelection) return
 
     const cellKey = getEditingCellKey(index, languageId)
-    const lineId = lines[index]?.id
-    const node = lineRefs.current[getLineDraftKey(lineId, languageId)] ?? event.currentTarget
+    const node = event.currentTarget
     if (!node) return
 
     const selectionContext = getCollapsedLineSelectionContext(node)
@@ -3851,7 +3939,6 @@ const ControlPage = () => {
     : comparisonLanguageId === ALL_LANGUAGES_OPTION_ID
       ? '全部語言欄顯示目前字幕清單結果；要更新內容請在左側輸入區重新解析。'
     : ''
-  lineRefs.current = {}
   rowRefs.current = []
 
   const transcriptionStatusLabelMap = {
@@ -4889,16 +4976,12 @@ const ControlPage = () => {
                 >
                   {visibleLanguages.map((language) => {
                     const text = getLineLanguageText(line, language.id)
-                    const draftKey = getLineDraftKey(line.id, language.id)
                     const isEditing =
                       editingCell &&
                       (editingCell.lineId
                         ? editingCell.lineId === line.id
                         : editingCell.index === index) &&
                       editingCell.languageId === language.id
-                    const renderedText = isEditing
-                      ? frozenLineTextRef.current[draftKey] ?? text
-                      : text
 
                     return (
                       <div key={language.id} className="script-line-column">
@@ -4935,17 +5018,13 @@ const ControlPage = () => {
                             </button>
                           </div>
                         </div>
-                        <div
-                          ref={(node) => {
-                            lineRefs.current[draftKey] = node
-                          }}
+                        <EditableSubtitleText
+                          text={text}
+                          lineId={line.id}
+                          isEditing={Boolean(isEditing)}
                           className={`script-line-text ${
                             isEditing ? 'editing' : ''
                           } ${language.id !== 'primary' ? 'translation' : ''}`}
-                          contentEditable={Boolean(isEditing)}
-                          suppressContentEditableWarning
-                          spellCheck={false}
-                          tabIndex={0}
                           onClick={(event) =>
                             handleLineTextClick(event, index, language.id)
                           }
@@ -4953,7 +5032,7 @@ const ControlPage = () => {
                             handleLineTextDoubleClick(event, index, language.id)
                           }
                           onBlur={(event) =>
-                            handleLineBlur(event, index, language.id)
+                            handleLineBlur(event, index, line.id, language.id)
                           }
                           onInput={(event) =>
                             handleLineInput(event, line.id, language.id)
@@ -4967,9 +5046,7 @@ const ControlPage = () => {
                           onKeyDown={(event) =>
                             handleLineKeyDown(event, index, language.id)
                           }
-                        >
-                          {renderedText}
-                        </div>
+                        />
                       </div>
                     )
                   })}
