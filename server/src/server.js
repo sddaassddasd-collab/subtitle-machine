@@ -2244,13 +2244,8 @@ function normalizeTranslationsMap(
 
 function createLineRecord(entry, primaryLanguageId = 'primary') {
   const rawType = clampLineType(entry?.type) || LINE_TYPES.DIALOGUE;
-  const rawText = sanitizeLineText(entry?.text ?? '');
-  const extracted =
-    rawType === LINE_TYPES.DIALOGUE
-      ? extractRoleFromDialogueText(rawText)
-      : { text: rawText, role: null };
-  const text = extracted.text;
-  const role = normalizeRoleName(entry?.role ?? extracted.role);
+  const text = sanitizeLineText(entry?.text ?? '');
+  const role = normalizeRoleName(entry?.role);
   const translations = normalizeTranslationsMap(
     entry?.translations,
     primaryLanguageId,
@@ -4028,6 +4023,7 @@ function fallbackSegmentScript(rawText, options = {}) {
     rawText,
   );
   const lines = [];
+  let activeRole = null;
   const paragraphs = rawText
     .split(/\r?\n+/)
     .map((paragraph) => paragraph.trim())
@@ -4043,11 +4039,27 @@ function fallbackSegmentScript(rawText, options = {}) {
     units.forEach((unit) => {
       const text = sanitizeLineText(unit);
       if (!text) return;
+      const standaloneRole = extractStandaloneRoleMarker(text);
+      if (standaloneRole) {
+        activeRole = standaloneRole;
+        return;
+      }
+      const type = isLikelyDirection(text)
+        ? LINE_TYPES.DIRECTION
+        : LINE_TYPES.DIALOGUE;
+      const extracted =
+        type === LINE_TYPES.DIALOGUE
+          ? extractRoleFromDialogueText(text)
+          : { text, role: null };
+      const role =
+        type === LINE_TYPES.DIALOGUE
+          ? normalizeRoleName(extracted.role) || activeRole || null
+          : null;
+      if (role) activeRole = role;
       lines.push({
-        text,
-        type: isLikelyDirection(text)
-          ? LINE_TYPES.DIRECTION
-          : LINE_TYPES.DIALOGUE,
+        text: sanitizeLineText(extracted.text || text),
+        type,
+        role,
       });
     });
   });
@@ -7328,7 +7340,6 @@ function normalizeAutoFollowMatchText(text) {
   const sanitized = sanitizeLineText(text || '');
   if (!sanitized) return '';
   return sanitized
-    .replace(/^[^：:\n]{1,12}[：:]/u, '')
     .replace(/[（(][^（）()]{0,80}[）)]/gu, '')
     .replace(/[\s　"'“”‘’「」『』《》〈〉【】\[\]{}（）(),，、。．.；;：:！？!?…—\-]/gu, '')
     .toLocaleLowerCase();
@@ -7336,15 +7347,12 @@ function normalizeAutoFollowMatchText(text) {
 
 function getAutoFollowLineText(line) {
   if (!line || line.type === LINE_TYPES.DIRECTION) return '';
-  const extracted = extractRoleFromDialogueText(line.text || '');
-  const text = extracted.role ? extracted.text : line.text || '';
-  return normalizeAutoFollowMatchText(text);
+  return normalizeAutoFollowMatchText(line.text || '');
 }
 
 function getAutoFollowDisplayText(line) {
   if (!line) return '';
-  const extracted = extractRoleFromDialogueText(line.text || '');
-  return sanitizeLineText(extracted.role ? extracted.text : line.text || '');
+  return sanitizeLineText(line.text || '');
 }
 
 function findAutoDialogueIndexAtOrAfter(session, startIndex) {
