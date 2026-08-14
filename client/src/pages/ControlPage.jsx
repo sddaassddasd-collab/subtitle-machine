@@ -2207,6 +2207,32 @@ const ControlPage = () => {
       const sourceNode = audioContext.createMediaStreamSource(stream)
       const silenceNode = audioContext.createGain()
       silenceNode.gain.value = 0
+      const pendingAudioPackets = []
+      let transcriptionReady = false
+      let nextAudioSequence = 1
+
+      const sendAudioPacket = (packet) => {
+        const socket = socketRef.current
+        if (!socket || !sessionId) return
+        socket.emit('transcription:audio', packet, (ack) => {
+          const acknowledgedAt = Date.now()
+          setMicDiagnostics((prev) => ({
+            ...prev,
+            socketConnected: socket.connected === true,
+            lastAckAt: ack?.ok === true ? acknowledgedAt : prev.lastAckAt,
+            lastAckLevel:
+              typeof ack?.level === 'number' && Number.isFinite(ack.level)
+                ? ack.level
+                : prev.lastAckLevel,
+            lastRejectReason:
+              ack?.ok === true
+                ? ''
+                : typeof ack?.reason === 'string'
+                  ? ack.reason
+                  : prev.lastRejectReason,
+          }))
+        })
+      }
 
       const emitSamples = (sourceSamples) => {
         if (!sourceSamples?.length) return
@@ -2236,33 +2262,23 @@ const ControlPage = () => {
           }))
         }
 
-        socket.emit(
-          'transcription:audio',
-          {
-            sessionId,
-            audio,
-            durationMs,
-            level,
-          },
-          (ack) => {
-            const acknowledgedAt = Date.now()
-            setMicDiagnostics((prev) => ({
-              ...prev,
-              socketConnected: socket.connected === true,
-              lastAckAt: ack?.ok === true ? acknowledgedAt : prev.lastAckAt,
-              lastAckLevel:
-                typeof ack?.level === 'number' && Number.isFinite(ack.level)
-                  ? ack.level
-                  : prev.lastAckLevel,
-              lastRejectReason:
-                ack?.ok === true
-                  ? ''
-                  : typeof ack?.reason === 'string'
-                    ? ack.reason
-                    : prev.lastRejectReason,
-            }))
-          },
-        )
+        const packet = {
+          sessionId,
+          audio,
+          durationMs,
+          level,
+          sequence: nextAudioSequence,
+          capturedAt: now,
+        }
+        nextAudioSequence += 1
+        if (transcriptionReady) {
+          sendAudioPacket(packet)
+          return
+        }
+        pendingAudioPackets.push(packet)
+        while (pendingAudioPackets.length > 100) {
+          pendingAudioPackets.shift()
+        }
       }
 
       let captureNode = null
@@ -2323,17 +2339,39 @@ const ControlPage = () => {
         silenceNode,
       }
 
-      socketRef.current.emit('transcription:start', {
-        sessionId,
-        apiKey,
-        model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
-        language: transcription.language || 'zh',
-        semanticSegmentationEnabled: true,
-        dualChannelEnabled: true,
-        transcriptionContext: transcription.transcriptionContext || '',
-        speakerRecognitionEnabled:
-          transcription.speakerRecognitionEnabled === true,
+      const startResult = await new Promise((resolve, reject) => {
+        socketRef.current
+          .timeout(10000)
+          .emit(
+            'transcription:start',
+            {
+              sessionId,
+              apiKey,
+              model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
+              language: transcription.language || 'zh',
+              semanticSegmentationEnabled: true,
+              dualChannelEnabled: true,
+              transcriptionContext: transcription.transcriptionContext || '',
+              speakerRecognitionEnabled:
+                transcription.speakerRecognitionEnabled === true,
+            },
+            (error, response) => {
+              if (error) {
+                reject(new Error('語音辨識服務連線逾時'))
+                return
+              }
+              resolve(response)
+            },
+          )
       })
+      if (startResult?.ok !== true) {
+        throw new Error(startResult?.reason || '語音辨識服務未就緒')
+      }
+      if (captureStateRef.current.audioContext !== audioContext) {
+        throw new Error('麥克風收音已停止')
+      }
+      transcriptionReady = true
+      pendingAudioPackets.splice(0).forEach(sendAudioPacket)
       autoStartedTranscriptionRef.current = autoFollow
       projectorStartedTranscriptionRef.current = !autoFollow
       setStatus({

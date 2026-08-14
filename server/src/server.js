@@ -6065,6 +6065,13 @@ function stopTranscriptionStream(sessionId, options = {}) {
   }
 
   transcriptionStreams.delete(sessionId);
+  if (typeof stream.startAcknowledge === 'function') {
+    stream.startAcknowledge({
+      ok: false,
+      reason: options.errorMessage || options.reason || 'transcription_stopped',
+    });
+    stream.startAcknowledge = null;
+  }
   stream.closing = true;
   stream.ready = false;
   clearRealtimeForceCommitTimer(stream);
@@ -9886,6 +9893,7 @@ function startRealtimeTranscription({
   dualChannelEnabled,
   speakerRecognitionEnabled,
   transcriptionContext,
+  startAcknowledge,
 }) {
   const selectedModel = normalizeTranscriptionModel(model);
   const selectedLanguage = normalizeLanguageCode(language);
@@ -9953,6 +9961,8 @@ function startRealtimeTranscription({
     commitInFlight: false,
     lastCommitAt: 0,
     closing: false,
+    startAcknowledge:
+      typeof startAcknowledge === 'function' ? startAcknowledge : null,
   };
   transcriptionStreams.set(sessionId, stream);
 
@@ -10017,6 +10027,10 @@ function startRealtimeTranscription({
       (typeof event?.session?.type === 'string' && event.session.type) ||
       stream.sessionType;
     stream.ready = true;
+    if (typeof stream.startAcknowledge === 'function') {
+      stream.startAcknowledge({ ok: true, readyAt: Date.now() });
+      stream.startAcknowledge = null;
+    }
     if (stream.initTimeout) {
       clearTimeout(stream.initTimeout);
       stream.initTimeout = null;
@@ -10350,20 +10364,32 @@ io.on('connection', (socket) => {
       dualChannelEnabled,
       speakerRecognitionEnabled,
       transcriptionContext,
-    }) => {
-      if (!sessionId) return;
+    }, startAck) => {
+      const acknowledge = typeof startAck === 'function' ? startAck : () => {};
+      if (!sessionId) {
+        acknowledge({ ok: false, reason: 'missing_session' });
+        return;
+      }
 
       const session = getOwnedSocketSession(sessionId);
-      if (!session) return;
+      if (!session) {
+        acknowledge({ ok: false, reason: 'session_not_allowed' });
+        return;
+      }
 
       const trimmedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
       if (!trimmedApiKey) {
+        acknowledge({ ok: false, reason: '缺少 OpenAI API Key' });
         applyTranscriptionError(sessionId, '缺少 OpenAI API Key，無法啟動語音辨識');
         return;
       }
 
       const active = transcriptionStreams.get(sessionId);
       if (active && active.socketId !== socket.id) {
+        acknowledge({
+          ok: false,
+          reason: '此節目已有其他控制端在進行語音辨識',
+        });
         socket.emit('transcription:error', {
           message: '此節目已有其他控制端在進行語音辨識',
         });
@@ -10410,10 +10436,12 @@ io.on('connection', (socket) => {
           dualChannelEnabled,
           speakerRecognitionEnabled,
           transcriptionContext,
+          startAcknowledge: acknowledge,
         });
       } catch (error) {
         const message =
           sanitizeLineText(error?.message || '') || '啟動語音辨識失敗';
+        acknowledge({ ok: false, reason: message });
         applyTranscriptionError(sessionId, message);
       }
     },
