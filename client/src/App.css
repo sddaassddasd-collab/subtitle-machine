@@ -446,8 +446,8 @@
 }
 
 .viewer-preview-box.viewer-music-preview {
-  border: 2px solid rgba(244, 114, 182, 0.45);
-  box-shadow: 0 24px 50px rgba(190, 24, 93, 0.18);
+  border: 2px solid rgba(255, 255, 255, 0.54);
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.34);
 }
 
 .viewer-preview-music {
@@ -455,9 +455,9 @@
   align-self: center;
   padding: 0.35rem 0.8rem;
   border-radius: 999px;
-  background: rgba(244, 114, 182, 0.16);
-  border: 1px solid rgba(244, 114, 182, 0.4);
-  color: #fce7f3;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  color: #fff;
   font-size: 0.82rem;
   font-weight: 600;
 }
@@ -1618,6 +1618,27 @@
   text-shadow:
     0 1px 0 rgba(120, 53, 15, 0.4),
     0 0 18px rgba(255, 251, 235, 0.18);
+}
+
+.viewer-music-banner--music .viewer-music-banner-inner {
+  border-color: rgba(255, 255, 255, 0.72);
+  background: linear-gradient(135deg, rgba(8, 8, 8, 0.97), rgba(42, 42, 42, 0.95));
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 18px 42px rgba(0, 0, 0, 0.52),
+    0 0 32px rgba(255, 255, 255, 0.08);
+}
+
+.viewer-music-banner--music .viewer-music-label {
+  color: #050505;
+  background: linear-gradient(135deg, #fff, #cfcfcf);
+}
+
+.viewer-music-banner--music .viewer-music-text {
+  color: #fff;
+  text-shadow:
+    0 1px 0 #000,
+    0 0 18px rgba(255, 255, 255, 0.16);
 }
 
 @keyframes music-banner-enter {

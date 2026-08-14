@@ -408,7 +408,11 @@ const ViewerPage = () => {
       </div>
 
       {displayEnabled && musicActive && (
-        <div className="viewer-music-banner" role="status" aria-live="polite">
+        <div
+          className="viewer-music-banner viewer-music-banner--music"
+          role="status"
+          aria-live="polite"
+        >
           <div className="viewer-music-banner-inner">
             <span className="viewer-music-label">音樂提示</span>
             <span className="viewer-music-text">{musicText}</span>
