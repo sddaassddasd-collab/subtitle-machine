@@ -953,8 +953,9 @@ const ControlPage = () => {
   const [musicRangeAnchorLineId, setMusicRangeAnchorLineId] = useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
   const liveCurrentIndexRef = useRef(0)
+  const liveLineIdRef = useRef(null)
   const pendingCueRequestRef = useRef(null)
-  const [autoCenterEnabled, setAutoCenterEnabled] = useState(false)
+  const [cueScrollRequest, setCueScrollRequest] = useState(null)
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
@@ -984,6 +985,14 @@ const ControlPage = () => {
     startTimer: null,
     repeatTimer: null,
   })
+
+  const requestCueScroll = useCallback((lineId) => {
+    if (!lineId) return
+    setCueScrollRequest((previous) => ({
+      lineId,
+      revision: (previous?.revision || 0) + 1,
+    }))
+  }, [])
   const captureStateRef = useRef({
     mediaStream: null,
     audioContext: null,
@@ -1340,6 +1349,19 @@ const ControlPage = () => {
       setSessionMeta(nextSession)
       setLines(nextLines)
       syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
+      const nextLiveLineId = nextLines[effectiveLiveIndex]?.id || null
+      const liveLineChanged =
+        Boolean(liveLineIdRef.current) &&
+        Boolean(nextLiveLineId) &&
+        liveLineIdRef.current !== nextLiveLineId
+      if (
+        liveLineChanged &&
+        !pendingCueRequestRef.current &&
+        !editingModeEnabled
+      ) {
+        requestCueScroll(nextLiveLineId)
+      }
+      liveLineIdRef.current = nextLiveLineId
       liveCurrentIndexRef.current = effectiveLiveIndex
       setLiveCurrentIndex(effectiveLiveIndex)
       setCurrentIndex((prev) =>
@@ -1359,7 +1381,12 @@ const ControlPage = () => {
         canRedo: payload?.history?.canRedo === true,
       })
     },
-    [applyProjectorSettingsPayload, editingModeEnabled, syncLanguageSourceDrafts],
+    [
+      applyProjectorSettingsPayload,
+      editingModeEnabled,
+      requestCueScroll,
+      syncLanguageSourceDrafts,
+    ],
   )
 
   const releaseMicrophoneCapture = () => {
@@ -1444,8 +1471,12 @@ const ControlPage = () => {
         socketRef.current.emit('setCurrentIndex', { sessionId, index })
         pendingCueRequestRef.current = { index, requestedAt: Date.now() }
         liveCurrentIndexRef.current = index
+        liveLineIdRef.current = linesRef.current[index]?.id || null
         setLiveCurrentIndex(index)
         setCurrentIndex(index)
+        if (!editingModeEnabled) {
+          requestCueScroll(linesRef.current[index]?.id)
+        }
         if (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
           setSessionMeta((prev) =>
             prev
@@ -1459,7 +1490,13 @@ const ControlPage = () => {
         }
       }, 180)
     },
-    [clearPendingLineClick, sessionId, subtitleControlMode],
+    [
+      clearPendingLineClick,
+      editingModeEnabled,
+      requestCueScroll,
+      sessionId,
+      subtitleControlMode,
+    ],
   )
 
   useEffect(() => {
@@ -1587,21 +1624,25 @@ const ControlPage = () => {
   }, [sessionId, selectedCellId])
 
   useEffect(() => {
-    if (editingCell != null) return
-    const node = rowRefs.current[currentIndex]
-    if (!node) return
+    liveLineIdRef.current = null
+    setCueScrollRequest(null)
+  }, [sessionId])
 
-    if (!autoCenterEnabled) {
-      if (currentIndex === 0) return
-      setAutoCenterEnabled(true)
-    }
+  useEffect(() => {
+    if (!cueScrollRequest) return
+    const targetIndex = linesRef.current.findIndex(
+      (line) => line?.id === cueScrollRequest.lineId,
+    )
+    if (targetIndex < 0) return
+    const node = rowRefs.current[targetIndex]
+    if (!node) return
 
     node.scrollIntoView({
       block: 'center',
       inline: 'nearest',
-      behavior: autoCenterEnabled ? 'smooth' : 'auto',
+      behavior: 'smooth',
     })
-  }, [currentIndex, lines, autoCenterEnabled, editingCell])
+  }, [cueScrollRequest])
 
   useEffect(() => {
     if (!authReady || !user || !sessionId) return
@@ -1778,6 +1819,9 @@ const ControlPage = () => {
       displayEnabled: nextState,
     })
     setDisplayEnabled(nextState)
+    if (nextState && !editingModeEnabled) {
+      requestCueScroll(linesRef.current[liveCurrentIndexRef.current]?.id)
+    }
     setStatus({
       kind: 'info',
       message: nextState ? '外部字幕已重新顯示' : '檢視端與投影端已遮蔽字幕',
@@ -1964,10 +2008,13 @@ const ControlPage = () => {
         requestedAt: Date.now(),
       }
       liveCurrentIndexRef.current = nextIndex
+      const nextLineId = lines[nextIndex]?.id || null
+      liveLineIdRef.current = nextLineId
       setLiveCurrentIndex(nextIndex)
       setCurrentIndex((prev) =>
         editingModeEnabled ? clampLineIndex(prev, lines.length) : nextIndex,
       )
+      if (!editingModeEnabled) requestCueScroll(nextLineId)
       if (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
         setSessionMeta((prev) =>
           prev
@@ -1987,7 +2034,8 @@ const ControlPage = () => {
     [
       clearPendingLineClick,
       editingModeEnabled,
-      lines.length,
+      lines,
+      requestCueScroll,
       sessionId,
       subtitleControlMode,
     ],
@@ -2033,6 +2081,9 @@ const ControlPage = () => {
           displayEnabled: nextState,
         })
         setDisplayEnabled(nextState)
+        if (nextState && !editingModeEnabled) {
+          requestCueScroll(linesRef.current[liveCurrentIndexRef.current]?.id)
+        }
         return
       }
 
@@ -2072,10 +2123,12 @@ const ControlPage = () => {
   }, [
     sessionId,
     displayEnabled,
+    editingModeEnabled,
     historyState.canUndo,
     historyState.canRedo,
     applySessionPayload,
     handleShiftCurrentIndex,
+    requestCueScroll,
   ])
 
   const handleStartLiveTranscription = async (options = {}) => {
@@ -2332,8 +2385,19 @@ const ControlPage = () => {
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
     pendingCueRequestRef.current = { index, requestedAt: Date.now() }
     liveCurrentIndexRef.current = index
+    liveLineIdRef.current = lines[index]?.id || null
     setLiveCurrentIndex(index)
     setCurrentIndex(index)
+    if (!editingModeEnabled) requestCueScroll(lines[index]?.id)
+  }
+
+  const handleEditingModeChange = (event) => {
+    const nextEnabled = event.target.checked
+    setEditingModeEnabled(nextEnabled)
+    if (!nextEnabled) {
+      setEditingCell(null)
+      requestCueScroll(linesRef.current[liveCurrentIndexRef.current]?.id)
+    }
   }
 
   const handleOpenRoleEditor = (event, index) => {
@@ -2775,7 +2839,6 @@ const ControlPage = () => {
         shiftIndexesAfterLineRemoval(index)
       }
       setEditingCell({ index: index - 1, lineId: lines[index - 1]?.id, languageId })
-      setAutoCenterEnabled(true)
       socketRef.current.emit('mergeLineIntoPrevious', {
         sessionId,
         index,
@@ -2832,7 +2895,6 @@ const ControlPage = () => {
       })
       shiftIndexesAfterLineInsertion(index)
       setEditingCell({ index: index + 1, lineId: null, languageId })
-      setAutoCenterEnabled(true)
       socketRef.current.emit('insertLineAfter', {
         sessionId,
         index,
@@ -2872,7 +2934,6 @@ const ControlPage = () => {
         shiftIndexesAfterLineInsertion(index)
       }
       setEditingCell({ index: index + 1, lineId: movePreview.lines[index + 1]?.id, languageId })
-      setAutoCenterEnabled(true)
       socketRef.current.emit('moveLanguageSuffixToNextLine', {
         sessionId,
         index,
@@ -2901,7 +2962,6 @@ const ControlPage = () => {
     })
     shiftIndexesAfterLineInsertion(index)
     setEditingCell({ index: index + 1, lineId: null, languageId })
-    setAutoCenterEnabled(true)
     socketRef.current.emit('splitLine', {
       sessionId,
       index,
@@ -2951,7 +3011,6 @@ const ControlPage = () => {
     })
     shiftIndexesAfterLineInsertion(index)
     setEditingCell({ index: index + 1, lineId: draftLine.id, languageId })
-    setAutoCenterEnabled(true)
     socketRef.current.emit('insertLineAfter', {
       sessionId,
       index,
@@ -3082,7 +3141,6 @@ const ControlPage = () => {
           },
         )
         setEditingCell({ index: nextIndex, lineId: draftLine.id, languageId: 'primary' })
-        setAutoCenterEnabled(true)
       } catch {
         // performSessionMutation already reports the error.
       }
@@ -3091,7 +3149,6 @@ const ControlPage = () => {
 
     setLines((prev) => [...prev, draftLine])
     setEditingCell({ index: nextIndex, lineId: draftLine.id, languageId: 'primary' })
-    setAutoCenterEnabled(true)
     socketRef.current.emit('insertLineAfter', {
       sessionId,
       index: nextIndex - 1,
@@ -3124,7 +3181,6 @@ const ControlPage = () => {
           }),
         { successMessage: '字幕 JSON 已載入' },
       )
-      setAutoCenterEnabled(false)
     } catch (error) {
       setStatus({
         kind: 'error',
@@ -3182,7 +3238,6 @@ const ControlPage = () => {
       setEditingCell(null)
       setRoleEditor(null)
       setMusicRangeAnchorLineId(null)
-      setAutoCenterEnabled(false)
     } finally {
       setClearingSubtitles(false)
     }
@@ -3316,7 +3371,6 @@ const ControlPage = () => {
             ? `第一語言字幕已更新（${loadedLineCount} 行）`
             : '第一語言字幕已更新'),
       })
-      setAutoCenterEnabled(false)
     } finally {
       setParsingPrimary(false)
     }
@@ -4602,7 +4656,7 @@ const ControlPage = () => {
               <input
                 type="checkbox"
                 checked={editingModeEnabled}
-                onChange={(event) => setEditingModeEnabled(event.target.checked)}
+                onChange={handleEditingModeChange}
               />
               <span>編輯模式</span>
             </label>
