@@ -363,32 +363,6 @@ const applyMusicRangeState = (sourceLines, startIndex, endIndex, music) => {
   })
 }
 
-const getMusicRangeAroundIndex = (sourceLines, index) => {
-  if (!Array.isArray(sourceLines) || index < 0 || index >= sourceLines.length) {
-    return null
-  }
-  if (!isLineMarkedMusic(sourceLines[index])) return null
-
-  let startIndex = index
-  let endIndex = index
-
-  while (
-    startIndex > 0 &&
-    isLineMarkedMusic(sourceLines[startIndex - 1])
-  ) {
-    startIndex -= 1
-  }
-
-  while (
-    endIndex < sourceLines.length - 1 &&
-    isLineMarkedMusic(sourceLines[endIndex + 1])
-  ) {
-    endIndex += 1
-  }
-
-  return { startIndex, endIndex }
-}
-
 const clampLineIndex = (index, lineCount) => {
   if (!Number.isFinite(index) || lineCount <= 0) return 0
   return Math.min(Math.max(Math.trunc(index), 0), lineCount - 1)
@@ -976,8 +950,7 @@ const ControlPage = () => {
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
   const [editingCell, setEditingCell] = useState(null)
   const [roleEditor, setRoleEditor] = useState(null)
-  const [pendingMusicRangeStartIndex, setPendingMusicRangeStartIndex] =
-    useState(null)
+  const [musicRangeAnchorLineId, setMusicRangeAnchorLineId] = useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
   const liveCurrentIndexRef = useRef(0)
   const pendingCueRequestRef = useRef(null)
@@ -1602,13 +1575,16 @@ const ControlPage = () => {
 
   useEffect(() => {
     if (
-      pendingMusicRangeStartIndex != null &&
-      (pendingMusicRangeStartIndex < 0 ||
-        pendingMusicRangeStartIndex >= lines.length)
+      musicRangeAnchorLineId &&
+      !lines.some((line) => line?.id === musicRangeAnchorLineId)
     ) {
-      setPendingMusicRangeStartIndex(null)
+      setMusicRangeAnchorLineId(null)
     }
-  }, [lines, pendingMusicRangeStartIndex])
+  }, [lines, musicRangeAnchorLineId])
+
+  useEffect(() => {
+    setMusicRangeAnchorLineId(null)
+  }, [sessionId, selectedCellId])
 
   useEffect(() => {
     if (editingCell != null) return
@@ -2465,9 +2441,6 @@ const ControlPage = () => {
       if (!prev || prev.index <= insertAfterIndex) return prev
       return { ...prev, index: prev.index + 1 }
     })
-    setPendingMusicRangeStartIndex((prev) =>
-      prev != null && prev > insertAfterIndex ? prev + 1 : prev,
-    )
   }
 
   const shiftIndexesAfterLineRemoval = (removedIndex) => {
@@ -2482,12 +2455,6 @@ const ControlPage = () => {
       if (prev.index > removedIndex) {
         return { ...prev, index: prev.index - 1 }
       }
-      return prev
-    })
-    setPendingMusicRangeStartIndex((prev) => {
-      if (prev == null) return prev
-      if (prev === removedIndex) return null
-      if (prev > removedIndex) return prev - 1
       return prev
     })
   }
@@ -2718,60 +2685,42 @@ const ControlPage = () => {
     event.stopPropagation()
     if (!socketRef.current || !sessionId) return
     const checked = event.target.checked
+    const lineId = lines[index]?.id
+    const shiftPressed = event.shiftKey || event.nativeEvent?.shiftKey
+    const anchorIndex = musicRangeAnchorLineId
+      ? lines.findIndex((line) => line?.id === musicRangeAnchorLineId)
+      : -1
 
-    if (!checked) {
-      const range = getMusicRangeAroundIndex(lines, index)
-      const targetRange = range || { startIndex: index, endIndex: index }
-      setLines((prev) =>
-        applyMusicRangeState(
-          prev,
-          targetRange.startIndex,
-          targetRange.endIndex,
-          false,
-        ),
-      )
-      setPendingMusicRangeStartIndex(null)
-      socketRef.current.emit('setLineMusicRange', {
-        sessionId,
-        startIndex: targetRange.startIndex,
-        endIndex: targetRange.endIndex,
-        music: false,
-      })
-      setStatus({ kind: 'info', message: '已清除音樂範圍標記' })
-      return
-    }
-
-    if (
-      pendingMusicRangeStartIndex != null &&
-      pendingMusicRangeStartIndex !== index
-    ) {
-      const rangeStart = Math.min(pendingMusicRangeStartIndex, index)
-      const rangeEnd = Math.max(pendingMusicRangeStartIndex, index)
-      setLines((prev) => applyMusicRangeState(prev, rangeStart, rangeEnd, true))
-      setPendingMusicRangeStartIndex(null)
+    if (shiftPressed && anchorIndex >= 0 && anchorIndex !== index) {
+      const rangeStart = Math.min(anchorIndex, index)
+      const rangeEnd = Math.max(anchorIndex, index)
+      setLines((prev) => applyMusicRangeState(prev, rangeStart, rangeEnd, checked))
       socketRef.current.emit('setLineMusicRange', {
         sessionId,
         startIndex: rangeStart,
         endIndex: rangeEnd,
-        music: true,
+        startLineId: lines[rangeStart]?.id,
+        endLineId: lines[rangeEnd]?.id,
+        music: checked,
       })
       setStatus({
-        kind: 'success',
-        message: `已設定音樂範圍：第 ${rangeStart + 1} 行到第 ${rangeEnd + 1} 行`,
+        kind: 'info',
+        message: `已${checked ? '設定' : '清除'}音樂範圍：第 ${rangeStart + 1} 行到第 ${rangeEnd + 1} 行`,
       })
       return
     }
 
-    setLines((prev) => applyLineMusicState(prev, index, true))
-    setPendingMusicRangeStartIndex(index)
+    setLines((prev) => applyLineMusicState(prev, index, checked))
+    setMusicRangeAnchorLineId(lineId || null)
     socketRef.current.emit('setLineMusic', {
       sessionId,
       index,
-      music: true,
+      lineId,
+      music: checked,
     })
     setStatus({
       kind: 'info',
-      message: `已選擇第 ${index + 1} 行為音樂起點，請再勾選結束行`,
+      message: `第 ${index + 1} 行已${checked ? '標記' : '取消'}音樂；按住 Shift 點擊其他行可設定整段`,
     })
   }
 
@@ -3232,7 +3181,7 @@ const ControlPage = () => {
       )
       setEditingCell(null)
       setRoleEditor(null)
-      setPendingMusicRangeStartIndex(null)
+      setMusicRangeAnchorLineId(null)
       setAutoCenterEnabled(false)
     } finally {
       setClearingSubtitles(false)
@@ -3953,10 +3902,13 @@ const ControlPage = () => {
     transcription.speakerRecognitionEnabled === true
   const currentLineMusicActive = isLineMarkedMusic(currentLine)
   const currentLineMusicVisible = musicEffectEnabled && currentLineMusicActive
+  const musicRangeAnchorIndex = musicRangeAnchorLineId
+    ? lines.findIndex((line) => line?.id === musicRangeAnchorLineId)
+    : -1
   const musicSelectionHint =
-    pendingMusicRangeStartIndex != null
-      ? `音樂範圍選取中：已選第 ${pendingMusicRangeStartIndex + 1} 行為起點，請再勾選結束行。`
-      : '勾選音樂後，再勾選另一行可自動標記整段範圍。'
+    musicRangeAnchorIndex >= 0
+      ? `最近操作第 ${musicRangeAnchorIndex + 1} 行；一般點擊只切換單行，按住 Shift 點擊可設定整段範圍。`
+      : '一般點擊只切換單行；先點一行，再按住 Shift 點擊另一行可設定整段範圍。'
   const transcriptionPreview =
     transcription.text && transcription.text.trim().length > 0
       ? transcription.text

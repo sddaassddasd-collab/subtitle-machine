@@ -10854,20 +10854,25 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('setLineMusic', ({ sessionId, index, music }) => {
+  socket.on('setLineMusic', ({ sessionId, index, lineId, music }) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
+    const targetIndex =
+      typeof lineId === 'string' && lineId.trim()
+        ? session.lines.findIndex((line) => line?.id === lineId.trim())
+        : index;
+
     if (
-      !Number.isInteger(index) ||
-      index < 0 ||
-      index >= session.lines.length ||
+      !Number.isInteger(targetIndex) ||
+      targetIndex < 0 ||
+      targetIndex >= session.lines.length ||
       typeof music !== 'boolean'
     ) {
       return;
     }
 
-    const existing = session.lines[index];
+    const existing = session.lines[targetIndex];
     if (!existing) return;
     pushSessionHistory(session);
 
@@ -10879,7 +10884,7 @@ io.on('connection', (socket) => {
         ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
         : LINE_TYPES.DIALOGUE;
 
-    session.lines[index] = createLineRecord(
+    session.lines[targetIndex] = createLineRecord(
       {
         ...existing,
         text,
@@ -10896,56 +10901,68 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('setLineMusicRange', ({ sessionId, startIndex, endIndex, music }) => {
-    const session = getOwnedSocketSession(sessionId);
-    if (!session) return;
+  socket.on(
+    'setLineMusicRange',
+    ({ sessionId, startIndex, endIndex, startLineId, endLineId, music }) => {
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) return;
 
-    if (
-      !Number.isInteger(startIndex) ||
-      !Number.isInteger(endIndex) ||
-      startIndex < 0 ||
-      endIndex < 0 ||
-      startIndex >= session.lines.length ||
-      endIndex >= session.lines.length ||
-      typeof music !== 'boolean'
-    ) {
-      return;
-    }
+      const resolvedStartIndex =
+        typeof startLineId === 'string' && startLineId.trim()
+          ? session.lines.findIndex((line) => line?.id === startLineId.trim())
+          : startIndex;
+      const resolvedEndIndex =
+        typeof endLineId === 'string' && endLineId.trim()
+          ? session.lines.findIndex((line) => line?.id === endLineId.trim())
+          : endIndex;
 
-    const rangeStart = Math.min(startIndex, endIndex);
-    const rangeEnd = Math.max(startIndex, endIndex);
-    const nextMusic = normalizeLineMusic(music);
-    pushSessionHistory(session);
+      if (
+        !Number.isInteger(resolvedStartIndex) ||
+        !Number.isInteger(resolvedEndIndex) ||
+        resolvedStartIndex < 0 ||
+        resolvedEndIndex < 0 ||
+        resolvedStartIndex >= session.lines.length ||
+        resolvedEndIndex >= session.lines.length ||
+        typeof music !== 'boolean'
+      ) {
+        return;
+      }
 
-    for (let index = rangeStart; index <= rangeEnd; index += 1) {
-      const existing = session.lines[index];
-      if (!existing) continue;
+      const rangeStart = Math.min(resolvedStartIndex, resolvedEndIndex);
+      const rangeEnd = Math.max(resolvedStartIndex, resolvedEndIndex);
+      const nextMusic = normalizeLineMusic(music);
+      pushSessionHistory(session);
 
-      const text = sanitizeLineText(
-        typeof existing === 'string' ? existing : existing.text,
-      );
-      const type =
-        existing && typeof existing === 'object'
-          ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
-          : LINE_TYPES.DIALOGUE;
+      for (let index = rangeStart; index <= rangeEnd; index += 1) {
+        const existing = session.lines[index];
+        if (!existing) continue;
 
-      session.lines[index] = createLineRecord(
-        {
-          ...existing,
-          text,
-          type,
-          music: nextMusic,
-          translations: existing.translations,
-          role: existing.role,
-        },
-        'primary',
-      );
-    }
+        const text = sanitizeLineText(
+          typeof existing === 'string' ? existing : existing.text,
+        );
+        const type =
+          existing && typeof existing === 'object'
+            ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
+            : LINE_TYPES.DIALOGUE;
 
-    persistSession(session);
-    broadcastControlState(sessionId);
-    broadcastViewerState(sessionId);
-  });
+        session.lines[index] = createLineRecord(
+          {
+            ...existing,
+            text,
+            type,
+            music: nextMusic,
+            translations: existing.translations,
+            role: existing.role,
+          },
+          'primary',
+        );
+      }
+
+      persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+    },
+  );
 
   socket.on(
     'moveLanguageSuffixToNextLine',
