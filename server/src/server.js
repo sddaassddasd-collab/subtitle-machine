@@ -4853,6 +4853,14 @@ function buildAccurateTranscriptionPrompt({ language, transcriptionContext }) {
   const contextPrompt = buildTranscriptionContextPrompt(transcriptionContext);
   if (contextPrompt) {
     promptParts.push(contextPrompt);
+    promptParts.push(
+      [
+        '這是同一段音訊的二次精修轉錄。',
+        '請運用上述主題所屬領域的知識，辨別可能的同音錯字、專業用語與正確寫法。',
+        '只有當原始音訊與句子語意都支持時才採用領域用語。',
+        '不得為了符合主題而新增、刪除、改寫說話者的內容；沒有充分依據時保留音訊原意。',
+      ].join('\n'),
+    );
   }
 
   if (
@@ -5297,7 +5305,7 @@ async function correctTranscriptionLine({
     {
       role: 'system',
       content:
-        'You post-edit speech transcripts. Correct obvious recognition mistakes only. Keep original meaning and language. Return one corrected line only.',
+        'You post-edit speech transcripts. Use the supplied topic as domain context, but correct only recognition mistakes supported by the original wording and semantics. Never invent topic-related content. Keep the original meaning and language. Return one corrected line only.',
     },
     {
       role: 'user',
@@ -5310,7 +5318,7 @@ async function correctTranscriptionLine({
 4. 若原句已正確，原樣輸出。
 ${language ? `5. 目標語言代碼：${language}` : ''}
 ${shouldPreferTraditionalChinese(language) ? '6. 若輸出為中文，請一律使用繁體中文（台灣用字）。' : ''}
-${normalizedContext ? `7. 以下是本段內容的主題、關鍵詞與專有名詞參考；僅在能幫助修正明顯辨識錯誤時採用，不要硬套：\n${normalizedContext}` : ''}
+${normalizedContext ? `7. 以下是本段內容的主題、關鍵詞與專有名詞參考：\n${normalizedContext}\n8. 可運用這個主題所屬領域的知識，判斷原句中可能的同音錯字、專業用語與正確寫法。\n9. 只有當原句讀音可能性與句子語意都支持時才修正；不得為了符合主題而插入領域詞彙，沒有充分依據時保留原文。` : ''}
 
 原句：
 ${original}
