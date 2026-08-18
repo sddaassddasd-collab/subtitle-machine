@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
+const WebSocket = require('ws');
 const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
@@ -147,6 +148,7 @@ const defaultTranscriptionState = () => ({
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  provider: DEFAULT_TRANSCRIPTION_PROVIDER,
   transcriptionContext: '',
   semanticSegmentationEnabled:
     DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED,
@@ -154,6 +156,9 @@ const defaultTranscriptionState = () => ({
   speakerRecognitionEnabled:
     DEFAULT_TRANSCRIPTION_SPEAKER_RECOGNITION_ENABLED,
   error: '',
+  lastSpeechStartedAt: null,
+  lastInterimAt: null,
+  lastFinalAt: null,
   updatedAt: null,
 });
 
@@ -745,6 +750,11 @@ const DEFAULT_REALTIME_WS_MODEL =
   process.env.OPENAI_REALTIME_WS_MODEL || 'gpt-realtime';
 const DEFAULT_REALTIME_SESSION_TYPE = 'realtime';
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+const DEFAULT_TRANSCRIPTION_PROVIDER = 'deepgram';
+const TRANSCRIPTION_PROVIDERS = new Set(['deepgram', 'openai']);
+const DEEPGRAM_MODEL = 'nova-3';
+const DEEPGRAM_LANGUAGE = 'zh-TW';
+const DEEPGRAM_ENDPOINTING_MS = 400;
 const VALID_TRANSCRIPTION_MODELS = new Set([
   'gpt-4o-transcribe',
   'gpt-4o-transcribe-latest',
@@ -5953,6 +5963,14 @@ function normalizeTranscriptionModel(rawModel) {
   return trimmed;
 }
 
+function normalizeTranscriptionProvider(rawProvider) {
+  const normalized =
+    typeof rawProvider === 'string' ? rawProvider.trim().toLowerCase() : '';
+  return TRANSCRIPTION_PROVIDERS.has(normalized)
+    ? normalized
+    : DEFAULT_TRANSCRIPTION_PROVIDER;
+}
+
 function ensureTranscriptionState(session) {
   if (!session.transcription || typeof session.transcription !== 'object') {
     session.transcription = defaultTranscriptionState();
@@ -5963,7 +5981,13 @@ function ensureTranscriptionState(session) {
     ...defaultTranscriptionState(),
     ...session.transcription,
   };
-  if (
+  normalized.provider = normalizeTranscriptionProvider(normalized.provider);
+  if (normalized.provider === 'deepgram') {
+    normalized.model = DEEPGRAM_MODEL;
+    normalized.language = DEEPGRAM_LANGUAGE;
+    normalized.dualChannelEnabled = false;
+    normalized.speakerRecognitionEnabled = false;
+  } else if (
     typeof normalized.model !== 'string' ||
     !VALID_TRANSCRIPTION_MODELS.has(normalized.model)
   ) {
@@ -5972,15 +5996,15 @@ function ensureTranscriptionState(session) {
   normalized.semanticSegmentationEnabled = normalizeSemanticSegmentationEnabled(
     normalized.semanticSegmentationEnabled,
   );
-  normalized.dualChannelEnabled = normalizeDualChannelEnabled(
-    normalized.dualChannelEnabled,
-  );
+  normalized.dualChannelEnabled =
+    normalized.provider === 'openai' &&
+    normalizeDualChannelEnabled(normalized.dualChannelEnabled);
   normalized.transcriptionContext = normalizeTranscriptionContextValue(
     normalized.transcriptionContext,
   );
-  normalized.speakerRecognitionEnabled = normalizeSpeakerRecognitionEnabled(
-    normalized.speakerRecognitionEnabled,
-  );
+  normalized.speakerRecognitionEnabled =
+    normalized.provider === 'openai' &&
+    normalizeSpeakerRecognitionEnabled(normalized.speakerRecognitionEnabled);
   session.transcription = normalized;
   return session.transcription;
 }
@@ -6000,6 +6024,7 @@ function getPublicTranscriptionState(session) {
       typeof state.model === 'string' && state.model.trim().length > 0
         ? state.model
         : DEFAULT_TRANSCRIPTION_MODEL,
+    provider: normalizeTranscriptionProvider(state.provider),
     transcriptionContext: normalizeTranscriptionContextValue(
       state.transcriptionContext,
     ),
@@ -6010,6 +6035,12 @@ function getPublicTranscriptionState(session) {
       typeof state.error === 'string' && state.error.trim().length > 0
         ? state.error
         : '',
+    lastSpeechStartedAt:
+      Number.isFinite(state.lastSpeechStartedAt) ? state.lastSpeechStartedAt : null,
+    lastInterimAt:
+      Number.isFinite(state.lastInterimAt) ? state.lastInterimAt : null,
+    lastFinalAt:
+      Number.isFinite(state.lastFinalAt) ? state.lastFinalAt : null,
     updatedAt:
       typeof state.updatedAt === 'number' && Number.isFinite(state.updatedAt)
         ? state.updatedAt
@@ -6074,10 +6105,16 @@ function stopTranscriptionStream(sessionId, options = {}) {
   }
   stream.closing = true;
   stream.ready = false;
-  clearRealtimeForceCommitTimer(stream);
-  resetRealtimePendingAudio(stream);
-  resetRealtimeCommitState(stream);
-  resetAccurateTranscriptionState(stream);
+  if (stream.keepAliveTimer) {
+    clearInterval(stream.keepAliveTimer);
+    stream.keepAliveTimer = null;
+  }
+  if (stream.provider === 'openai') {
+    clearRealtimeForceCommitTimer(stream);
+    resetRealtimePendingAudio(stream);
+    resetRealtimeCommitState(stream);
+    resetAccurateTranscriptionState(stream);
+  }
   if (stream.initTimeout) {
     clearTimeout(stream.initTimeout);
     stream.initTimeout = null;
@@ -6086,12 +6123,20 @@ function stopTranscriptionStream(sessionId, options = {}) {
     stream.pendingAudioChunks.length = 0;
   }
   try {
-    stream.rt.close({
-      code: 1000,
-      reason: options.reason || 'transcription stopped',
-    });
+    if (stream.provider === 'deepgram') {
+      if (stream.socket?.readyState === WebSocket.OPEN) {
+        stream.socket.send(JSON.stringify({ type: 'Finalize' }));
+        stream.socket.send(JSON.stringify({ type: 'CloseStream' }));
+      }
+      stream.socket?.close(1000, options.reason || 'transcription stopped');
+    } else {
+      stream.rt.close({
+        code: 1000,
+        reason: options.reason || 'transcription stopped',
+      });
+    }
   } catch (error) {
-    console.warn('Failed to close realtime transcription socket:', error);
+    console.warn('Failed to close transcription socket:', error);
   }
 
   const session = getSession(sessionId);
@@ -6536,6 +6581,26 @@ function sendRealtimeAudioChunk(stream, audio, durationMs = 0, level = 0) {
   captureAccurateSegmentChunk(stream, audio, durationMs);
 }
 
+function sendDeepgramAudioChunk(stream, audio, durationMs = 0, level = 0) {
+  if (!stream?.socket || stream.socket.readyState !== WebSocket.OPEN) {
+    throw new Error('Deepgram 辨識串流尚未就緒');
+  }
+  const pcm = Buffer.from(audio, 'base64');
+  if (pcm.length === 0) return;
+  stream.socket.send(pcm, { binary: true });
+  trackRealtimeInputLevel(stream, level, durationMs);
+  stream.audioBytesSent += pcm.length;
+  stream.lastAudioSentAt = Date.now();
+}
+
+function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
+  if (stream?.provider === 'deepgram') {
+    sendDeepgramAudioChunk(stream, audio, durationMs, level);
+    return;
+  }
+  sendRealtimeAudioChunk(stream, audio, durationMs, level);
+}
+
 function buildRealtimeTranscriptionSessionUpdate({
   model,
   language,
@@ -6588,12 +6653,12 @@ function flushQueuedRealtimeAudio(stream) {
   queued.forEach((chunk) => {
     if (typeof chunk === 'string') {
       if (!chunk) return;
-      sendRealtimeAudioChunk(stream, chunk);
+      sendTranscriptionAudioChunk(stream, chunk);
       return;
     }
 
     if (!chunk || typeof chunk.audio !== 'string' || !chunk.audio) return;
-    sendRealtimeAudioChunk(stream, chunk.audio, chunk.durationMs, chunk.level);
+    sendTranscriptionAudioChunk(stream, chunk.audio, chunk.durationMs, chunk.level);
   });
 }
 
@@ -6894,6 +6959,28 @@ function getViewerPayload(session, viewerCellId = null) {
     };
   }
 
+  if (transcription.active) {
+    return {
+      sessionId: normalized.id,
+      viewerToken,
+      status: normalized.status,
+      languages: normalized.languages,
+      defaultLanguageId: normalized.viewerDefaultLanguageId,
+      lines: publicLines,
+      currentIndex,
+      line: null,
+      text: '',
+      liveEntries: [],
+      liveLines: [],
+      musicActive: false,
+      musicText: '',
+      displayEnabled: true,
+      roleColorEnabled: normalized.roleColorEnabled,
+      source: 'transcription',
+      transcription,
+    };
+  }
+
   return {
     sessionId: normalized.id,
     viewerToken,
@@ -6976,6 +7063,29 @@ function getProjectorPayload(session) {
         text: liveText,
         liveEntries,
         liveLines,
+        musicActive: false,
+        musicText: '',
+        displayEnabled: true,
+        roleColorEnabled: normalized.roleColorEnabled,
+        source: 'transcription',
+        layout: normalized.projectorLayout,
+        displayMode: projectorDisplayMode,
+        languageMode: projectorLanguageMode,
+        revision: normalized.projectorRevision,
+        transcription,
+      };
+    }
+    if (transcription.active) {
+      return {
+        sessionId: normalized.id,
+        projectorToken: normalized.projectorToken,
+        status: normalized.status,
+        languages: normalized.languages,
+        defaultLanguageId: normalized.projectorDefaultLanguageId,
+        line: null,
+        text: '',
+        liveEntries: [],
+        liveLines: [],
         musicActive: false,
         musicText: '',
         displayEnabled: true,
@@ -9883,6 +9993,200 @@ app.post('/api/session/:sessionId/display', requireAuth, (req, res) => {
   res.json(getControlPayload(session));
 });
 
+function startDeepgramTranscription({
+  sessionId,
+  socketId,
+  apiKey,
+  language,
+  transcriptionContext,
+  startAcknowledge,
+}) {
+  const selectedLanguage = normalizeLanguageCode(language) || DEEPGRAM_LANGUAGE;
+  const selectedContext = normalizeTranscriptionContextValue(
+    transcriptionContext,
+  );
+  const query = new URLSearchParams({
+    model: DEEPGRAM_MODEL,
+    language: selectedLanguage,
+    encoding: 'linear16',
+    sample_rate: String(AUDIO_PCM_SAMPLE_RATE),
+    channels: '1',
+    interim_results: 'true',
+    endpointing: String(DEEPGRAM_ENDPOINTING_MS),
+    utterance_end_ms: '1000',
+    vad_events: 'true',
+    punctuate: 'true',
+    smart_format: 'true',
+  });
+  const socket = new WebSocket(
+    `wss://api.deepgram.com/v1/listen?${query.toString()}`,
+    { headers: { Authorization: `Token ${apiKey}` } },
+  );
+  const stream = {
+    provider: 'deepgram',
+    sessionId,
+    socketId,
+    socket,
+    model: DEEPGRAM_MODEL,
+    language: selectedLanguage,
+    transcriptionContext: selectedContext,
+    semanticSegmentationEnabled: true,
+    dualChannelEnabled: false,
+    speakerRecognitionEnabled: false,
+    draftByItemId: new Map(),
+    activeDraftItemId: null,
+    completedFragments: [],
+    fragmentByItemId: new Map(),
+    finalizedLines: [],
+    finalizedLineByItemId: new Map(),
+    mergedLineOverrides: new Map(),
+    pendingAudioChunks: [],
+    trailingSilenceMs: 0,
+    lastInputLevel: 0,
+    audioBytesSent: 0,
+    lastAudioSentAt: null,
+    ready: false,
+    closing: false,
+    initTimeout: null,
+    keepAliveTimer: null,
+    startAcknowledge:
+      typeof startAcknowledge === 'function' ? startAcknowledge : null,
+  };
+  transcriptionStreams.set(sessionId, stream);
+  const isCurrent = () => transcriptionStreams.get(sessionId) === stream;
+
+  stream.initTimeout = setTimeout(() => {
+    if (!isCurrent() || stream.ready || stream.closing) return;
+    stopTranscriptionStream(sessionId, {
+      keepText: true,
+      reason: 'deepgram init timeout',
+      errorMessage: 'Deepgram 連線逾時，請重試',
+    });
+  }, 8000);
+
+  socket.on('open', () => {
+    if (!isCurrent()) return;
+    stream.ready = true;
+    if (stream.initTimeout) {
+      clearTimeout(stream.initTimeout);
+      stream.initTimeout = null;
+    }
+    if (typeof stream.startAcknowledge === 'function') {
+      stream.startAcknowledge({ ok: true, readyAt: Date.now() });
+      stream.startAcknowledge = null;
+    }
+    stream.keepAliveTimer = setInterval(() => {
+      if (!isCurrent() || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'KeepAlive' }));
+    }, 8000);
+    updateTranscriptionState(sessionId, {
+      active: true,
+      status: 'running',
+      text: '',
+      isFinal: true,
+      provider: 'deepgram',
+      model: DEEPGRAM_MODEL,
+      language: selectedLanguage,
+      transcriptionContext: selectedContext,
+      semanticSegmentationEnabled: true,
+      dualChannelEnabled: false,
+      speakerRecognitionEnabled: false,
+      error: '',
+      lastSpeechStartedAt: null,
+      lastInterimAt: null,
+      lastFinalAt: null,
+    });
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
+    flushQueuedRealtimeAudio(stream);
+  });
+
+  socket.on('message', (raw) => {
+    if (!isCurrent()) return;
+    let event;
+    try {
+      event = JSON.parse(raw.toString('utf8'));
+    } catch (_error) {
+      return;
+    }
+    if (event?.type === 'Error') {
+      const message =
+        sanitizeLineText(event.description || event.message || '') ||
+        'Deepgram 返回辨識錯誤';
+      stopTranscriptionStream(sessionId, {
+        keepText: true,
+        reason: 'deepgram response error',
+        errorMessage: message,
+      });
+      return;
+    }
+    if (event?.type === 'SpeechStarted') {
+      updateTranscriptionState(sessionId, { lastSpeechStartedAt: Date.now() });
+      broadcastTranscriptionState(sessionId);
+      return;
+    }
+    if (event?.type !== 'Results') return;
+    const alternative = event.channel?.alternatives?.[0];
+    const transcript = normalizeTranscriptionOutputText(
+      alternative?.transcript || '',
+      selectedLanguage,
+    );
+    const start = Number.isFinite(Number(event.start)) ? Number(event.start) : 0;
+    const itemId = `deepgram-${start.toFixed(3)}`;
+
+    if (event.is_final === true) {
+      takeDraftLine(stream, itemId);
+      if (transcript) {
+        upsertCompletedFragment(stream, {
+          itemId,
+          text: transcript,
+          boundaryMeta: {
+            reason: event.speech_final === true ? 'semantic' : 'stream',
+            pauseMs: event.speech_final === true ? DEEPGRAM_ENDPOINTING_MS : 0,
+          },
+        });
+        handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
+      }
+    } else if (transcript) {
+      setDraftLine(stream, itemId, transcript);
+      handleAutoFollowTranscript(sessionId, transcript, { isFinal: false });
+    }
+    syncTranscriptionStateFromStream(sessionId, stream, {
+      ...(event.is_final === true
+        ? { lastFinalAt: Date.now() }
+        : transcript
+          ? { lastInterimAt: Date.now() }
+          : {}),
+    });
+  });
+
+  socket.on('error', (error) => {
+    if (!isCurrent()) return;
+    const message =
+      sanitizeLineText(error?.message || '') || 'Deepgram 辨識連線發生錯誤';
+    stopTranscriptionStream(sessionId, {
+      keepText: true,
+      reason: 'deepgram error',
+      errorMessage: message,
+    });
+  });
+
+  socket.on('close', (code, reason) => {
+    if (!isCurrent() || stream.closing) return;
+    if (stream.keepAliveTimer) clearInterval(stream.keepAliveTimer);
+    const closeReason = normalizeCloseReason(reason);
+    const message =
+      closeReason ||
+      (code === 1008
+        ? 'Deepgram 驗證失敗，請確認 API Key 與額度'
+        : `Deepgram 連線已中斷（${code}）`);
+    transcriptionStreams.delete(sessionId);
+    applyTranscriptionError(sessionId, message);
+  });
+
+  return stream;
+}
+
 function startRealtimeTranscription({
   sessionId,
   socketId,
@@ -9914,6 +10218,7 @@ function startRealtimeTranscription({
   const rt = new OpenAIRealtimeWS({ model: DEFAULT_REALTIME_WS_MODEL }, client);
 
   const stream = {
+    provider: 'openai',
     sessionId,
     socketId,
     rt,
@@ -10358,6 +10663,7 @@ io.on('connection', (socket) => {
     ({
       sessionId,
       apiKey,
+      provider,
       language,
       model,
       semanticSegmentationEnabled,
@@ -10377,10 +10683,20 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const trimmedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+      const selectedProvider = normalizeTranscriptionProvider(provider);
+      const trimmedApiKey =
+        selectedProvider === 'deepgram'
+          ? String(process.env.DEEPGRAM_API_KEY || '').trim()
+          : typeof apiKey === 'string'
+            ? apiKey.trim()
+            : '';
       if (!trimmedApiKey) {
-        acknowledge({ ok: false, reason: '缺少 OpenAI API Key' });
-        applyTranscriptionError(sessionId, '缺少 OpenAI API Key，無法啟動語音辨識');
+        const message =
+          selectedProvider === 'deepgram'
+            ? '伺服器尚未設定 DEEPGRAM_API_KEY'
+            : '缺少 OpenAI API Key';
+        acknowledge({ ok: false, reason: message });
+        applyTranscriptionError(sessionId, message);
         return;
       }
 
@@ -10408,25 +10724,41 @@ io.on('connection', (socket) => {
         status: 'connecting',
         text: '',
         isFinal: true,
-        language: normalizeLanguageCode(language),
-        model: normalizeTranscriptionModel(model),
+        provider: selectedProvider,
+        language:
+          selectedProvider === 'deepgram'
+            ? normalizeLanguageCode(language) || DEEPGRAM_LANGUAGE
+            : normalizeLanguageCode(language),
+        model:
+          selectedProvider === 'deepgram'
+            ? DEEPGRAM_MODEL
+            : normalizeTranscriptionModel(model),
         transcriptionContext: normalizeTranscriptionContextValue(
           transcriptionContext,
         ),
         semanticSegmentationEnabled: normalizeSemanticSegmentationEnabled(
           semanticSegmentationEnabled,
         ),
-        dualChannelEnabled: normalizeDualChannelEnabled(dualChannelEnabled),
-        speakerRecognitionEnabled: normalizeSpeakerRecognitionEnabled(
-          speakerRecognitionEnabled,
-        ),
+        dualChannelEnabled:
+          selectedProvider === 'openai' &&
+          normalizeDualChannelEnabled(dualChannelEnabled),
+        speakerRecognitionEnabled:
+          selectedProvider === 'openai' &&
+          normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled),
         error: '',
+        lastSpeechStartedAt: null,
+        lastInterimAt: null,
+        lastFinalAt: null,
       });
       broadcastTranscriptionState(sessionId);
       broadcastViewerState(sessionId);
 
       try {
-        startRealtimeTranscription({
+        const start =
+          selectedProvider === 'deepgram'
+            ? startDeepgramTranscription
+            : startRealtimeTranscription;
+        start({
           sessionId,
           socketId: socket.id,
           apiKey: trimmedApiKey,
@@ -10468,17 +10800,13 @@ io.on('connection', (socket) => {
       return;
     }
 
-    handleAutoFollowAudioLevel(session.id, normalizedLevel);
-    acknowledge({
-      ok: true,
-      receivedAt: Date.now(),
-      level: Number(normalizedLevel.toFixed(4)),
-    });
-
     const stream = transcriptionStreams.get(sessionId);
     if (!stream || stream.socketId !== socket.id || stream.closing) {
+      acknowledge({ ok: false, reason: 'transcription_not_running' });
       return;
     }
+
+    handleAutoFollowAudioLevel(session.id, normalizedLevel);
 
     if (!stream.ready) {
       stream.pendingAudioChunks.push({
@@ -10492,15 +10820,33 @@ io.on('connection', (socket) => {
           stream.pendingAudioChunks.length - MAX_PENDING_AUDIO_CHUNKS,
         );
       }
+      acknowledge({
+        ok: true,
+        queued: true,
+        receivedAt: Date.now(),
+        level: Number(normalizedLevel.toFixed(4)),
+      });
       return;
     }
 
     try {
-      sendRealtimeAudioChunk(stream, audio, normalizedDurationMs, normalizedLevel);
+      sendTranscriptionAudioChunk(
+        stream,
+        audio,
+        normalizedDurationMs,
+        normalizedLevel,
+      );
+      acknowledge({
+        ok: true,
+        provider: stream.provider,
+        receivedAt: Date.now(),
+        level: Number(normalizedLevel.toFixed(4)),
+      });
     } catch (error) {
       const message =
         sanitizeLineText(error?.message || '') ||
         '傳送語音資料到辨識服務失敗';
+      acknowledge({ ok: false, reason: message });
       stopTranscriptionStream(sessionId, {
         keepText: true,
         reason: 'send audio failed',

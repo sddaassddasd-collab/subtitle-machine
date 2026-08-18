@@ -81,7 +81,11 @@ client/  Vite + React 控制端/檢視端前端
 17. 當語言是 `zh`（或 `zh-*`）時，後端會做 OpenCC（簡轉繁，台灣用字）正規化，預設不送額外轉錄提示詞，避免提示詞內容誤出現在字幕。
 18. 劇本字幕清單每行可勾選「此處有音樂」；先勾起點再勾終點，控制端會自動把中間整段標成音樂區段，檢視端在該範圍內會固定顯示「此處有音樂」提示。
 
-可用環境變數微調即時性與穩定性（後端）：
+即時語音預設使用 Deepgram Nova-3 台灣華語模型。請先在後端設定：
+
+- `DEEPGRAM_API_KEY`：Deepgram Project API Key，只可存在伺服器環境變數，不可提交至 Git 或傳到瀏覽器。
+
+控制端仍可切換為 OpenAI 備援；以下環境變數用於微調 OpenAI 即時辨識的即時性與穩定性（後端）：
 
 - `TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED`：控制端未指定時，是否預設開啟語意切段（預設 `true`）。
 - `TRANSCRIPTION_SEMANTIC_VAD_EAGERNESS`：語意切段速度，可選 `low` / `medium` / `high` / `auto`（預設 `high`）。

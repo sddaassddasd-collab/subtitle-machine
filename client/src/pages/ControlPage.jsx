@@ -47,17 +47,11 @@ const ALLOWED_SCRIPT_PARSE_MODELS = new Set(
   SCRIPT_PARSE_MODEL_OPTIONS.map((model) => model.id),
 )
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
+const DEFAULT_TRANSCRIPTION_PROVIDER = 'deepgram'
+const TRANSCRIPTION_PROVIDERS = new Set(['deepgram', 'openai'])
 const PRIMARY_ONLY_OPTION_ID = '__primary_only__'
 const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 const NEW_ROLE_OPTION_ID = '__new_role__'
-const ALLOWED_TRANSCRIPTION_MODELS = new Set([
-  'gpt-4o-transcribe',
-  'gpt-4o-transcribe-latest',
-  'gpt-4o-mini-transcribe',
-  'gpt-4o-transcribe-diarize',
-  'whisper-1',
-])
-
 const ControlSection = ({ title, defaultOpen = false, children }) => {
   const [open, setOpen] = useState(defaultOpen)
 
@@ -84,11 +78,15 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
+  provider: DEFAULT_TRANSCRIPTION_PROVIDER,
   transcriptionContext: '',
   semanticSegmentationEnabled: true,
   dualChannelEnabled: true,
   speakerRecognitionEnabled: false,
   error: '',
+  lastSpeechStartedAt: null,
+  lastInterimAt: null,
+  lastFinalAt: null,
   updatedAt: null,
 }
 
@@ -195,10 +193,14 @@ const normalizeTranscriptionState = (raw) => {
         ? raw.status
         : 'idle',
     model:
-      typeof raw.model === 'string' &&
-      ALLOWED_TRANSCRIPTION_MODELS.has(raw.model.trim())
+      typeof raw.model === 'string' && raw.model.trim().length > 0
         ? raw.model.trim()
         : DEFAULT_TRANSCRIPTION_MODEL,
+    provider:
+      typeof raw.provider === 'string' &&
+      TRANSCRIPTION_PROVIDERS.has(raw.provider.trim().toLowerCase())
+        ? raw.provider.trim().toLowerCase()
+        : DEFAULT_TRANSCRIPTION_PROVIDER,
     language:
       typeof raw.language === 'string' && raw.language.trim().length > 0
         ? raw.language
@@ -210,6 +212,19 @@ const normalizeTranscriptionState = (raw) => {
     semanticSegmentationEnabled: raw.semanticSegmentationEnabled !== false,
     dualChannelEnabled: raw.dualChannelEnabled !== false,
     speakerRecognitionEnabled: raw.speakerRecognitionEnabled === true,
+    lastSpeechStartedAt:
+      typeof raw.lastSpeechStartedAt === 'number' &&
+      Number.isFinite(raw.lastSpeechStartedAt)
+        ? raw.lastSpeechStartedAt
+        : null,
+    lastInterimAt:
+      typeof raw.lastInterimAt === 'number' && Number.isFinite(raw.lastInterimAt)
+        ? raw.lastInterimAt
+        : null,
+    lastFinalAt:
+      typeof raw.lastFinalAt === 'number' && Number.isFinite(raw.lastFinalAt)
+        ? raw.lastFinalAt
+        : null,
     updatedAt:
       typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
         ? raw.updatedAt
@@ -2138,7 +2153,7 @@ const ControlPage = () => {
       return false
     }
 
-    if (!apiKey) {
+    if (transcription.provider === 'openai' && !apiKey) {
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
       return false
     }
@@ -2347,12 +2362,17 @@ const ControlPage = () => {
             {
               sessionId,
               apiKey,
+              provider: transcription.provider || DEFAULT_TRANSCRIPTION_PROVIDER,
               model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
-              language: transcription.language || 'zh',
+              language:
+                transcription.provider === 'deepgram'
+                  ? 'zh-TW'
+                  : transcription.language || 'zh',
               semanticSegmentationEnabled: true,
-              dualChannelEnabled: true,
+              dualChannelEnabled: transcription.provider === 'openai',
               transcriptionContext: transcription.transcriptionContext || '',
               speakerRecognitionEnabled:
+                transcription.provider === 'openai' &&
                 transcription.speakerRecognitionEnabled === true,
             },
             (error, response) => {
@@ -2372,6 +2392,16 @@ const ControlPage = () => {
       }
       transcriptionReady = true
       pendingAudioPackets.splice(0).forEach(sendAudioPacket)
+      if (!autoFollow) {
+        projectorDisplayModeDirtyRef.current = true
+        projectorDisplayModeDraftRef.current =
+          PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
+        setProjectorDisplayMode(PROJECTOR_DISPLAY_MODES.TRANSCRIPTION)
+        socketRef.current?.emit('setProjectorDisplayMode', {
+          sessionId,
+          displayMode: PROJECTOR_DISPLAY_MODES.TRANSCRIPTION,
+        })
+      }
       autoStartedTranscriptionRef.current = autoFollow
       projectorStartedTranscriptionRef.current = !autoFollow
       setStatus({
@@ -2404,6 +2434,15 @@ const ControlPage = () => {
     if (!sessionId) return
     releaseMicrophoneCapture()
     socketRef.current?.emit('transcription:stop', { sessionId })
+    if (options.autoFollow !== true) {
+      projectorDisplayModeDirtyRef.current = true
+      projectorDisplayModeDraftRef.current = PROJECTOR_DISPLAY_MODES.SCRIPT
+      setProjectorDisplayMode(PROJECTOR_DISPLAY_MODES.SCRIPT)
+      socketRef.current?.emit('setProjectorDisplayMode', {
+        sessionId,
+        displayMode: PROJECTOR_DISPLAY_MODES.SCRIPT,
+      })
+    }
     autoStartedTranscriptionRef.current = false
     projectorStartedTranscriptionRef.current = false
     setStatus({
@@ -4576,6 +4615,31 @@ const ControlPage = () => {
             <ControlSection title="即時語音">
             <div className="input-group transcription-panel">
               <label>即時語音辨識（雲端）</label>
+              <label htmlFor="transcription-provider">辨識引擎</label>
+              <select
+                id="transcription-provider"
+                value={transcription.provider}
+                disabled={transcriptionBusy}
+                onChange={(event) => {
+                  const provider = event.target.value
+                  setTranscription((prev) => ({
+                    ...prev,
+                    provider,
+                    model:
+                      provider === 'deepgram'
+                        ? 'nova-3'
+                        : DEFAULT_TRANSCRIPTION_MODEL,
+                    language: provider === 'deepgram' ? 'zh-TW' : 'zh',
+                    dualChannelEnabled: provider === 'openai',
+                    speakerRecognitionEnabled:
+                      provider === 'openai' &&
+                      prev.speakerRecognitionEnabled === true,
+                  }))
+                }}
+              >
+                <option value="deepgram">Deepgram Nova-3（建議）</option>
+                <option value="openai">OpenAI（備援）</option>
+              </select>
               <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
               <textarea
                 id="transcription-context"
@@ -4595,7 +4659,9 @@ const ControlPage = () => {
                 <input
                   type="checkbox"
                   checked={speakerRecognitionEnabled}
-                  disabled={transcriptionBusy}
+                  disabled={
+                    transcriptionBusy || transcription.provider !== 'openai'
+                  }
                   onChange={(event) => {
                     setTranscription((prev) => ({
                       ...prev,
@@ -4603,7 +4669,7 @@ const ControlPage = () => {
                     }))
                   }}
                 />
-                辨認講者
+                辨認講者（僅 OpenAI）
               </label>
               <div className="transcription-actions">
                 <button
@@ -4628,8 +4694,30 @@ const ControlPage = () => {
               </div>
               <div className="transcription-meta">
                 <span>狀態：{transcriptionStatusLabel}</span>
+                <span>
+                  引擎：
+                  {transcription.provider === 'deepgram'
+                    ? 'Deepgram Nova-3'
+                    : 'OpenAI'}
+                </span>
                 <span>輸出：{transcription.isFinal ? '最終稿' : '即時草稿'}</span>
                 <span>講者：{speakerRecognitionEnabled ? '辨認中' : '關閉'}</span>
+                {transcription.provider === 'deepgram' && (
+                  <>
+                    <span>
+                      偵測說話：
+                      {formatRelativeSeconds(transcription.lastSpeechStartedAt)}
+                    </span>
+                    <span>
+                      暫定文字：
+                      {formatRelativeSeconds(transcription.lastInterimAt)}
+                    </span>
+                    <span>
+                      最終文字：
+                      {formatRelativeSeconds(transcription.lastFinalAt)}
+                    </span>
+                  </>
+                )}
               </div>
               <div
                 className={`transcription-preview ${
