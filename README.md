@@ -84,6 +84,9 @@ client/  Vite + React 控制端/檢視端前端
 即時語音預設使用 Deepgram Nova-3 台灣華語模型。請先在後端設定：
 
 - `DEEPGRAM_API_KEY`：Deepgram Project API Key，只可存在伺服器環境變數，不可提交至 Git 或傳到瀏覽器。
+- `OPENAI_API_KEY`（選填）：使用 Deepgram 時，可在後端設定此金鑰，將每個 Deepgram final 段落送交 OpenAI 文字精修一次。若控制端已填入 OpenAI API Key，則會優先使用該金鑰；兩者都沒有時保留 Deepgram 原文。
+
+Deepgram 的 interim 草稿只會直接顯示，不會呼叫 OpenAI。只有 final 段落會排隊精修，精修完成後回填同一段文字；超時、失敗或未設定 OpenAI 金鑰時，原本的 Deepgram 字幕不會消失。「辨識主題 / 術語提示」也會套用到這次文字精修。
 
 控制端仍可切換為 OpenAI 備援；以下環境變數用於微調 OpenAI 即時辨識的即時性與穩定性（後端）：
 

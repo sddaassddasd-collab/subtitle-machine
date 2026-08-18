@@ -10005,6 +10005,7 @@ function startDeepgramTranscription({
   sessionId,
   socketId,
   apiKey,
+  correctionApiKey,
   language,
   transcriptionContext,
   startAcknowledge,
@@ -10030,6 +10031,13 @@ function startDeepgramTranscription({
     `wss://api.deepgram.com/v1/listen?${query.toString()}`,
     { headers: { Authorization: `Token ${apiKey}` } },
   );
+  const normalizedCorrectionApiKey = String(
+    correctionApiKey || process.env.OPENAI_API_KEY || '',
+  ).trim();
+  const correctionClient =
+    TRANSCRIPTION_CORRECTION_ENABLED && normalizedCorrectionApiKey
+      ? new OpenAI({ apiKey: normalizedCorrectionApiKey })
+      : null;
   const stream = {
     provider: 'deepgram',
     sessionId,
@@ -10048,6 +10056,8 @@ function startDeepgramTranscription({
     finalizedLines: [],
     finalizedLineByItemId: new Map(),
     mergedLineOverrides: new Map(),
+    mergedLineCorrectionKeys: new Set(),
+    correctionChain: Promise.resolve(),
     pendingAudioChunks: [],
     trailingSilenceMs: 0,
     lastInputLevel: 0,
@@ -10154,6 +10164,17 @@ function startDeepgramTranscription({
           },
         });
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
+        if (correctionClient) {
+          queueTranscriptionCorrection({
+            stream,
+            isCurrent,
+            client: correctionClient,
+            sessionId,
+            itemId,
+            language: selectedLanguage,
+            accurateSegment: null,
+          });
+        }
       }
     } else if (transcript) {
       setDraftLine(stream, itemId, transcript);
@@ -10770,6 +10791,10 @@ io.on('connection', (socket) => {
           sessionId,
           socketId: socket.id,
           apiKey: trimmedApiKey,
+          correctionApiKey:
+            selectedProvider === 'deepgram' && typeof apiKey === 'string'
+              ? apiKey.trim()
+              : '',
           language,
           model,
           semanticSegmentationEnabled,
