@@ -206,6 +206,36 @@ const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
 const LIVE_TRANSLATION_LANGUAGE_CODES = new Set(
   LIVE_TRANSLATION_LANGUAGES.map((language) => language.code),
 );
+
+function normalizeAllowedLiveTranslationLanguageCodes(rawCodes) {
+  if (!Array.isArray(rawCodes)) {
+    return LIVE_TRANSLATION_LANGUAGES.map((language) => language.code);
+  }
+  const requestedCodes = new Set(
+    rawCodes
+      .filter((code) => typeof code === 'string')
+      .map((code) => code.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return LIVE_TRANSLATION_LANGUAGES.filter((language) =>
+    requestedCodes.has(language.code.toLowerCase()),
+  ).map((language) => language.code);
+}
+
+function getAllowedLiveTranslationLanguageCodes(session) {
+  return normalizeAllowedLiveTranslationLanguageCodes(
+    session?.allowedLiveTranslationLanguageCodes,
+  );
+}
+
+function isLiveTranslationLanguageAllowed(sessionOrId, languageCode) {
+  if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return false;
+  const session =
+    typeof sessionOrId === 'string' ? getSession(sessionOrId) : sessionOrId;
+  if (!session) return false;
+  return getAllowedLiveTranslationLanguageCodes(session).includes(languageCode);
+}
+
 const TRANSCRIPTION_SOURCE_LANGUAGES = Object.freeze([
   { code: 'zh-TW', name: '繁體中文（台灣）', originalLabel: '原文（繁體中文）' },
   { code: 'en', name: 'English', originalLabel: 'Original (English)' },
@@ -3758,6 +3788,10 @@ function ensureSessionStructure(session) {
   session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(
     session.transcriptionLanguage,
   );
+  session.allowedLiveTranslationLanguageCodes =
+    normalizeAllowedLiveTranslationLanguageCodes(
+      session.allowedLiveTranslationLanguageCodes,
+    );
   session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
   session.projectorDisplayMode = normalizeProjectorDisplayMode(
     session.projectorDisplayMode,
@@ -3844,6 +3878,8 @@ function createSessionRecord(ownerUserId) {
     roleColorEnabled: true,
     musicEffectEnabled: true,
     transcriptionLanguage: DEEPGRAM_LANGUAGE,
+    allowedLiveTranslationLanguageCodes:
+      normalizeAllowedLiveTranslationLanguageCodes(),
     viewerDefaultLanguageId: 'primary',
     projectorDefaultLanguageId: 'primary',
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
@@ -3923,6 +3959,8 @@ function serializeSessionForStorage(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
+    allowedLiveTranslationLanguageCodes:
+      normalized.allowedLiveTranslationLanguageCodes,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorLayout: normalized.projectorLayout,
@@ -5576,6 +5614,7 @@ function getLiveTranslationDemand(sessionId) {
   const demand = {};
   if (!sessionId) return demand;
   LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
+    if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
     const room = io.sockets.adapter.rooms.get(
       getLiveTranslationRoom(sessionId, languageCode),
     );
@@ -5584,6 +5623,33 @@ function getLiveTranslationDemand(sessionId) {
     }
   });
   return demand;
+}
+
+function applyLiveTranslationLanguageRestrictions(session) {
+  if (!session) return [];
+  const allowedCodes = new Set(
+    getAllowedLiveTranslationLanguageCodes(session),
+  );
+  const affectedViewerSockets = new Map();
+  const stream = transcriptionStreams.get(session.id);
+
+  LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
+    if (allowedCodes.has(languageCode)) return;
+    const roomName = getLiveTranslationRoom(session.id, languageCode);
+    const socketIds = io.sockets.adapter.rooms.get(roomName);
+    if (socketIds) {
+      Array.from(socketIds).forEach((socketId) => {
+        const viewerSocket = io.sockets.sockets.get(socketId);
+        if (!viewerSocket) return;
+        viewerSocket.leave(roomName);
+        viewerSocket.data.liveTranslationLanguage = 'source';
+        affectedViewerSockets.set(socketId, viewerSocket);
+      });
+    }
+    cancelLiveTranslationLanguage(stream, session.id, languageCode);
+  });
+
+  return Array.from(affectedViewerSockets.values());
 }
 
 function getLiveTranslationStatus(stream) {
@@ -5605,28 +5671,32 @@ async function translateLiveTranscriptionLine({
   text,
   sourceLanguage,
   targetLanguage,
+  signal,
 }) {
   const sourceText = sanitizeTranscriptionText(text);
   const target = LIVE_TRANSLATION_LANGUAGES.find(
     (language) => language.code === targetLanguage,
   );
   if (!sourceText || !target) return '';
-  const response = await client.responses.create({
-    model: LIVE_TRANSLATION_MODEL,
-    temperature: 0,
-    max_output_tokens: 300,
-    input: [
-      {
-        role: 'system',
-        content:
-          'You translate live captions faithfully and concisely. Preserve meaning, names, numbers, tone, and sentence boundaries. Do not explain, summarize, censor, or add information. Return only the translated caption.',
-      },
-      {
-        role: 'user',
-        content: `Translate this live caption from ${sourceLanguage || 'the source language'} to ${target.name} (${target.code}). Return only the translation:\n${sourceText}`,
-      },
-    ],
-  });
+  const response = await client.responses.create(
+    {
+      model: LIVE_TRANSLATION_MODEL,
+      temperature: 0,
+      max_output_tokens: 300,
+      input: [
+        {
+          role: 'system',
+          content:
+            'You translate live captions faithfully and concisely. Preserve meaning, names, numbers, tone, and sentence boundaries. Do not explain, summarize, censor, or add information. Return only the translated caption.',
+        },
+        {
+          role: 'user',
+          content: `Translate this live caption from ${sourceLanguage || 'the source language'} to ${target.name} (${target.code}). Return only the translation:\n${sourceText}`,
+        },
+      ],
+    },
+    signal ? { signal } : undefined,
+  );
   return sanitizeTranscriptionText(response.output_text || '');
 }
 
@@ -5752,6 +5822,9 @@ function isCurrentDraftTranslationJob(stream, sessionId, job) {
   if (transcriptionStreams.get(sessionId) !== stream || stream.closing) {
     return false;
   }
+  if (!isLiveTranslationLanguageAllowed(sessionId, job.languageCode)) {
+    return false;
+  }
   return (
     getDraftTranslationWorker(stream, job.languageCode).activeJobs.has(job) &&
     (stream.draftByItemId.has(job.itemId) ||
@@ -5868,6 +5941,7 @@ function publishStableDraftTranslation({
 
 function runDraftTranslationWorker(stream, sessionId, languageCode) {
   if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+  if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
   const worker = getDraftTranslationWorker(stream, languageCode);
   if (
     worker.activeJobs.size >= LIVE_DRAFT_TRANSLATION_MAX_CONCURRENCY ||
@@ -6063,6 +6137,8 @@ function getFinalTranslationWorker(stream, languageCode) {
   if (!stream.translationWorkers.has(languageCode)) {
     stream.translationWorkers.set(languageCode, {
       active: false,
+      abortController: null,
+      activeRequestKey: '',
       liveQueue: [],
       historyQueue: [],
     });
@@ -6070,14 +6146,63 @@ function getFinalTranslationWorker(stream, languageCode) {
   return stream.translationWorkers.get(languageCode);
 }
 
+function cancelLiveTranslationLanguage(stream, sessionId, languageCode) {
+  if (!stream || !LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
+
+  const draftWorker = stream.draftTranslationWorkers.get(languageCode);
+  if (draftWorker) {
+    if (draftWorker.timer) clearTimeout(draftWorker.timer);
+    draftWorker.timer = null;
+    draftWorker.pending = null;
+    draftWorker.activeJobs.forEach((abortController) => {
+      abortController.abort();
+    });
+    draftWorker.lastRequestedTextByItemId.clear();
+    draftWorker.visibleVersionByItemId.clear();
+    draftWorker.stabilityByItemId.clear();
+    stream.draftTranslationWorkers.delete(languageCode);
+  }
+
+  Array.from(stream.draftTranslationVersions.keys()).forEach((versionKey) => {
+    if (versionKey.endsWith(`:${languageCode}`)) {
+      stream.draftTranslationVersions.delete(versionKey);
+    }
+  });
+
+  const finalWorker = stream.translationWorkers.get(languageCode);
+  if (finalWorker) {
+    [...finalWorker.liveQueue, ...finalWorker.historyQueue].forEach((task) => {
+      if (task?.requestKey) {
+        stream.pendingTranslationKeys.delete(task.requestKey);
+      }
+    });
+    finalWorker.liveQueue = [];
+    finalWorker.historyQueue = [];
+    if (finalWorker.activeRequestKey) {
+      stream.pendingTranslationKeys.delete(finalWorker.activeRequestKey);
+    }
+    finalWorker.abortController?.abort();
+  }
+
+  stream.liveTranslationStatus.delete(languageCode);
+  clearLatestRoomStateKeyframe(
+    getLiveTranslationRoom(sessionId, languageCode),
+    'viewer:translation-patch',
+  );
+}
+
 function runFinalTranslationWorker(stream, sessionId, languageCode) {
   if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+  if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
   const worker = getFinalTranslationWorker(stream, languageCode);
   if (worker.active) return;
   const task = worker.liveQueue.shift() || worker.historyQueue.pop() || null;
   if (!task) return;
   worker.active = true;
   const { itemId, sourceText, requestKey } = task;
+  const abortController = new AbortController();
+  worker.abortController = abortController;
+  worker.activeRequestKey = requestKey;
 
   stream.liveTranslationStatus.set(languageCode, {
     status: 'pending',
@@ -6090,9 +6215,11 @@ function runFinalTranslationWorker(stream, sessionId, languageCode) {
     text: sourceText,
     sourceLanguage: stream.language,
     targetLanguage: languageCode,
+    signal: abortController.signal,
   })
     .then((translated) => {
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+      if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
       const currentFragment = stream.fragmentByItemId.get(itemId);
       if (!currentFragment || currentFragment.text !== sourceText || !translated) return;
       currentFragment.translations = {
@@ -6112,6 +6239,8 @@ function runFinalTranslationWorker(stream, sessionId, languageCode) {
     })
     .catch((error) => {
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+      if (abortController.signal.aborted) return;
+      if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
       stream.liveTranslationStatus.set(languageCode, {
         status: 'error',
         error: sanitizeLineText(error?.message || '') || '翻譯失敗',
@@ -6122,6 +6251,8 @@ function runFinalTranslationWorker(stream, sessionId, languageCode) {
     .finally(() => {
       stream.pendingTranslationKeys.delete(requestKey);
       worker.active = false;
+      worker.abortController = null;
+      worker.activeRequestKey = '';
       runFinalTranslationWorker(stream, sessionId, languageCode);
     });
 }
@@ -6136,7 +6267,8 @@ function queueLiveTranslation({
   if (
     !stream?.translationClient ||
     !stream.fragmentByItemId?.has(itemId) ||
-    !LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)
+    !LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode) ||
+    !isLiveTranslationLanguageAllowed(sessionId, languageCode)
   ) {
     return;
   }
@@ -6918,6 +7050,8 @@ function getPublicTranscriptionState(session) {
         ? state.updatedAt
         : null,
     translationLanguages: LIVE_TRANSLATION_LANGUAGES,
+    allowedTranslationLanguageCodes:
+      getAllowedLiveTranslationLanguageCodes(session),
     sourceLanguages: TRANSCRIPTION_SOURCE_LANGUAGES,
     translationDemand: getLiveTranslationDemand(session.id),
     translationStatus: getLiveTranslationStatus(stream),
@@ -8241,6 +8375,17 @@ function hasSocketRoomConnections(roomName) {
   return Boolean(io.sockets.adapter.rooms.get(roomName)?.size);
 }
 
+function getLatestRoomStateKeyframeKey(roomName, eventName) {
+  return `${roomName}\u0000${eventName}`;
+}
+
+function clearLatestRoomStateKeyframe(roomName, eventName) {
+  const keyframeKey = getLatestRoomStateKeyframeKey(roomName, eventName);
+  const timer = latestRoomStateKeyframes.get(keyframeKey);
+  if (timer) clearTimeout(timer);
+  latestRoomStateKeyframes.delete(keyframeKey);
+}
+
 function clearLatestRoomStateKeyframesForSession(sessionId) {
   if (!sessionId) return;
   const roomPrefixes = [
@@ -8271,7 +8416,7 @@ function emitLatestRoomState(roomName, eventName, payload) {
   // Volatile delivery can also drop the final packet on long-polling clients.
   // Coalesce the burst and reliably send only its newest snapshot once the
   // updates settle, so a viewer cannot remain stuck on an older caption.
-  const keyframeKey = `${roomName}\u0000${eventName}`;
+  const keyframeKey = getLatestRoomStateKeyframeKey(roomName, eventName);
   const previousTimer = latestRoomStateKeyframes.get(keyframeKey);
   if (previousTimer) clearTimeout(previousTimer);
   const timer = setTimeout(() => {
@@ -8331,6 +8476,7 @@ function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
 
 function broadcastLiveTranslationState(sessionId, stream, languageCode) {
   if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
+  if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
   const payload = getLiveTranslationPatchPayload(
     sessionId,
     stream,
@@ -12040,6 +12186,7 @@ io.on('connection', (socket) => {
     );
     const nextLiveTranslationLanguage =
       LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode) &&
+      isLiveTranslationLanguageAllowed(liveSession, normalizedLanguageCode) &&
       normalizedLanguageCode.toLowerCase() !== currentSourceLanguage.toLowerCase()
         ? normalizedLanguageCode
         : 'source';
@@ -12369,6 +12516,73 @@ io.on('connection', (socket) => {
     broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
   });
+
+  socket.on(
+    'transcription:set-viewer-language-access',
+    ({ sessionId, languageCode, allowed } = {}, ack) => {
+      const acknowledge = typeof ack === 'function' ? ack : () => {};
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) {
+        acknowledge({ ok: false, reason: 'session_not_allowed' });
+        return;
+      }
+      const normalizedLanguageCode = LIVE_TRANSLATION_LANGUAGES.find(
+        (language) =>
+          language.code.toLowerCase() ===
+          String(languageCode || '').trim().toLowerCase(),
+      )?.code;
+      if (!normalizedLanguageCode || typeof allowed !== 'boolean') {
+        acknowledge({ ok: false, reason: 'invalid_language_access' });
+        return;
+      }
+
+      const nextAllowedCodes = new Set(
+        getAllowedLiveTranslationLanguageCodes(session),
+      );
+      if (allowed) {
+        nextAllowedCodes.add(normalizedLanguageCode);
+      } else {
+        nextAllowedCodes.delete(normalizedLanguageCode);
+      }
+      const normalizedAllowedCodes =
+        normalizeAllowedLiveTranslationLanguageCodes(
+          Array.from(nextAllowedCodes),
+        );
+      if (
+        normalizedAllowedCodes.length ===
+          session.allowedLiveTranslationLanguageCodes.length &&
+        normalizedAllowedCodes.every(
+          (code, index) =>
+            code === session.allowedLiveTranslationLanguageCodes[index],
+        )
+      ) {
+        acknowledge({
+          ok: true,
+          allowedTranslationLanguageCodes: normalizedAllowedCodes,
+        });
+        return;
+      }
+
+      session.allowedLiveTranslationLanguageCodes = normalizedAllowedCodes;
+      persistSession(session);
+      const affectedViewerSockets =
+        applyLiveTranslationLanguageRestrictions(session);
+      broadcastTranscriptionState(sessionId);
+      broadcastViewerState(sessionId);
+      affectedViewerSockets.forEach((viewerSocket) => {
+        viewerSocket.emit(
+          'viewer:update',
+          getViewerPayload(session, viewerSocket.data.viewerCellId || null, {
+            includeLines: false,
+          }),
+        );
+      });
+      acknowledge({
+        ok: true,
+        allowedTranslationLanguageCodes: normalizedAllowedCodes,
+      });
+    },
+  );
 
   socket.on('setCurrentIndex', ({ sessionId, index }) => {
     const session = getOwnedSocketSession(sessionId);

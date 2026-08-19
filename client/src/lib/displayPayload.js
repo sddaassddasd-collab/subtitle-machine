@@ -121,6 +121,16 @@ export const normalizeDisplayPayload = (payload) => {
   )
 
   const transcription = payload?.transcription || {}
+  const liveTranslationLanguages = Array.isArray(
+    transcription.translationLanguages,
+  )
+    ? transcription.translationLanguages
+    : []
+  const allowedLiveTranslationLanguageCodes = Array.isArray(
+    transcription.allowedTranslationLanguageCodes,
+  )
+    ? new Set(transcription.allowedTranslationLanguageCodes)
+    : new Set(liveTranslationLanguages.map((language) => language?.code))
   const transcriptionIsFinal = transcription.isFinal !== false
   const source =
     typeof payload?.source === 'string' ? payload.source : 'script'
@@ -166,9 +176,9 @@ export const normalizeDisplayPayload = (payload) => {
     languages: Array.isArray(payload?.languages) ? payload.languages : [],
     defaultLanguageId,
     transcriptionIsFinal,
-    liveTranslationLanguages: Array.isArray(transcription.translationLanguages)
-      ? transcription.translationLanguages
-      : [],
+    liveTranslationLanguages: liveTranslationLanguages.filter((language) =>
+      allowedLiveTranslationLanguageCodes.has(language?.code),
+    ),
     liveTranslationStatus:
       transcription.translationStatus &&
       typeof transcription.translationStatus === 'object'

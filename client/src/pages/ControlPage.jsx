@@ -89,6 +89,7 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   lastFinalAt: null,
   updatedAt: null,
   translationLanguages: [],
+  allowedTranslationLanguageCodes: [],
   translationDemand: {},
   translationStatus: {},
   sourceLanguages: [
@@ -240,6 +241,15 @@ const normalizeTranscriptionState = (raw) => {
     translationLanguages: Array.isArray(raw.translationLanguages)
       ? raw.translationLanguages
       : [],
+    allowedTranslationLanguageCodes: Array.isArray(
+      raw.allowedTranslationLanguageCodes,
+    )
+      ? raw.allowedTranslationLanguageCodes
+      : Array.isArray(raw.translationLanguages)
+        ? raw.translationLanguages
+            .map((language) => language?.code)
+            .filter(Boolean)
+        : [],
     translationDemand:
       raw.translationDemand && typeof raw.translationDemand === 'object'
         ? raw.translationDemand
@@ -2527,6 +2537,39 @@ const ControlPage = () => {
       languageOverride: language,
       autoFollow: autoFollow.listening === true,
     })
+  }
+
+  const handleViewerTranslationLanguageAccessChange = (
+    languageCode,
+    allowed,
+  ) => {
+    if (!sessionId || !socketRef.current) return
+    setTranscription((prev) => {
+      const nextAllowedCodes = new Set(prev.allowedTranslationLanguageCodes)
+      if (allowed) {
+        nextAllowedCodes.add(languageCode)
+      } else {
+        nextAllowedCodes.delete(languageCode)
+      }
+      return {
+        ...prev,
+        allowedTranslationLanguageCodes: prev.translationLanguages
+          .map((language) => language?.code)
+          .filter((code) => code && nextAllowedCodes.has(code)),
+      }
+    })
+    socketRef.current.emit(
+      'transcription:set-viewer-language-access',
+      { sessionId, languageCode, allowed },
+      (ack) => {
+        if (ack?.ok === true) return
+        setStatus({
+          kind: 'error',
+          message: '無法更新觀眾翻譯語言設定，請稍後再試',
+        })
+        socketRef.current?.emit('join', { sessionId, role: 'control' })
+      },
+    )
   }
 
   const handleJumpToLine = (index) => {
@@ -4829,6 +4872,46 @@ const ControlPage = () => {
               <span className="input-note">
                 辨識中切換會保留已完成字幕，並以新語言重新建立辨識連線。
               </span>
+              <fieldset className="translation-language-access">
+                <legend>觀眾可選擇的即時翻譯</legend>
+                <div className="translation-language-access-grid">
+                  {transcription.translationLanguages
+                    .filter(
+                      (language) =>
+                        language?.code?.toLowerCase() !==
+                        (transcription.language || 'zh-TW').toLowerCase(),
+                    )
+                    .map((language) => {
+                      const demand = Number(
+                        transcription.translationDemand?.[language.code],
+                      )
+                      return (
+                        <label
+                          className="translation-language-access-option"
+                          key={language.code}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={transcription.allowedTranslationLanguageCodes.includes(
+                              language.code,
+                            )}
+                            onChange={(event) =>
+                              handleViewerTranslationLanguageAccessChange(
+                                language.code,
+                                event.target.checked,
+                              )
+                            }
+                          />
+                          <span>{language.name}</span>
+                          <small>{demand > 0 ? `${demand} 人` : '0 人'}</small>
+                        </label>
+                      )
+                    })}
+                </div>
+                <span className="input-note">
+                  原文永遠保留。取消語言後，正在使用的觀眾會立即切回原文，且停止新的翻譯工作。
+                </span>
+              </fieldset>
               <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
               <textarea
                 id="transcription-context"

@@ -355,7 +355,7 @@ const ViewerPage = () => {
   ])
 
   useEffect(() => {
-    if (!liveTranslationLanguages.length || selectedLiveLanguage === 'source') return
+    if (selectedLiveLanguage === 'source') return
     if (
       !liveTranslationLanguages.some(
         (language) => language?.code === selectedLiveLanguage,
