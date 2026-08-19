@@ -5333,23 +5333,19 @@ function buildTranscriptionDisplayEntries(stream) {
         : [];
       const translations = {};
       LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
-        if (
-          fragments.length > 0 &&
-          fragments.every((fragment) =>
-            sanitizeTranscriptionText(
-              fragment?.translations?.[languageCode] ||
-                fragment?.provisionalTranslations?.[languageCode] ||
-                '',
-            ),
-          )
-        ) {
+        const translatedPrefix = [];
+        for (const fragment of fragments) {
+          const translated = sanitizeTranscriptionText(
+            fragment?.translations?.[languageCode] ||
+              fragment?.provisionalTranslations?.[languageCode] ||
+              '',
+          );
+          if (!translated) break;
+          translatedPrefix.push({ text: translated });
+        }
+        if (translatedPrefix.length > 0) {
           translations[languageCode] = composeFragmentTexts(
-            fragments.map((fragment) => ({
-              text:
-                fragment.translations[languageCode] ||
-                fragment.provisionalTranslations?.[languageCode] ||
-                '',
-            })),
+            translatedPrefix,
           );
         }
       });
@@ -5668,7 +5664,8 @@ function isCurrentDraftTranslationJob(stream, sessionId, job) {
   }
   return (
     getDraftTranslationWorker(stream, job.languageCode).activeJob === job &&
-    stream.draftByItemId.has(job.itemId)
+    (stream.draftByItemId.has(job.itemId) ||
+      stream.fragmentByItemId.has(job.itemId))
   );
 }
 
@@ -5684,9 +5681,10 @@ function publishStableDraftTranslation({
     return false;
   }
 
+  const completedFragment = stream.fragmentByItemId.get(job.itemId) || null;
   const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
     sourceText: job.text,
-    translations: {},
+    translations: completedFragment?.provisionalTranslations || {},
   };
   const published = sanitizeTranscriptionText(
     draftState.translations?.[job.languageCode] || '',
@@ -5712,12 +5710,17 @@ function publishStableDraftTranslation({
   }
   if (candidate === published) return false;
 
-  draftState.sourceText = job.text;
-  draftState.translations = {
+  const nextTranslations = {
     ...draftState.translations,
     [job.languageCode]: candidate,
   };
-  stream.draftTranslationsByItemId.set(job.itemId, draftState);
+  if (completedFragment) {
+    completedFragment.provisionalTranslations = nextTranslations;
+  } else {
+    draftState.sourceText = job.text;
+    draftState.translations = nextTranslations;
+    stream.draftTranslationsByItemId.set(job.itemId, draftState);
+  }
   job.lastPublishedAt = now;
   syncTranscriptionStateFromStream(sessionId, stream);
   return true;
@@ -5900,6 +5903,15 @@ function finalizeDraftTranslations(stream, itemId) {
       worker.abortController.abort();
     }
   });
+  stream.draftTranslationsByItemId.delete(itemId);
+  return draftState?.translations && typeof draftState.translations === 'object'
+    ? { ...draftState.translations }
+    : {};
+}
+
+function promoteDeepgramDraftTranslations(stream, itemId) {
+  if (!stream || !itemId) return {};
+  const draftState = stream.draftTranslationsByItemId.get(itemId) || null;
   stream.draftTranslationsByItemId.delete(itemId);
   return draftState?.translations && typeof draftState.translations === 'object'
     ? { ...draftState.translations }
@@ -11112,7 +11124,13 @@ function startDeepgramTranscription({
     if (event.is_final === true) {
       const provisionalSpeakerId =
         stream.draftSpeakerByItemId.get(itemId)?.speakerId ?? null;
-      const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
+      // Deepgram `is_final` confirms only this ASR chunk, not necessarily the
+      // whole spoken sentence. Promote what is already visible without
+      // cancelling the active/pending fast translations for this chunk.
+      const provisionalTranslations = promoteDeepgramDraftTranslations(
+        stream,
+        itemId,
+      );
       takeDraftLine(stream, itemId);
       if (transcript) {
         const fragment = upsertCompletedFragment(stream, {
@@ -11127,10 +11145,21 @@ function startDeepgramTranscription({
           fragment.speakerId = selectedSpeakerRecognitionEnabled
             ? getDeepgramDominantSpeakerId(alternative) ?? provisionalSpeakerId
             : null;
-          fragment.provisionalTranslations = provisionalTranslations;
+          fragment.provisionalTranslations = {
+            ...(fragment.provisionalTranslations || {}),
+            ...provisionalTranslations,
+          };
         }
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
         if (fragment) {
+          // Start a translation of the stable Deepgram chunk immediately.
+          // Correction runs in parallel and can replace it once if needed.
+          queueRequestedLiveTranslations(
+            stream,
+            sessionId,
+            [fragment.itemId],
+            'live',
+          );
           if (correctionClient) {
             queueTranscriptionCorrection({
               stream,
