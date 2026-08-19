@@ -5062,6 +5062,7 @@ function setDraftLine(stream, itemId, text) {
   const sanitized = sanitizeTranscriptionText(text);
   if (!sanitized) {
     stream.draftByItemId.delete(itemId);
+    stream.draftSpeakerByItemId?.delete(itemId);
     if (stream.activeDraftItemId === itemId) {
       stream.activeDraftItemId = getLastDraftItemId(stream);
     }
@@ -5076,6 +5077,7 @@ function takeDraftLine(stream, itemId) {
   if (!stream || !itemId) return '';
   const draft = stream.draftByItemId.get(itemId) || '';
   stream.draftByItemId.delete(itemId);
+  stream.draftSpeakerByItemId?.delete(itemId);
   if (stream.activeDraftItemId === itemId) {
     stream.activeDraftItemId = getLastDraftItemId(stream);
   }
@@ -5367,6 +5369,9 @@ function buildTranscriptionDisplayEntries(stream) {
   const draftTranslations = selectedDraftId
     ? stream.draftTranslationsByItemId?.get(selectedDraftId)?.translations || {}
     : {};
+  const draftSpeakerId = selectedDraftId
+    ? stream.draftSpeakerByItemId?.get(selectedDraftId)?.speakerId ?? null
+    : null;
 
   if (!draftText) {
     return historyEntries;
@@ -5378,7 +5383,8 @@ function buildTranscriptionDisplayEntries(stream) {
         id: selectedDraftId,
         text: draftText,
         translations: draftTranslations,
-        speakerId: null,
+        speakerId: draftSpeakerId,
+        speakerStatus: Number.isInteger(draftSpeakerId) ? 'provisional' : null,
         isFinal: false,
       },
     ];
@@ -5392,7 +5398,7 @@ function buildTranscriptionDisplayEntries(stream) {
   const shouldStartNewLine = shouldBreakBetweenFragments({
     currentText: currentLine.text,
     previousFragment: lastFragment,
-    nextFragment: { text: draftText },
+    nextFragment: { text: draftText, speakerId: draftSpeakerId },
   });
 
   if (shouldStartNewLine) {
@@ -5402,7 +5408,8 @@ function buildTranscriptionDisplayEntries(stream) {
         id: selectedDraftId,
         text: draftText,
         translations: draftTranslations,
-        speakerId: null,
+        speakerId: draftSpeakerId,
+        speakerStatus: Number.isInteger(draftSpeakerId) ? 'provisional' : null,
         isFinal: false,
       },
     ];
@@ -5429,6 +5436,7 @@ function buildTranscriptionDisplayEntries(stream) {
     text: joinTranscriptionTexts(currentLine.text, draftText),
     translations: mergedTranslations,
     speakerId: currentLine.speakerId,
+    speakerStatus: Number.isInteger(currentLine.speakerId) ? 'confirmed' : null,
     isFinal: false,
   });
   return mergedEntries;
@@ -5639,6 +5647,7 @@ function getDraftTranslationWorker(stream, languageCode) {
       lastRequestedTextByItemId: new Map(),
       abortController: null,
       currentItemId: null,
+      activeJob: null,
     });
   }
   return stream.draftTranslationWorkers.get(languageCode);
@@ -5652,12 +5661,8 @@ function isCurrentDraftTranslationJob(stream, sessionId, job) {
   if (transcriptionStreams.get(sessionId) !== stream || stream.closing) {
     return false;
   }
-  const versionKey = getDraftTranslationVersionKey(
-    job.itemId,
-    job.languageCode,
-  );
   return (
-    stream.draftTranslationVersions.get(versionKey) === job.version &&
+    getDraftTranslationWorker(stream, job.languageCode).activeJob === job &&
     stream.draftByItemId.has(job.itemId)
   );
 }
@@ -5737,6 +5742,7 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   job.lastPublishedAt = 0;
   worker.pending = null;
   worker.active = true;
+  worker.activeJob = job;
   const abortController = new AbortController();
   worker.abortController = abortController;
   worker.currentItemId = job.itemId;
@@ -5802,6 +5808,9 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
       if (worker.currentItemId === job.itemId) {
         worker.currentItemId = null;
       }
+      if (worker.activeJob === job) {
+        worker.activeJob = null;
+      }
       worker.active = false;
       if (worker.pending) {
         runDraftTranslationWorker(stream, sessionId, languageCode);
@@ -5859,9 +5868,9 @@ function scheduleDraftTranslations(stream, sessionId, itemId, text) {
       text: sourceText,
       version,
     };
-    if (worker.active && worker.abortController) {
-      worker.abortController.abort();
-    }
+    // Keep the first request alive so viewers receive its earliest useful
+    // translation. `pending` is overwritten with the newest transcript and
+    // runs next, skipping stale middle drafts.
     runDraftTranslationWorker(stream, sessionId, languageCode);
   });
 }
@@ -10747,6 +10756,59 @@ function getDeepgramDominantSpeakerId(alternative) {
   return Number.isInteger(dominantSpeaker) ? dominantSpeaker + 1 : null;
 }
 
+function updateDeepgramProvisionalSpeaker(stream, itemId, alternative) {
+  if (!stream?.speakerRecognitionEnabled || !itemId) return null;
+  const words = Array.isArray(alternative?.words)
+    ? alternative.words.filter((word) => {
+        const speaker = Number(word?.speaker);
+        return Number.isInteger(speaker) && speaker >= 0;
+      })
+    : [];
+  if (words.length === 0) {
+    return stream.draftSpeakerByItemId?.get(itemId)?.speakerId ?? null;
+  }
+
+  const latestSpeaker = Number(words[words.length - 1].speaker) + 1;
+  let trailingWordCount = 0;
+  let trailingStart = null;
+  let trailingEnd = null;
+  for (let index = words.length - 1; index >= 0; index -= 1) {
+    if (Number(words[index].speaker) + 1 !== latestSpeaker) break;
+    trailingWordCount += 1;
+    const start = Number(words[index]?.start);
+    const end = Number(words[index]?.end);
+    if (Number.isFinite(start)) trailingStart = start;
+    if (trailingEnd === null && Number.isFinite(end)) trailingEnd = end;
+  }
+  const trailingDuration =
+    Number.isFinite(trailingStart) &&
+    Number.isFinite(trailingEnd) &&
+    trailingEnd > trailingStart
+      ? trailingEnd - trailingStart
+      : 0;
+  const previous = stream.draftSpeakerByItemId?.get(itemId) || null;
+  let speakerId = previous?.speakerId ?? null;
+
+  // The first label is immediate. Later changes need two consecutive words
+  // or 350 ms of consistent evidence, suppressing one-word 1→2→1 spikes.
+  if (!Number.isInteger(speakerId)) {
+    speakerId = latestSpeaker;
+  } else if (
+    latestSpeaker !== speakerId &&
+    (trailingWordCount >= 2 || trailingDuration >= 0.35)
+  ) {
+    speakerId = latestSpeaker;
+  }
+
+  stream.draftSpeakerByItemId.set(itemId, {
+    speakerId,
+    observedSpeakerId: latestSpeaker,
+    trailingWordCount,
+    updatedAt: Date.now(),
+  });
+  return speakerId;
+}
+
 function startDeepgramTranscription({
   sessionId,
   socketId,
@@ -10804,6 +10866,7 @@ function startDeepgramTranscription({
     dualChannelEnabled: false,
     speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
     draftByItemId: new Map(),
+    draftSpeakerByItemId: new Map(),
     activeDraftItemId: null,
     completedFragments: [],
     fragmentByItemId: new Map(),
@@ -10921,6 +10984,8 @@ function startDeepgramTranscription({
     const itemId = `deepgram-${start.toFixed(3)}`;
 
     if (event.is_final === true) {
+      const provisionalSpeakerId =
+        stream.draftSpeakerByItemId.get(itemId)?.speakerId ?? null;
       const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
       takeDraftLine(stream, itemId);
       if (transcript) {
@@ -10934,7 +10999,7 @@ function startDeepgramTranscription({
         });
         if (fragment) {
           fragment.speakerId = selectedSpeakerRecognitionEnabled
-            ? getDeepgramDominantSpeakerId(alternative)
+            ? getDeepgramDominantSpeakerId(alternative) ?? provisionalSpeakerId
             : null;
           fragment.provisionalTranslations = provisionalTranslations;
         }
@@ -10960,6 +11025,7 @@ function startDeepgramTranscription({
       }
     } else if (transcript) {
       setDraftLine(stream, itemId, transcript);
+      updateDeepgramProvisionalSpeaker(stream, itemId, alternative);
       scheduleDraftTranslations(stream, sessionId, itemId, transcript);
       handleAutoFollowTranscript(sessionId, transcript, { isFinal: false });
     }
@@ -11045,6 +11111,7 @@ function startRealtimeTranscription({
     dualChannelEnabled: selectedDualChannelEnabled,
     speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
     draftByItemId: new Map(),
+    draftSpeakerByItemId: new Map(),
     activeDraftItemId: null,
     completedFragments: [],
     fragmentByItemId: new Map(),
