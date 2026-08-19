@@ -134,6 +134,7 @@ const LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS = Number.isFinite(
   : 3;
 const LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS = 220;
 const LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS = 2;
+const LIVE_DRAFT_TRANSLATION_REWRITE_INTERVAL_MS = 800;
 const LIVE_DRAFT_TRANSLATION_MAX_CONCURRENCY = 2;
 const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
 const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
@@ -5096,6 +5097,10 @@ function upsertCompletedFragment(
   const existing = stream.fragmentByItemId.get(itemId);
   if (existing) {
     if (existing.text !== sanitized) {
+      existing.provisionalTranslations = {
+        ...(existing.provisionalTranslations || {}),
+        ...(existing.translations || {}),
+      };
       existing.translations = {};
     }
     existing.text = sanitized;
@@ -5645,9 +5650,64 @@ function getDraftTranslationWorker(stream, languageCode) {
       lastRequestedTextByItemId: new Map(),
       activeJobs: new Map(),
       visibleVersionByItemId: new Map(),
+      stabilityByItemId: new Map(),
     });
   }
   return stream.draftTranslationWorkers.get(languageCode);
+}
+
+function getCommonTranslationPrefix(leftText, rightText) {
+  const left = sanitizeTranscriptionText(leftText);
+  const right = sanitizeTranscriptionText(rightText);
+  const maxLength = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < maxLength && left[index] === right[index]) {
+    index += 1;
+  }
+  return left.slice(0, index);
+}
+
+function trimTranslationPrefixForMutableTail(prefixText, languageCode) {
+  const prefix = sanitizeTranscriptionText(prefixText);
+  if (!prefix) return '';
+
+  if (languageCode === 'zh-TW' || languageCode === 'ja') {
+    return sanitizeTranscriptionText(prefix.slice(0, -4));
+  }
+
+  const words = prefix.split(/\s+/).filter(Boolean);
+  const mutableWordCount =
+    languageCode === 'de' || languageCode === 'ko' ? 4 : 2;
+  if (words.length <= mutableWordCount) return '';
+  return words.slice(0, -mutableWordCount).join(' ');
+}
+
+function updateDraftTranslationStability(worker, job, candidate) {
+  const current = worker.stabilityByItemId.get(job.itemId) || {
+    lastCompletedText: '',
+    lastCompletedVersion: 0,
+    stablePrefix: '',
+    lastRewriteAt: 0,
+  };
+  if (job.version < current.lastCompletedVersion) {
+    return current;
+  }
+  if (current.lastCompletedText) {
+    const agreedPrefix = trimTranslationPrefixForMutableTail(
+      getCommonTranslationPrefix(current.lastCompletedText, candidate),
+      job.languageCode,
+    );
+    if (
+      agreedPrefix &&
+      (!current.stablePrefix || agreedPrefix.startsWith(current.stablePrefix))
+    ) {
+      current.stablePrefix = agreedPrefix;
+    }
+  }
+  current.lastCompletedText = candidate;
+  current.lastCompletedVersion = job.version;
+  worker.stabilityByItemId.set(job.itemId, current);
+  return current;
 }
 
 function getDraftTranslationVersionKey(itemId, languageCode) {
@@ -5694,14 +5754,40 @@ function publishStableDraftTranslation({
   const publishIntervalElapsed =
     now - (job.lastPublishedAt || job.startedAt) >=
     LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS;
-  const switchesToNewerSource = job.version > visibleVersion;
+  const switchesToNewerSource =
+    Boolean(published) && job.version > visibleVersion;
 
-  // Keep the previous readable translation visible until a newer source
-  // version has produced at least one useful token, then switch atomically.
+  // Keep the readable previous translation on screen while a translation for
+  // a newer source snapshot is still streaming. Replacing it after two output
+  // characters made captions disappear and rebuild several times per second.
+  if (switchesToNewerSource && !force) {
+    return false;
+  }
+
+  const stability = force
+    ? updateDraftTranslationStability(worker, job, candidate)
+    : worker.stabilityByItemId.get(job.itemId) || null;
+  if (force && stability?.lastCompletedVersion > job.version) {
+    return false;
+  }
+  const changesStablePrefix = Boolean(
+    stability?.stablePrefix &&
+      (!published.startsWith(stability.stablePrefix) ||
+        !candidate.startsWith(stability.stablePrefix)),
+  );
+  const isRewrite = Boolean(published) && !isCompatibleExtension;
+  const rewriteIntervalElapsed =
+    !stability ||
+    now - stability.lastRewriteAt >= LIVE_DRAFT_TRANSLATION_REWRITE_INTERVAL_MS;
+
+  // A prefix that agreed across completed translations is kept stable while
+  // the source remains provisional. Languages with more reordering retain a
+  // larger mutable tail. Final fragments may replace it once for correctness.
   if (
-    switchesToNewerSource &&
-    !force &&
-    candidate.length < LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS
+    force &&
+    isRewrite &&
+    !completedFragment &&
+    (changesStablePrefix || !rewriteIntervalElapsed)
   ) {
     return false;
   }
@@ -5738,6 +5824,9 @@ function publishStableDraftTranslation({
     stream.draftTranslationsByItemId.set(job.itemId, draftState);
   }
   worker.visibleVersionByItemId.set(job.itemId, job.version);
+  if (force && isRewrite && stability) {
+    stability.lastRewriteAt = now;
+  }
   job.lastPublishedAt = now;
   broadcastLiveTranslationState(sessionId, stream, job.languageCode);
   return true;
@@ -5835,6 +5924,7 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
       ) {
         worker.lastRequestedTextByItemId.delete(job.itemId);
         worker.visibleVersionByItemId.delete(job.itemId);
+        worker.stabilityByItemId.delete(job.itemId);
         stream.draftTranslationVersions.delete(
           getDraftTranslationVersionKey(job.itemId, languageCode),
         );
@@ -5918,6 +6008,7 @@ function finalizeDraftTranslations(stream, itemId) {
       if (job.itemId === itemId) abortController.abort();
     });
     worker.visibleVersionByItemId.delete(itemId);
+    worker.stabilityByItemId.delete(itemId);
   });
   stream.draftTranslationsByItemId.delete(itemId);
   return draftState?.translations && typeof draftState.translations === 'object'
@@ -6204,6 +6295,10 @@ function queueTranscriptionCorrection({
       }
 
       fragment.text = nextText;
+      fragment.provisionalTranslations = {
+        ...(fragment.provisionalTranslations || {}),
+        ...(fragment.translations || {}),
+      };
       fragment.translations = {};
       fragment.corrected = true;
       clearMergedLineOverridesForItem(stream, itemId);
