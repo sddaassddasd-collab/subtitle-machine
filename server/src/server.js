@@ -117,6 +117,18 @@ const LIVE_TRANSLATION_MODEL =
 const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
 const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
   {
+    code: 'zh-TW',
+    name: '繁體中文',
+    shortName: '中',
+    ui: {
+      live: '即時翻譯：繁體中文',
+      preparing: '正在準備繁體中文翻譯…',
+      translating: '翻譯中…',
+      unavailable: '繁體中文翻譯暫時無法使用。',
+      fallback: '繁體中文翻譯暫時無法使用，未翻譯字幕改顯示原文。',
+    },
+  },
+  {
     code: 'en',
     name: 'English',
     shortName: 'EN',
@@ -198,6 +210,15 @@ const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
 const LIVE_TRANSLATION_LANGUAGE_CODES = new Set(
   LIVE_TRANSLATION_LANGUAGES.map((language) => language.code),
 );
+const TRANSCRIPTION_SOURCE_LANGUAGES = Object.freeze([
+  { code: 'zh-TW', name: '繁體中文（台灣）', originalLabel: '原文（繁體中文）' },
+  { code: 'en', name: 'English', originalLabel: 'Original (English)' },
+  { code: 'ja', name: '日本語', originalLabel: '原文（日本語）' },
+  { code: 'ko', name: '한국어', originalLabel: '원문(한국어)' },
+  { code: 'es', name: 'Español', originalLabel: 'Original (Español)' },
+  { code: 'fr', name: 'Français', originalLabel: 'Original (Français)' },
+  { code: 'de', name: 'Deutsch', originalLabel: 'Original (Deutsch)' },
+]);
 const USER_ROLES = {
   ADMIN: 'admin',
   OPERATOR: 'operator',
@@ -3722,6 +3743,9 @@ function ensureSessionStructure(session) {
   session.displayEnabled = session.displayEnabled !== false;
   session.roleColorEnabled = session.roleColorEnabled !== false;
   session.musicEffectEnabled = session.musicEffectEnabled !== false;
+  session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(
+    session.transcriptionLanguage,
+  );
   session.projectorLayout = normalizeProjectorLayout(session.projectorLayout);
   session.projectorDisplayMode = normalizeProjectorDisplayMode(
     session.projectorDisplayMode,
@@ -3807,6 +3831,7 @@ function createSessionRecord(ownerUserId) {
     displayEnabled: true,
     roleColorEnabled: true,
     musicEffectEnabled: true,
+    transcriptionLanguage: DEEPGRAM_LANGUAGE,
     viewerDefaultLanguageId: 'primary',
     projectorDefaultLanguageId: 'primary',
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
@@ -3883,6 +3908,7 @@ function serializeSessionForStorage(session) {
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
+    transcriptionLanguage: normalized.transcriptionLanguage,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorLayout: normalized.projectorLayout,
@@ -5111,6 +5137,25 @@ function upsertCompletedFragment(
   return fragment;
 }
 
+function seedTranscriptionHistoryFromState(stream, sessionId) {
+  const session = getSession(sessionId);
+  const existingText = sanitizeTranscriptionMultilineText(
+    ensureTranscriptionState(session).text,
+  );
+  if (!existingText) return;
+  existingText
+    .split('\n')
+    .map((line) => sanitizeTranscriptionText(line))
+    .filter(Boolean)
+    .forEach((text, index) => {
+      upsertCompletedFragment(stream, {
+        itemId: `language-history-${Date.now()}-${index}`,
+        text,
+        boundaryMeta: { reason: 'semantic', pauseMs: 0 },
+      });
+    });
+}
+
 function shouldBreakBetweenFragments({
   currentText,
   previousFragment,
@@ -5585,6 +5630,7 @@ function queueRequestedLiveTranslations(stream, sessionId, itemIds = []) {
   if (!stream?.translationClient) return;
   const demand = getLiveTranslationDemand(sessionId);
   Object.keys(demand).forEach((languageCode) => {
+    if (languageCode.toLowerCase() === stream.language?.toLowerCase()) return;
     itemIds.forEach((itemId) => {
       queueLiveTranslation({ stream, sessionId, itemId, languageCode });
     });
@@ -6197,6 +6243,21 @@ function normalizeLanguageCode(rawLanguage) {
   return trimmed;
 }
 
+function normalizeTranscriptionSourceLanguage(rawLanguage) {
+  const normalized = normalizeLanguageCode(rawLanguage);
+  if (!normalized) return DEEPGRAM_LANGUAGE;
+  return (
+    TRANSCRIPTION_SOURCE_LANGUAGES.find(
+      (language) => language.code.toLowerCase() === normalized.toLowerCase(),
+    )?.code || DEEPGRAM_LANGUAGE
+  );
+}
+
+function getOpenAITranscriptionLanguage(sourceLanguage) {
+  const normalized = normalizeTranscriptionSourceLanguage(sourceLanguage);
+  return normalized === 'zh-TW' ? 'zh' : normalized;
+}
+
 function normalizeDualChannelEnabled(rawEnabled) {
   if (typeof rawEnabled === 'boolean') return rawEnabled;
   return DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED;
@@ -6248,7 +6309,9 @@ function ensureTranscriptionState(session) {
   normalized.provider = normalizeTranscriptionProvider(normalized.provider);
   if (normalized.provider === 'deepgram') {
     normalized.model = DEEPGRAM_MODEL;
-    normalized.language = DEEPGRAM_LANGUAGE;
+    normalized.language = normalizeTranscriptionSourceLanguage(
+      normalized.language || session.transcriptionLanguage,
+    );
     normalized.dualChannelEnabled = false;
     normalized.speakerRecognitionEnabled = false;
   } else if (
@@ -6257,6 +6320,9 @@ function ensureTranscriptionState(session) {
   ) {
     normalized.model = DEFAULT_TRANSCRIPTION_MODEL;
   }
+  normalized.language = normalizeTranscriptionSourceLanguage(
+    normalized.language || session.transcriptionLanguage,
+  );
   normalized.semanticSegmentationEnabled = normalizeSemanticSegmentationEnabled(
     normalized.semanticSegmentationEnabled,
   );
@@ -6311,6 +6377,7 @@ function getPublicTranscriptionState(session) {
         ? state.updatedAt
         : null,
     translationLanguages: LIVE_TRANSLATION_LANGUAGES,
+    sourceLanguages: TRANSCRIPTION_SOURCE_LANGUAGES,
     translationDemand: getLiveTranslationDemand(session.id),
     translationStatus: getLiveTranslationStatus(stream),
   };
@@ -10275,7 +10342,7 @@ function startDeepgramTranscription({
   transcriptionContext,
   startAcknowledge,
 }) {
-  const selectedLanguage = normalizeLanguageCode(language) || DEEPGRAM_LANGUAGE;
+  const selectedLanguage = normalizeTranscriptionSourceLanguage(language);
   const selectedContext = normalizeTranscriptionContextValue(
     transcriptionContext,
   );
@@ -10341,7 +10408,15 @@ function startDeepgramTranscription({
     startAcknowledge:
       typeof startAcknowledge === 'function' ? startAcknowledge : null,
   };
+  seedTranscriptionHistoryFromState(stream, sessionId);
   transcriptionStreams.set(sessionId, stream);
+  queueRequestedLiveTranslations(
+    stream,
+    sessionId,
+    stream.completedFragments
+      .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
+      .map((fragment) => fragment.itemId),
+  );
   const isCurrent = () => transcriptionStreams.get(sessionId) === stream;
 
   stream.initTimeout = setTimeout(() => {
@@ -10371,8 +10446,6 @@ function startDeepgramTranscription({
     updateTranscriptionState(sessionId, {
       active: true,
       status: 'running',
-      text: '',
-      isFinal: true,
       provider: 'deepgram',
       model: DEEPGRAM_MODEL,
       language: selectedLanguage,
@@ -10501,7 +10574,8 @@ function startRealtimeTranscription({
   startAcknowledge,
 }) {
   const selectedModel = normalizeTranscriptionModel(model);
-  const selectedLanguage = normalizeLanguageCode(language);
+  const selectedSourceLanguage = normalizeTranscriptionSourceLanguage(language);
+  const selectedLanguage = getOpenAITranscriptionLanguage(selectedSourceLanguage);
   const selectedSemanticSegmentationEnabled =
     normalizeSemanticSegmentationEnabled(semanticSegmentationEnabled);
   const selectedDualChannelEnabled =
@@ -10512,7 +10586,7 @@ function startRealtimeTranscription({
     transcriptionContext,
   );
   const realtimePromptText = buildRealtimeTranscriptionPrompt({
-    language: selectedLanguage,
+    language: selectedSourceLanguage,
     transcriptionContext: selectedTranscriptionContext,
   });
   const client = new OpenAI({ apiKey });
@@ -10526,7 +10600,7 @@ function startRealtimeTranscription({
     wsModel: DEFAULT_REALTIME_WS_MODEL,
     sessionType: DEFAULT_REALTIME_SESSION_TYPE,
     model: selectedModel,
-    language: selectedLanguage,
+    language: selectedSourceLanguage,
     transcriptionContext: selectedTranscriptionContext,
     realtimePromptText,
     semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
@@ -10574,7 +10648,15 @@ function startRealtimeTranscription({
     startAcknowledge:
       typeof startAcknowledge === 'function' ? startAcknowledge : null,
   };
+  seedTranscriptionHistoryFromState(stream, sessionId);
   transcriptionStreams.set(sessionId, stream);
+  queueRequestedLiveTranslations(
+    stream,
+    sessionId,
+    stream.completedFragments
+      .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
+      .map((fragment) => fragment.itemId),
+  );
 
   const isCurrent = () => transcriptionStreams.get(sessionId) === stream;
 
@@ -10584,9 +10666,7 @@ function startRealtimeTranscription({
     updateTranscriptionState(sessionId, {
       active: false,
       status: 'connecting',
-      text: '',
-      isFinal: true,
-      language: selectedLanguage,
+      language: selectedSourceLanguage,
       model: selectedModel,
       transcriptionContext: selectedTranscriptionContext,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
@@ -10649,9 +10729,7 @@ function startRealtimeTranscription({
     updateTranscriptionState(sessionId, {
       active: true,
       status: 'running',
-      text: '',
-      isFinal: true,
-      language: selectedLanguage,
+      language: selectedSourceLanguage,
       model: selectedModel,
       transcriptionContext: selectedTranscriptionContext,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
@@ -10940,10 +11018,21 @@ io.on('connection', (socket) => {
         ? socket.data.viewerSessionId
         : '';
     if (!sessionId || socket.data?.publicRole !== 'viewer') return;
+    const requestedLanguageCode =
+      typeof languageCode === 'string' ? languageCode.trim() : '';
     const normalizedLanguageCode =
-      typeof languageCode === 'string' ? languageCode.trim().toLowerCase() : '';
+      LIVE_TRANSLATION_LANGUAGES.find(
+        (language) =>
+          language.code.toLowerCase() === requestedLanguageCode.toLowerCase(),
+      )?.code || '';
+    const liveSession = getSession(sessionId);
+    const currentSourceLanguage = normalizeTranscriptionSourceLanguage(
+      transcriptionStreams.get(sessionId)?.language ||
+        liveSession?.transcriptionLanguage,
+    );
     socket.data.liveTranslationLanguage =
-      LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)
+      LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode) &&
+      normalizedLanguageCode.toLowerCase() !== currentSourceLanguage.toLowerCase()
         ? normalizedLanguageCode
         : 'source';
 
@@ -11015,6 +11104,7 @@ io.on('connection', (socket) => {
       dualChannelEnabled,
       speakerRecognitionEnabled,
       transcriptionContext,
+      preserveTextOnRestart,
     }, startAck) => {
       const acknowledge = typeof startAck === 'function' ? startAck : () => {};
       if (!sessionId) {
@@ -11058,8 +11148,15 @@ io.on('connection', (socket) => {
       }
 
       if (active && active.socketId === socket.id) {
+        if (preserveTextOnRestart === true) {
+          const completedHistory = getTranscriptionDisplayParts(active).historyLines;
+          updateTranscriptionState(sessionId, {
+            text: sanitizeTranscriptionMultilineText(completedHistory.join('\n')),
+            isFinal: true,
+          });
+        }
         stopTranscriptionStream(sessionId, {
-          keepText: false,
+          keepText: preserveTextOnRestart === true,
           reason: 'restart transcription',
         });
       }
@@ -11067,13 +11164,12 @@ io.on('connection', (socket) => {
       updateTranscriptionState(sessionId, {
         active: false,
         status: 'connecting',
-        text: '',
-        isFinal: true,
+        ...(preserveTextOnRestart === true
+          ? {}
+          : { text: '', isFinal: true }),
         provider: selectedProvider,
         language:
-          selectedProvider === 'deepgram'
-            ? normalizeLanguageCode(language) || DEEPGRAM_LANGUAGE
-            : normalizeLanguageCode(language),
+          normalizeTranscriptionSourceLanguage(language),
         model:
           selectedProvider === 'deepgram'
             ? DEEPGRAM_MODEL
@@ -11095,6 +11191,8 @@ io.on('connection', (socket) => {
         lastInterimAt: null,
         lastFinalAt: null,
       });
+      session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(language);
+      persistSession(session);
       broadcastTranscriptionState(sessionId);
       broadcastViewerState(sessionId);
 
@@ -11216,6 +11314,17 @@ io.on('connection', (socket) => {
       keepText: false,
       reason: 'client requested stop',
     });
+  });
+
+  socket.on('transcription:set-language', ({ sessionId, language }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session || transcriptionStreams.has(sessionId)) return;
+    const selectedLanguage = normalizeTranscriptionSourceLanguage(language);
+    session.transcriptionLanguage = selectedLanguage;
+    updateTranscriptionState(sessionId, { language: selectedLanguage });
+    persistSession(session);
+    broadcastTranscriptionState(sessionId);
+    broadcastViewerState(sessionId);
   });
 
   socket.on('setCurrentIndex', ({ sessionId, index }) => {

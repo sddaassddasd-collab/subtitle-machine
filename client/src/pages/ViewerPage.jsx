@@ -49,6 +49,9 @@ const ViewerPage = () => {
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [liveTranslationLanguages, setLiveTranslationLanguages] = useState([])
   const [liveTranslationStatus, setLiveTranslationStatus] = useState({})
+  const [transcriptionLanguage, setTranscriptionLanguage] = useState('zh-TW')
+  const [transcriptionSourceLanguages, setTranscriptionSourceLanguages] =
+    useState([])
   const [selectedLiveLanguage, setSelectedLiveLanguage] = useState(() => {
     if (typeof window === 'undefined') return 'source'
     return window.localStorage.getItem(VIEWER_LIVE_LANGUAGE_STORAGE_KEY) || 'source'
@@ -104,6 +107,8 @@ const ViewerPage = () => {
     setTranscriptionIsFinal(next.transcriptionIsFinal)
     setLiveTranslationLanguages(next.liveTranslationLanguages)
     setLiveTranslationStatus(next.liveTranslationStatus)
+    setTranscriptionLanguage(next.transcriptionLanguage)
+    setTranscriptionSourceLanguages(next.transcriptionSourceLanguages)
     setRoleColorEnabled(next.roleColorEnabled)
     hasLoadedStateRef.current = true
     setHasLoadedState(true)
@@ -302,11 +307,11 @@ const ViewerPage = () => {
     if (
       !liveTranslationLanguages.some(
         (language) => language?.code === selectedLiveLanguage,
-      )
+      ) || selectedLiveLanguage.toLowerCase() === transcriptionLanguage.toLowerCase()
     ) {
       setSelectedLiveLanguage('source')
     }
-  }, [liveTranslationLanguages, selectedLiveLanguage])
+  }, [liveTranslationLanguages, selectedLiveLanguage, transcriptionLanguage])
 
   useEffect(() => {
     if (lineSource !== 'transcription') return
@@ -399,9 +404,20 @@ const ViewerPage = () => {
   const selectedLiveLanguageDefinition = liveTranslationLanguages.find(
     (language) => language?.code === selectedLiveLanguage,
   )
+  const sourceLanguageDefinition = transcriptionSourceLanguages.find(
+    (language) =>
+      language?.code?.toLowerCase() === transcriptionLanguage.toLowerCase(),
+  )
+  const sourceLanguageLabel =
+    sourceLanguageDefinition?.originalLabel ||
+    `Original (${sourceLanguageDefinition?.name || transcriptionLanguage})`
+  const availableLiveTranslationLanguages = liveTranslationLanguages.filter(
+    (language) =>
+      language?.code?.toLowerCase() !== transcriptionLanguage.toLowerCase(),
+  )
   const selectedLiveLanguageName =
     selectedLiveLanguage === 'source'
-      ? '原文（繁體中文）'
+      ? sourceLanguageLabel
       : selectedLiveLanguageDefinition?.name || selectedLiveLanguage.toUpperCase()
   const selectedLiveLanguageUi = selectedLiveLanguageDefinition?.ui || {
     live: `Live translation: ${selectedLiveLanguageName}`,
@@ -489,8 +505,8 @@ const ViewerPage = () => {
             >
               {lineSource === 'transcription' ? (
                 <>
-                  <option value="source">原文（繁體中文）</option>
-                  {liveTranslationLanguages.map((language) => (
+                  <option value="source">{sourceLanguageLabel}</option>
+                  {availableLiveTranslationLanguages.map((language) => (
                     <option key={language.code} value={language.code}>
                       {language.name}
                     </option>

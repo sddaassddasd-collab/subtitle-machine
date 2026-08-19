@@ -91,6 +91,15 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   translationLanguages: [],
   translationDemand: {},
   translationStatus: {},
+  sourceLanguages: [
+    { code: 'zh-TW', name: '繁體中文（台灣）' },
+    { code: 'en', name: 'English' },
+    { code: 'ja', name: '日本語' },
+    { code: 'ko', name: '한국어' },
+    { code: 'es', name: 'Español' },
+    { code: 'fr', name: 'Français' },
+    { code: 'de', name: 'Deutsch' },
+  ],
 }
 
 const DEFAULT_AUTO_FOLLOW_STATE = {
@@ -239,6 +248,9 @@ const normalizeTranscriptionState = (raw) => {
       raw.translationStatus && typeof raw.translationStatus === 'object'
         ? raw.translationStatus
         : {},
+    sourceLanguages: Array.isArray(raw.sourceLanguages)
+      ? raw.sourceLanguages
+      : DEFAULT_TRANSCRIPTION_STATE.sourceLanguages,
     updatedAt:
       typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
         ? raw.updatedAt
@@ -2162,6 +2174,10 @@ const ControlPage = () => {
 
   const handleStartLiveTranscription = async (options = {}) => {
     const autoFollow = options.autoFollow === true
+    const forceRestart = options.forceRestart === true
+    const preserveTextOnRestart = options.preserveTextOnRestart === true
+    const selectedSourceLanguage =
+      options.languageOverride || transcription.language || 'zh-TW'
     if (!socketRef.current || !sessionId) {
       setStatus({ kind: 'error', message: '尚未連上節目，無法啟動語音辨識' })
       return false
@@ -2184,7 +2200,10 @@ const ControlPage = () => {
       return false
     }
 
-    if (transcription.active || transcription.status === 'connecting') {
+    if (
+      !forceRestart &&
+      (transcription.active || transcription.status === 'connecting')
+    ) {
       if (autoFollow) {
         autoStartedTranscriptionRef.current = false
       } else {
@@ -2211,8 +2230,8 @@ const ControlPage = () => {
         ...prev,
         status: 'connecting',
         active: false,
-        text: '',
-        isFinal: true,
+        language: selectedSourceLanguage,
+        ...(preserveTextOnRestart ? {} : { text: '', isFinal: true }),
         error: '',
       }))
 
@@ -2378,10 +2397,8 @@ const ControlPage = () => {
               apiKey,
               provider: transcription.provider || DEFAULT_TRANSCRIPTION_PROVIDER,
               model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
-              language:
-                transcription.provider === 'deepgram'
-                  ? 'zh-TW'
-                  : transcription.language || 'zh',
+              language: selectedSourceLanguage,
+              preserveTextOnRestart,
               semanticSegmentationEnabled: true,
               dualChannelEnabled: transcription.provider === 'openai',
               transcriptionContext: transcription.transcriptionContext || '',
@@ -2465,6 +2482,39 @@ const ControlPage = () => {
         options.autoFollow === true
           ? '已停止自動跟戲收音'
           : '已停止即時語音辨識',
+    })
+  }
+
+  const handleTranscriptionLanguageChange = async (event) => {
+    const language = event.target.value
+    if (!language || language === transcription.language) return
+    const languageName =
+      transcription.sourceLanguages.find((entry) => entry.code === language)?.name ||
+      language
+    const shouldRestart = transcription.active || transcription.status === 'connecting'
+    if (
+      shouldRestart &&
+      !window.confirm(
+        `要將現場接收語言切換為「${languageName}」嗎？辨識連線會短暫重新建立。`,
+      )
+    ) {
+      return
+    }
+
+    setTranscription((prev) => ({ ...prev, language }))
+    if (!shouldRestart) {
+      socketRef.current?.emit('transcription:set-language', {
+        sessionId,
+        language,
+      })
+      return
+    }
+    setStatus({ kind: 'info', message: `正在切換至 ${languageName}…` })
+    await handleStartLiveTranscription({
+      forceRestart: true,
+      preserveTextOnRestart: true,
+      languageOverride: language,
+      autoFollow: autoFollow.listening === true,
     })
   }
 
@@ -4643,7 +4693,6 @@ const ControlPage = () => {
                       provider === 'deepgram'
                         ? 'nova-3'
                         : DEFAULT_TRANSCRIPTION_MODEL,
-                    language: provider === 'deepgram' ? 'zh-TW' : 'zh',
                     dualChannelEnabled: provider === 'openai',
                     speakerRecognitionEnabled:
                       provider === 'openai' &&
@@ -4654,6 +4703,22 @@ const ControlPage = () => {
                 <option value="deepgram">Deepgram Nova-3（建議）</option>
                 <option value="openai">OpenAI（備援）</option>
               </select>
+              <label htmlFor="transcription-source-language">現場說話語言</label>
+              <select
+                id="transcription-source-language"
+                value={transcription.language || 'zh-TW'}
+                disabled={transcription.status === 'connecting'}
+                onChange={handleTranscriptionLanguageChange}
+              >
+                {transcription.sourceLanguages.map((language) => (
+                  <option key={language.code} value={language.code}>
+                    {language.name}
+                  </option>
+                ))}
+              </select>
+              <span className="input-note">
+                辨識中切換會保留已完成字幕，並以新語言重新建立辨識連線。
+              </span>
               <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
               <textarea
                 id="transcription-context"

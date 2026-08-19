@@ -172,6 +172,13 @@ export const normalizeDisplayPayload = (payload) => {
       typeof transcription.translationStatus === 'object'
         ? transcription.translationStatus
         : {},
+    transcriptionLanguage:
+      typeof transcription.language === 'string' && transcription.language
+        ? transcription.language
+        : 'zh-TW',
+    transcriptionSourceLanguages: Array.isArray(transcription.sourceLanguages)
+      ? transcription.sourceLanguages
+      : [],
     layout: normalizeProjectorLayout(payload?.layout),
     displayMode: normalizeProjectorDisplayMode(payload?.displayMode),
     languageMode: normalizeProjectorLanguageMode(payload?.languageMode),
