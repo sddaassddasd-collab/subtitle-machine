@@ -86,13 +86,16 @@ client/  Vite + React 控制端/檢視端前端
 - `DEEPGRAM_API_KEY`：Deepgram Project API Key，只可存在伺服器環境變數，不可提交至 Git 或傳到瀏覽器。
 - `OPENAI_API_KEY`（選填）：使用 Deepgram 時，可在後端設定此金鑰，將每個 Deepgram final 段落送交 OpenAI 文字精修一次。若控制端已填入 OpenAI API Key，則會優先使用該金鑰；兩者都沒有時保留 Deepgram 原文。
 
-Deepgram 的 interim 草稿只會直接顯示，不會呼叫 OpenAI。只有 final 段落會排隊精修，精修完成後回填同一段文字；超時、失敗或未設定 OpenAI 金鑰時，原本的 Deepgram 字幕不會消失。「辨識主題 / 術語提示」也會套用到這次文字精修。
+Deepgram 與 OpenAI Realtime 的 interim 原文會直接顯示，不等待二次精修；若已有觀眾選擇翻譯語言，後端會將最新草稿節流送交 OpenAI 串流翻譯，讓觀眾先看到暫定譯文。final 原文仍沿用原本的二次精修流程，精修完成後才另外產生正式譯文並取代暫定譯文。草稿翻譯與原文資料完全分開，不會寫回、覆蓋或延遲原文字幕；翻譯超時、失敗或沒有 OpenAI 金鑰時，原文仍照常顯示。「辨識主題 / 術語提示」會同時提供給草稿翻譯及原文精修。
 
 即時語音模式下，檢視端會改用獨立的即時翻譯語言選單（原文、English、日本語、한국어、Español、Français、Deutsch）。後端只會將已有觀眾需求的語言送交 OpenAI 翻譯，且每個 final 段落、每種語言只產生一份共用結果。新加入的觀眾可補齊最近 10 個段落；控制端會顯示各翻譯語言的即時需求人數。檢視端的準備中、翻譯中、失敗與原文回退提示會使用觀眾選擇的目標語言。離開即時模式後，檢視端會恢復原本的劇本語言選擇。
 
 控制端可以在「現場說話語言」切換繁體中文（台灣）、English、日本語、한국어、Español、Français 或 Deutsch。辨識進行中切換會重建 Deepgram/OpenAI 辨識連線，保留已完成字幕並清除未完成草稿。檢視端的原文名稱會跟著來源語言變動，並從翻譯目標中排除目前來源語言；當來源不是中文時，觀眾可選擇繁體中文翻譯。每個節目會保留上次選擇的現場說話語言。
 
 - `LIVE_TRANSLATION_MODEL`：即時字幕翻譯模型（預設 `gpt-4o-mini`）。即時翻譯需要控制端提供 OpenAI API Key，或在後端設定 `OPENAI_API_KEY`。
+- `LIVE_DRAFT_TRANSLATION_ENABLED`：是否啟用 interim 草稿的快速串流翻譯（預設 `true`）；設成 `false` 可恢復只翻譯 final 段落。
+- `LIVE_DRAFT_TRANSLATION_INTERVAL_MS`：同一語言兩次草稿翻譯請求的最短間隔（預設 `300` 毫秒，最低 `120`）。
+- `LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS`：草稿至少新增幾個字才重新翻譯；遇到標點時不受此限制（預設 `3`）。
 
 控制端仍可切換為 OpenAI 備援；以下環境變數用於微調 OpenAI 即時辨識的即時性與穩定性（後端）：
 

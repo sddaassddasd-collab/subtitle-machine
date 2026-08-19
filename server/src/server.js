@@ -114,6 +114,24 @@ const SESSION_HISTORY_LIMIT = 80;
 const CURRENT_INDEX_PERSIST_DELAY_MS = 750;
 const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
+const LIVE_DRAFT_TRANSLATION_ENABLED =
+  process.env.LIVE_DRAFT_TRANSLATION_ENABLED !== 'false';
+const parsedDraftTranslationIntervalMs = Number(
+  process.env.LIVE_DRAFT_TRANSLATION_INTERVAL_MS,
+);
+const LIVE_DRAFT_TRANSLATION_INTERVAL_MS = Number.isFinite(
+  parsedDraftTranslationIntervalMs,
+)
+  ? Math.max(120, parsedDraftTranslationIntervalMs)
+  : 300;
+const parsedDraftTranslationMinNewChars = Number(
+  process.env.LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS,
+);
+const LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS = Number.isFinite(
+  parsedDraftTranslationMinNewChars,
+)
+  ? Math.max(1, parsedDraftTranslationMinNewChars)
+  : 3;
 const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
 const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
   {
@@ -5128,6 +5146,7 @@ function upsertCompletedFragment(
     accurateSegment: accurateSegment || null,
     boundaryMeta: boundaryMeta || null,
     translations: {},
+    provisionalTranslations: {},
     speakerId: null,
     completedAt: Date.now(),
   };
@@ -5337,12 +5356,19 @@ function buildTranscriptionDisplayEntries(stream) {
         if (
           fragments.length > 0 &&
           fragments.every((fragment) =>
-            sanitizeTranscriptionText(fragment?.translations?.[languageCode] || ''),
+            sanitizeTranscriptionText(
+              fragment?.translations?.[languageCode] ||
+                fragment?.provisionalTranslations?.[languageCode] ||
+                '',
+            ),
           )
         ) {
           translations[languageCode] = composeFragmentTexts(
             fragments.map((fragment) => ({
-              text: fragment.translations[languageCode],
+              text:
+                fragment.translations[languageCode] ||
+                fragment.provisionalTranslations?.[languageCode] ||
+                '',
             })),
           );
         }
@@ -5363,6 +5389,9 @@ function buildTranscriptionDisplayEntries(stream) {
   const draftText = selectedDraftId
     ? sanitizeTranscriptionText(stream.draftByItemId.get(selectedDraftId) || '')
     : '';
+  const draftTranslations = selectedDraftId
+    ? stream.draftTranslationsByItemId?.get(selectedDraftId)?.translations || {}
+    : {};
 
   if (!draftText) {
     return historyEntries;
@@ -5373,7 +5402,7 @@ function buildTranscriptionDisplayEntries(stream) {
       {
         id: selectedDraftId,
         text: draftText,
-        translations: {},
+        translations: draftTranslations,
         speakerId: null,
         isFinal: false,
       },
@@ -5397,7 +5426,7 @@ function buildTranscriptionDisplayEntries(stream) {
       {
         id: selectedDraftId,
         text: draftText,
-        translations: {},
+        translations: draftTranslations,
         speakerId: null,
         isFinal: false,
       },
@@ -5405,10 +5434,25 @@ function buildTranscriptionDisplayEntries(stream) {
   }
 
   const mergedEntries = historyEntries.slice(0, -1);
+  const mergedTranslations = {};
+  LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
+    const currentTranslation = currentLine.translations?.[languageCode] || '';
+    const draftTranslation = draftTranslations?.[languageCode] || '';
+    if (currentTranslation && draftTranslation) {
+      mergedTranslations[languageCode] = joinTranscriptionTexts(
+        currentTranslation,
+        draftTranslation,
+      );
+    } else if (draftTranslation) {
+      mergedTranslations[languageCode] = draftTranslation;
+    } else if (currentTranslation) {
+      mergedTranslations[languageCode] = currentTranslation;
+    }
+  });
   mergedEntries.push({
     id: selectedDraftId,
     text: joinTranscriptionTexts(currentLine.text, draftText),
-    translations: currentLine.translations || {},
+    translations: mergedTranslations,
     speakerId: currentLine.speakerId,
     isFinal: false,
   });
@@ -5565,7 +5609,350 @@ async function translateLiveTranscriptionLine({
   return sanitizeTranscriptionText(response.output_text || '');
 }
 
-function queueLiveTranslation({ stream, sessionId, itemId, languageCode }) {
+async function streamDraftTranslation({
+  client,
+  text,
+  sourceLanguage,
+  targetLanguage,
+  transcriptionContext,
+  onDelta,
+  signal,
+}) {
+  const sourceText = sanitizeTranscriptionText(text);
+  const target = LIVE_TRANSLATION_LANGUAGES.find(
+    (language) => language.code === targetLanguage,
+  );
+  if (!sourceText || !target) return '';
+  const context = normalizeTranscriptionContext(transcriptionContext);
+  const responseStream = client.responses.stream(
+    {
+      model: LIVE_TRANSLATION_MODEL,
+      temperature: 0,
+      max_output_tokens: 160,
+      input: [
+        {
+          role: 'system',
+          content:
+            'Translate incomplete live captions quickly and faithfully. Preserve names, numbers, and meaning. The source may end mid-sentence. Return only the translation without explanation.',
+        },
+        {
+          role: 'user',
+          content: `Translate this incomplete live caption from ${sourceLanguage || 'the source language'} to ${target.name} (${target.code}).${context ? ` Topic and terminology context: ${context}` : ''}\n${sourceText}`,
+        },
+      ],
+    },
+    signal ? { signal } : undefined,
+  );
+  let output = '';
+  for await (const event of responseStream) {
+    if (event?.type !== 'response.output_text.delta') continue;
+    output += event.delta || '';
+    if (typeof onDelta === 'function') {
+      onDelta(sanitizeTranscriptionText(output));
+    }
+  }
+  return sanitizeTranscriptionText(output);
+}
+
+function getDraftTranslationWorker(stream, languageCode) {
+  if (!stream.draftTranslationWorkers.has(languageCode)) {
+    stream.draftTranslationWorkers.set(languageCode, {
+      active: false,
+      pending: null,
+      timer: null,
+      lastStartedAt: 0,
+      lastRequestedTextByItemId: new Map(),
+      abortController: null,
+      currentItemId: null,
+    });
+  }
+  return stream.draftTranslationWorkers.get(languageCode);
+}
+
+function getDraftTranslationVersionKey(itemId, languageCode) {
+  return `${itemId}:${languageCode}`;
+}
+
+function isCurrentDraftTranslationJob(stream, sessionId, job) {
+  if (transcriptionStreams.get(sessionId) !== stream || stream.closing) {
+    return false;
+  }
+  const versionKey = getDraftTranslationVersionKey(
+    job.itemId,
+    job.languageCode,
+  );
+  return (
+    stream.draftTranslationVersions.get(versionKey) === job.version &&
+    stream.draftByItemId.has(job.itemId)
+  );
+}
+
+function runDraftTranslationWorker(stream, sessionId, languageCode) {
+  if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+  const worker = getDraftTranslationWorker(stream, languageCode);
+  if (worker.active || !worker.pending) return;
+  const delay = Math.max(
+    0,
+    LIVE_DRAFT_TRANSLATION_INTERVAL_MS -
+      (Date.now() - worker.lastStartedAt),
+  );
+  if (delay > 0) {
+    if (!worker.timer) {
+      worker.timer = setTimeout(() => {
+        worker.timer = null;
+        runDraftTranslationWorker(stream, sessionId, languageCode);
+      }, delay);
+    }
+    return;
+  }
+
+  const job = worker.pending;
+  worker.pending = null;
+  worker.active = true;
+  const abortController = new AbortController();
+  worker.abortController = abortController;
+  worker.currentItemId = job.itemId;
+  worker.lastStartedAt = Date.now();
+  worker.lastRequestedTextByItemId.set(job.itemId, job.text);
+  stream.liveTranslationStatus.set(languageCode, {
+    status: 'pending',
+    error: '',
+    updatedAt: Date.now(),
+  });
+  broadcastTranscriptionState(sessionId);
+  broadcastViewerState(sessionId);
+
+  let lastBroadcastAt = 0;
+  streamDraftTranslation({
+    client: stream.translationClient,
+    text: job.text,
+    sourceLanguage: stream.language,
+    targetLanguage: languageCode,
+    transcriptionContext: stream.transcriptionContext,
+    signal: abortController.signal,
+    onDelta: (translated) => {
+      if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
+        return;
+      }
+      const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
+        sourceText: job.text,
+        translations: {},
+      };
+      draftState.sourceText = job.text;
+      draftState.translations = {
+        ...draftState.translations,
+        [languageCode]: translated,
+      };
+      stream.draftTranslationsByItemId.set(job.itemId, draftState);
+      const now = Date.now();
+      if (now - lastBroadcastAt >= 60) {
+        lastBroadcastAt = now;
+        syncTranscriptionStateFromStream(sessionId, stream);
+      }
+    },
+  })
+    .then((translated) => {
+      if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
+        return;
+      }
+      const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
+        sourceText: job.text,
+        translations: {},
+      };
+      draftState.sourceText = job.text;
+      draftState.translations = {
+        ...draftState.translations,
+        [languageCode]: translated,
+      };
+      stream.draftTranslationsByItemId.set(job.itemId, draftState);
+      stream.liveTranslationStatus.set(languageCode, {
+        status: 'ready',
+        error: '',
+        updatedAt: Date.now(),
+      });
+      syncTranscriptionStateFromStream(sessionId, stream);
+      broadcastTranscriptionState(sessionId);
+    })
+    .catch((error) => {
+      if (!isCurrentDraftTranslationJob(stream, sessionId, job)) return;
+      stream.liveTranslationStatus.set(languageCode, {
+        status: 'error',
+        error: sanitizeLineText(error?.message || '') || '即時翻譯失敗',
+        updatedAt: Date.now(),
+      });
+      broadcastTranscriptionState(sessionId);
+      broadcastViewerState(sessionId);
+    })
+    .finally(() => {
+      if (worker.abortController === abortController) {
+        worker.abortController = null;
+      }
+      if (worker.currentItemId === job.itemId) {
+        worker.currentItemId = null;
+      }
+      worker.active = false;
+      if (worker.pending) {
+        runDraftTranslationWorker(stream, sessionId, languageCode);
+      }
+    });
+}
+
+function scheduleDraftTranslations(stream, sessionId, itemId, text) {
+  if (
+    !LIVE_DRAFT_TRANSLATION_ENABLED ||
+    !stream?.translationClient ||
+    !itemId
+  ) {
+    return;
+  }
+  const sourceText = sanitizeTranscriptionText(text);
+  if (!sourceText) return;
+  const demand = getLiveTranslationDemand(sessionId);
+  Object.keys(demand).forEach((languageCode) => {
+    if (languageCode.toLowerCase() === stream.language?.toLowerCase()) return;
+    const worker = getDraftTranslationWorker(stream, languageCode);
+    const previousText =
+      worker.pending?.itemId === itemId
+        ? worker.pending.text
+        : worker.lastRequestedTextByItemId.get(itemId) || '';
+    if (previousText === sourceText) return;
+    const appendedChars = sourceText.startsWith(previousText)
+      ? sourceText.length - previousText.length
+      : LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS;
+    const hasBoundary =
+      strongSentencePunctuationRegex.test(sourceText) ||
+      weakSentencePunctuationRegex.test(sourceText) ||
+      englishStrongSentencePunctuationRegex.test(sourceText) ||
+      englishWeakSentencePunctuationRegex.test(sourceText);
+    if (
+      !previousText &&
+      sourceText.length < LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS &&
+      !hasBoundary
+    ) {
+      return;
+    }
+    if (
+      previousText &&
+      appendedChars < LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS &&
+      !hasBoundary
+    ) {
+      return;
+    }
+    const versionKey = getDraftTranslationVersionKey(itemId, languageCode);
+    const version = (stream.draftTranslationVersions.get(versionKey) || 0) + 1;
+    stream.draftTranslationVersions.set(versionKey, version);
+    worker.pending = {
+      itemId,
+      languageCode,
+      text: sourceText,
+      version,
+    };
+    if (worker.active && worker.abortController) {
+      worker.abortController.abort();
+    }
+    runDraftTranslationWorker(stream, sessionId, languageCode);
+  });
+}
+
+function finalizeDraftTranslations(stream, itemId) {
+  if (!stream || !itemId) return {};
+  const draftState = stream.draftTranslationsByItemId.get(itemId) || null;
+  stream.draftTranslationWorkers.forEach((worker, languageCode) => {
+    const versionKey = getDraftTranslationVersionKey(itemId, languageCode);
+    stream.draftTranslationVersions.set(
+      versionKey,
+      (stream.draftTranslationVersions.get(versionKey) || 0) + 1,
+    );
+    if (worker.pending?.itemId === itemId) {
+      worker.pending = null;
+    }
+    if (worker.currentItemId === itemId && worker.abortController) {
+      worker.abortController.abort();
+    }
+  });
+  stream.draftTranslationsByItemId.delete(itemId);
+  return draftState?.translations && typeof draftState.translations === 'object'
+    ? { ...draftState.translations }
+    : {};
+}
+
+function getFinalTranslationWorker(stream, languageCode) {
+  if (!stream.translationWorkers.has(languageCode)) {
+    stream.translationWorkers.set(languageCode, {
+      active: false,
+      liveQueue: [],
+      historyQueue: [],
+    });
+  }
+  return stream.translationWorkers.get(languageCode);
+}
+
+function runFinalTranslationWorker(stream, sessionId, languageCode) {
+  if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+  const worker = getFinalTranslationWorker(stream, languageCode);
+  if (worker.active) return;
+  const task = worker.liveQueue.shift() || worker.historyQueue.pop() || null;
+  if (!task) return;
+  worker.active = true;
+  const { itemId, sourceText, requestKey } = task;
+
+  stream.liveTranslationStatus.set(languageCode, {
+    status: 'pending',
+    error: '',
+    updatedAt: Date.now(),
+  });
+  broadcastViewerState(sessionId);
+  broadcastTranscriptionState(sessionId);
+
+  translateLiveTranscriptionLine({
+    client: stream.translationClient,
+    text: sourceText,
+    sourceLanguage: stream.language,
+    targetLanguage: languageCode,
+  })
+    .then((translated) => {
+      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+      const currentFragment = stream.fragmentByItemId.get(itemId);
+      if (!currentFragment || currentFragment.text !== sourceText || !translated) return;
+      currentFragment.translations = {
+        ...(currentFragment.translations || {}),
+        [languageCode]: translated,
+      };
+      if (currentFragment.provisionalTranslations) {
+        delete currentFragment.provisionalTranslations[languageCode];
+      }
+      stream.liveTranslationStatus.set(languageCode, {
+        status: 'ready',
+        error: '',
+        updatedAt: Date.now(),
+      });
+      syncTranscriptionStateFromStream(sessionId, stream);
+      broadcastTranscriptionState(sessionId);
+    })
+    .catch((error) => {
+      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+      stream.liveTranslationStatus.set(languageCode, {
+        status: 'error',
+        error: sanitizeLineText(error?.message || '') || '翻譯失敗',
+        updatedAt: Date.now(),
+      });
+      broadcastViewerState(sessionId);
+      broadcastTranscriptionState(sessionId);
+    })
+    .finally(() => {
+      stream.pendingTranslationKeys.delete(requestKey);
+      worker.active = false;
+      runFinalTranslationWorker(stream, sessionId, languageCode);
+    });
+}
+
+function queueLiveTranslation({
+  stream,
+  sessionId,
+  itemId,
+  languageCode,
+  priority = 'live',
+}) {
   if (
     !stream?.translationClient ||
     !stream.fragmentByItemId?.has(itemId) ||
@@ -5580,59 +5967,30 @@ function queueLiveTranslation({ stream, sessionId, itemId, languageCode }) {
   if (stream.pendingTranslationKeys.has(requestKey)) return;
 
   stream.pendingTranslationKeys.add(requestKey);
-  stream.liveTranslationStatus.set(languageCode, {
-    status: 'pending',
-    error: '',
-    updatedAt: Date.now(),
-  });
-  broadcastViewerState(sessionId);
-  broadcastTranscriptionState(sessionId);
-
-  stream.translationChain = stream.translationChain
-    .then(async () => {
-      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
-      const translated = await translateLiveTranscriptionLine({
-        client: stream.translationClient,
-        text: sourceText,
-        sourceLanguage: stream.language,
-        targetLanguage: languageCode,
-      });
-      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
-      const currentFragment = stream.fragmentByItemId.get(itemId);
-      if (!currentFragment || currentFragment.text !== sourceText || !translated) return;
-      currentFragment.translations = {
-        ...(currentFragment.translations || {}),
-        [languageCode]: translated,
-      };
-      stream.liveTranslationStatus.set(languageCode, {
-        status: 'ready',
-        error: '',
-        updatedAt: Date.now(),
-      });
-      syncTranscriptionStateFromStream(sessionId, stream);
-      broadcastTranscriptionState(sessionId);
-    })
-    .catch((error) => {
-      stream.liveTranslationStatus.set(languageCode, {
-        status: 'error',
-        error: sanitizeLineText(error?.message || '') || '翻譯失敗',
-        updatedAt: Date.now(),
-      });
-      broadcastViewerState(sessionId);
-      broadcastTranscriptionState(sessionId);
-    })
-    .finally(() => {
-      stream.pendingTranslationKeys.delete(requestKey);
-    });
+  const worker = getFinalTranslationWorker(stream, languageCode);
+  const queue = priority === 'history' ? worker.historyQueue : worker.liveQueue;
+  queue.push({ itemId, sourceText, requestKey });
+  runFinalTranslationWorker(stream, sessionId, languageCode);
 }
 
-function queueRequestedLiveTranslations(stream, sessionId, itemIds = []) {
+function queueRequestedLiveTranslations(
+  stream,
+  sessionId,
+  itemIds = [],
+  priority = 'live',
+) {
   if (!stream?.translationClient) return;
   const demand = getLiveTranslationDemand(sessionId);
   Object.keys(demand).forEach((languageCode) => {
     if (languageCode.toLowerCase() === stream.language?.toLowerCase()) return;
     itemIds.forEach((itemId) => {
-      queueLiveTranslation({ stream, sessionId, itemId, languageCode });
+      queueLiveTranslation({
+        stream,
+        sessionId,
+        itemId,
+        languageCode,
+        priority,
+      });
     });
   });
 }
@@ -6456,6 +6814,23 @@ function stopTranscriptionStream(sessionId, options = {}) {
   }
   if (Array.isArray(stream.pendingAudioChunks)) {
     stream.pendingAudioChunks.length = 0;
+  }
+  if (stream.draftTranslationWorkers instanceof Map) {
+    stream.draftTranslationWorkers.forEach((worker) => {
+      if (worker?.timer) clearTimeout(worker.timer);
+      if (worker) {
+        if (worker.abortController) worker.abortController.abort();
+        worker.timer = null;
+        worker.pending = null;
+      }
+    });
+  }
+  if (stream.translationWorkers instanceof Map) {
+    stream.translationWorkers.forEach((worker) => {
+      if (!worker) return;
+      worker.liveQueue.length = 0;
+      worker.historyQueue.length = 0;
+    });
   }
   try {
     if (stream.provider === 'deepgram') {
@@ -10392,8 +10767,11 @@ function startDeepgramTranscription({
     mergedLineOverrides: new Map(),
     mergedLineCorrectionKeys: new Set(),
     correctionChain: Promise.resolve(),
+    draftTranslationsByItemId: new Map(),
+    draftTranslationWorkers: new Map(),
+    draftTranslationVersions: new Map(),
     translationClient: openAIClient,
-    translationChain: Promise.resolve(),
+    translationWorkers: new Map(),
     pendingTranslationKeys: new Set(),
     liveTranslationStatus: new Map(),
     pendingAudioChunks: [],
@@ -10416,6 +10794,7 @@ function startDeepgramTranscription({
     stream.completedFragments
       .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
       .map((fragment) => fragment.itemId),
+    'history',
   );
   const isCurrent = () => transcriptionStreams.get(sessionId) === stream;
 
@@ -10497,9 +10876,10 @@ function startDeepgramTranscription({
     const itemId = `deepgram-${start.toFixed(3)}`;
 
     if (event.is_final === true) {
+      const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
       takeDraftLine(stream, itemId);
       if (transcript) {
-        upsertCompletedFragment(stream, {
+        const fragment = upsertCompletedFragment(stream, {
           itemId,
           text: transcript,
           boundaryMeta: {
@@ -10507,6 +10887,9 @@ function startDeepgramTranscription({
             pauseMs: event.speech_final === true ? DEEPGRAM_ENDPOINTING_MS : 0,
           },
         });
+        if (fragment) {
+          fragment.provisionalTranslations = provisionalTranslations;
+        }
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
         if (correctionClient) {
           queueTranscriptionCorrection({
@@ -10523,6 +10906,7 @@ function startDeepgramTranscription({
       }
     } else if (transcript) {
       setDraftLine(stream, itemId, transcript);
+      scheduleDraftTranslations(stream, sessionId, itemId, transcript);
       handleAutoFollowTranscript(sessionId, transcript, { isFinal: false });
     }
     syncTranscriptionStateFromStream(sessionId, stream, {
@@ -10615,8 +10999,11 @@ function startRealtimeTranscription({
     mergedLineOverrides: new Map(),
     mergedLineCorrectionKeys: new Set(),
     correctionChain: Promise.resolve(),
+    draftTranslationsByItemId: new Map(),
+    draftTranslationWorkers: new Map(),
+    draftTranslationVersions: new Map(),
     translationClient: client,
-    translationChain: Promise.resolve(),
+    translationWorkers: new Map(),
     pendingTranslationKeys: new Set(),
     liveTranslationStatus: new Map(),
     speakerRecognitionChain: Promise.resolve(),
@@ -10656,6 +11043,7 @@ function startRealtimeTranscription({
     stream.completedFragments
       .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
       .map((fragment) => fragment.itemId),
+    'history',
   );
 
   const isCurrent = () => transcriptionStreams.get(sessionId) === stream;
@@ -10802,6 +11190,7 @@ function startRealtimeTranscription({
       stream.realtimePromptText,
     );
     setDraftLine(stream, event.item_id, merged);
+    scheduleDraftTranslations(stream, sessionId, event.item_id, merged);
     syncTranscriptionStateFromStream(sessionId, stream);
     handleAutoFollowTranscript(sessionId, merged, { isFinal: false });
   });
@@ -10810,6 +11199,10 @@ function startRealtimeTranscription({
     if (!isCurrent()) return;
     if (!event.item_id) return;
 
+    const provisionalTranslations = finalizeDraftTranslations(
+      stream,
+      event.item_id,
+    );
     const fallback = takeDraftLine(stream, event.item_id);
     const transcript = normalizeTranscriptionOutputText(
       event.transcript || fallback,
@@ -10819,12 +11212,15 @@ function startRealtimeTranscription({
     const accurateSegment = takeAccurateSegmentForItem(stream, event.item_id);
     const boundaryMeta = stream.boundaryMetaByItemId.get(event.item_id) || null;
     stream.boundaryMetaByItemId.delete(event.item_id);
-    upsertCompletedFragment(stream, {
+    const fragment = upsertCompletedFragment(stream, {
       itemId: event.item_id,
       text: transcript,
       accurateSegment,
       boundaryMeta,
     });
+    if (fragment) {
+      fragment.provisionalTranslations = provisionalTranslations;
+    }
     syncTranscriptionStateFromStream(sessionId, stream);
     handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
     queueTranscriptionCorrection({
@@ -11041,7 +11437,12 @@ io.on('connection', (socket) => {
       const recentItemIds = stream.completedFragments
         .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
         .map((fragment) => fragment.itemId);
-      queueRequestedLiveTranslations(stream, sessionId, recentItemIds);
+      queueRequestedLiveTranslations(
+        stream,
+        sessionId,
+        recentItemIds,
+        'history',
+      );
     }
     broadcastControlState(sessionId);
     const viewerSession = getSession(sessionId);
