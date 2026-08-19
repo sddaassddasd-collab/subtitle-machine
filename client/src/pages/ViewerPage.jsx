@@ -48,7 +48,6 @@ const ViewerPage = () => {
   const [waitingMessage, setWaitingMessage] = useState('')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [liveTranslationLanguages, setLiveTranslationLanguages] = useState([])
-  const [liveTranslationStatus, setLiveTranslationStatus] = useState({})
   const [transcriptionLanguage, setTranscriptionLanguage] = useState('zh-TW')
   const [transcriptionSourceLanguages, setTranscriptionSourceLanguages] =
     useState([])
@@ -106,7 +105,6 @@ const ViewerPage = () => {
     )
     setTranscriptionIsFinal(next.transcriptionIsFinal)
     setLiveTranslationLanguages(next.liveTranslationLanguages)
-    setLiveTranslationStatus(next.liveTranslationStatus)
     setTranscriptionLanguage(next.transcriptionLanguage)
     setTranscriptionSourceLanguages(next.transcriptionSourceLanguages)
     setRoleColorEnabled(next.roleColorEnabled)
@@ -421,14 +419,7 @@ const ViewerPage = () => {
       : selectedLiveLanguageDefinition?.name || selectedLiveLanguage.toUpperCase()
   const selectedLiveLanguageUi = selectedLiveLanguageDefinition?.ui || {
     live: `Live translation: ${selectedLiveLanguageName}`,
-    preparing: `Preparing ${selectedLiveLanguageName} translation…`,
-    unavailable: `${selectedLiveLanguageName} translation is temporarily unavailable.`,
-    fallback: `${selectedLiveLanguageName} translation is temporarily unavailable. Untranslated captions are shown in the original language.`,
   }
-  const selectedTranslationState =
-    selectedLiveLanguage === 'source'
-      ? null
-      : liveTranslationStatus[selectedLiveLanguage] || null
   const visibleLiveEntries = (liveEntries.length > 0
     ? liveEntries
     : liveLines.map((text) => ({
@@ -443,7 +434,7 @@ const ViewerPage = () => {
       displayText:
         selectedLiveLanguage === 'source'
           ? entry.text
-          : entry.translations?.[selectedLiveLanguage] || entry.text,
+          : entry.translations?.[selectedLiveLanguage] || '',
     }))
     .filter((entry) => entry.displayText)
 
@@ -581,22 +572,6 @@ const ViewerPage = () => {
               </div>
             )
           })}
-          {selectedLiveLanguage !== 'source' &&
-            visibleLiveEntries.length === 0 &&
-            selectedTranslationState?.status !== 'pending' && (
-              <div className="viewer-live-line viewer-live-line-active">
-                {selectedTranslationState?.status === 'error'
-                  ? selectedLiveLanguageUi.unavailable
-                  : selectedLiveLanguageUi.preparing}
-              </div>
-            )}
-          {selectedLiveLanguage !== 'source' &&
-            visibleLiveEntries.length > 0 &&
-            selectedTranslationState?.status === 'error' && (
-              <div className="viewer-live-line viewer-live-line-active">
-                {selectedLiveLanguageUi.fallback}
-              </div>
-            )}
         </div>
       ) : (
         <div className={textClass} style={roleColor ? { color: roleColor } : undefined}>
