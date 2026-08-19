@@ -5398,7 +5398,9 @@ function buildTranscriptionDisplayEntries(stream) {
   const shouldStartNewLine = shouldBreakBetweenFragments({
     currentText: currentLine.text,
     previousFragment: lastFragment,
-    nextFragment: { text: draftText, speakerId: draftSpeakerId },
+    // Provisional diarization may change while these words are still being
+    // recognized. It may affect styling, but must not create structural lines.
+    nextFragment: { text: draftText },
   });
 
   if (shouldStartNewLine) {
@@ -5693,12 +5695,12 @@ function publishStableDraftTranslation({
     now - (job.lastPublishedAt || job.startedAt) >=
     LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS;
 
-  // Never replace an already visible draft with a shorter or contradictory
-  // partial response. Such revisions stay buffered until the formal final
-  // translation can replace the provisional caption in one atomic update.
+  // Stream only compatible extensions. If a newer source requires a different
+  // word order, keep that revision buffered and replace the visible draft once
+  // when this request completes instead of leaving an obsolete short caption.
   if (
-    !isCompatibleExtension ||
-    candidate.length < published.length ||
+    (!isCompatibleExtension && !force) ||
+    (candidate.length < published.length && !force) ||
     (!force &&
       (addedChars < LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS ||
         !publishIntervalElapsed))
@@ -5764,6 +5766,14 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
     transcriptionContext: stream.transcriptionContext,
     signal: abortController.signal,
     onDelta: (translated) => {
+      const newerPendingText =
+        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
+      if (
+        newerPendingText &&
+        newerPendingText !== job.text
+      ) {
+        return;
+      }
       publishStableDraftTranslation({
         stream,
         sessionId,
@@ -5774,6 +5784,14 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   })
     .then((translated) => {
       if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
+        return;
+      }
+      const newerPendingText =
+        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
+      if (
+        newerPendingText &&
+        newerPendingText !== job.text
+      ) {
         return;
       }
       publishStableDraftTranslation({
