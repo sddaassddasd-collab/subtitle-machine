@@ -106,6 +106,7 @@ const projectorPresence = new Map();
 const currentIndexPersistTimers = new Map();
 const viewerStateRevisions = new Map();
 const viewerDemandBroadcastTimers = new Map();
+const latestRoomStateKeyframes = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -118,6 +119,7 @@ const SESSION_HISTORY_LIMIT = 80;
 // store every second.
 const CURRENT_INDEX_PERSIST_DELAY_MS = 3000;
 const VIEWER_DEMAND_BROADCAST_DELAY_MS = 500;
+const LATEST_STATE_KEYFRAME_DELAY_MS = 1500;
 const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
 const LIVE_DRAFT_TRANSLATION_ENABLED =
@@ -1718,6 +1720,7 @@ function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
     const demandTimer = viewerDemandBroadcastTimers.get(session.id);
     if (demandTimer) clearTimeout(demandTimer);
     viewerDemandBroadcastTimers.delete(session.id);
+    clearLatestRoomStateKeyframesForSession(session.id);
     sessions.delete(session.id);
   });
 
@@ -3896,6 +3899,7 @@ function collapseToGlobalSession() {
     nextSession.title = '全域字幕節目';
   }
   clearPublicSessionTombstones(nextSession);
+  clearAllLatestRoomStateKeyframes();
   sessions.clear();
   viewerStateRevisions.clear();
   sessions.set(DEFAULT_SESSION_ID, ensureSessionStructure(nextSession));
@@ -4059,6 +4063,7 @@ function regenerateImportedSessionIdentity(session) {
 function hydrateApplicationStore(persistedStore) {
   users.clear();
   authSessions.clear();
+  clearAllLatestRoomStateKeyframes();
   sessions.clear();
   viewerStateRevisions.clear();
 
@@ -8236,6 +8241,48 @@ function hasSocketRoomConnections(roomName) {
   return Boolean(io.sockets.adapter.rooms.get(roomName)?.size);
 }
 
+function clearLatestRoomStateKeyframesForSession(sessionId) {
+  if (!sessionId) return;
+  const roomPrefixes = [
+    `viewer:${sessionId}\u0000`,
+    `viewer:${sessionId}:`,
+    `prompter:${sessionId}\u0000`,
+    `prompter:${sessionId}:`,
+    `viewer-live:${sessionId}:`,
+  ];
+  latestRoomStateKeyframes.forEach((timer, keyframeKey) => {
+    if (!roomPrefixes.some((prefix) => keyframeKey.startsWith(prefix))) return;
+    clearTimeout(timer);
+    latestRoomStateKeyframes.delete(keyframeKey);
+  });
+}
+
+function clearAllLatestRoomStateKeyframes() {
+  latestRoomStateKeyframes.forEach((timer) => clearTimeout(timer));
+  latestRoomStateKeyframes.clear();
+}
+
+function emitLatestRoomState(roomName, eventName, payload) {
+  // Viewer-facing state is a complete snapshot. If a mobile browser is
+  // suspended or its transport is congested, dropping an older snapshot is
+  // safer than buffering it and replaying stale captions later.
+  io.to(roomName).volatile.emit(eventName, payload);
+
+  // Volatile delivery can also drop the final packet on long-polling clients.
+  // Coalesce the burst and reliably send only its newest snapshot once the
+  // updates settle, so a viewer cannot remain stuck on an older caption.
+  const keyframeKey = `${roomName}\u0000${eventName}`;
+  const previousTimer = latestRoomStateKeyframes.get(keyframeKey);
+  if (previousTimer) clearTimeout(previousTimer);
+  const timer = setTimeout(() => {
+    latestRoomStateKeyframes.delete(keyframeKey);
+    if (!hasSocketRoomConnections(roomName)) return;
+    io.to(roomName).emit(eventName, payload);
+  }, LATEST_STATE_KEYFRAME_DELAY_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  latestRoomStateKeyframes.set(keyframeKey, timer);
+}
+
 function scheduleViewerDemandBroadcast(sessionId) {
   if (!sessionId || viewerDemandBroadcastTimers.has(sessionId)) return;
   const timer = setTimeout(() => {
@@ -8294,7 +8341,8 @@ function broadcastLiveTranslationState(sessionId, stream, languageCode) {
   // Translation deltas are intentionally sent only to viewers that requested
   // this language. They must never trigger the full viewer/control payload,
   // which includes every script line and can delay microphone audio delivery.
-  io.to(getLiveTranslationRoom(sessionId, languageCode)).emit(
+  emitLatestRoomState(
+    getLiveTranslationRoom(sessionId, languageCode),
     'viewer:translation-patch',
     payload,
   );
@@ -8312,7 +8360,8 @@ function broadcastViewerState(sessionId) {
   session.cells.forEach((cell) => {
     const viewerRoom = `viewer:${sessionId}:${cell.id}`;
     if (hasSocketRoomConnections(viewerRoom)) {
-      io.to(viewerRoom).emit(
+      emitLatestRoomState(
+        viewerRoom,
         'viewer:update',
         getViewerPayload(session, cell.id, {
           includeLines: false,
@@ -8322,7 +8371,8 @@ function broadcastViewerState(sessionId) {
     }
     const prompterRoom = `prompter:${sessionId}:${cell.id}`;
     if (hasSocketRoomConnections(prompterRoom)) {
-      io.to(prompterRoom).emit(
+      emitLatestRoomState(
+        prompterRoom,
         'prompter:update',
         getViewerPayload(session, cell.id, {
           includeLines: true,
@@ -8333,14 +8383,16 @@ function broadcastViewerState(sessionId) {
   });
   const viewerRoom = `viewer:${sessionId}`;
   if (hasSocketRoomConnections(viewerRoom)) {
-    io.to(viewerRoom).emit(
+    emitLatestRoomState(
+      viewerRoom,
       'viewer:update',
       getViewerPayload(session, null, { includeLines: false, revision }),
     );
   }
   const prompterRoom = `prompter:${sessionId}`;
   if (hasSocketRoomConnections(prompterRoom)) {
-    io.to(prompterRoom).emit(
+    emitLatestRoomState(
+      prompterRoom,
       'prompter:update',
       getViewerPayload(session, null, { includeLines: true, revision }),
     );
