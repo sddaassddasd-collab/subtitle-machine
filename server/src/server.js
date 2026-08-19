@@ -10719,48 +10719,32 @@ app.post('/api/session/:sessionId/display', requireAuth, (req, res) => {
   res.json(getControlPayload(session));
 });
 
-function buildDeepgramSpeakerSegments(alternative, language, fallbackText) {
+function getDeepgramDominantSpeakerId(alternative) {
   const words = Array.isArray(alternative?.words) ? alternative.words : [];
-  const firstKnownSpeaker = words.find((word) =>
-    Number.isInteger(Number(word?.speaker)),
-  )?.speaker;
-  let previousSpeaker = Number.isInteger(Number(firstKnownSpeaker))
-    ? Number(firstKnownSpeaker)
-    : null;
-  const groups = [];
-
+  const durationBySpeaker = new Map();
   words.forEach((word) => {
-    const rawText = word?.punctuated_word || word?.word || '';
-    const wordText = normalizeTranscriptionOutputText(rawText, language);
-    if (!wordText) return;
-    const parsedSpeaker = Number(word?.speaker);
-    const speaker = Number.isInteger(parsedSpeaker)
-      ? parsedSpeaker
-      : previousSpeaker;
-    const current = groups[groups.length - 1];
-    if (!current || current.speaker !== speaker) {
-      groups.push({ speaker, text: wordText });
-    } else {
-      current.text = joinTranscriptionTexts(current.text, wordText);
-    }
-    if (Number.isInteger(speaker)) previousSpeaker = speaker;
+    const speaker = Number(word?.speaker);
+    if (!Number.isInteger(speaker) || speaker < 0) return;
+    const start = Number(word?.start);
+    const end = Number(word?.end);
+    const duration =
+      Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? end - start
+        : 0.001;
+    durationBySpeaker.set(
+      speaker,
+      (durationBySpeaker.get(speaker) || 0) + duration,
+    );
   });
 
-  const normalizedGroups = groups
-    .map((group) => ({
-      text: normalizeTranscriptionOutputText(group.text, language),
-      speakerId: Number.isInteger(group.speaker) ? group.speaker + 1 : null,
-    }))
-    .filter((group) => group.text);
-
-  if (normalizedGroups.length > 0) return normalizedGroups;
-  const normalizedFallback = normalizeTranscriptionOutputText(
-    fallbackText || '',
-    language,
-  );
-  return normalizedFallback
-    ? [{ text: normalizedFallback, speakerId: null }]
-    : [];
+  let dominantSpeaker = null;
+  let dominantDuration = 0;
+  durationBySpeaker.forEach((duration, speaker) => {
+    if (duration <= dominantDuration) return;
+    dominantSpeaker = speaker;
+    dominantDuration = duration;
+  });
+  return Number.isInteger(dominantSpeaker) ? dominantSpeaker + 1 : null;
 }
 
 function startDeepgramTranscription({
@@ -10940,46 +10924,22 @@ function startDeepgramTranscription({
       const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
       takeDraftLine(stream, itemId);
       if (transcript) {
-        const speakerSegments = selectedSpeakerRecognitionEnabled
-          ? buildDeepgramSpeakerSegments(
-              alternative,
-              selectedLanguage,
-              transcript,
-            )
-          : [{ text: transcript, speakerId: null }];
-        const fragments = speakerSegments
-          .map((segment, index) => {
-            const segmentItemId =
-              speakerSegments.length === 1 && !Number.isInteger(segment.speakerId)
-                ? itemId
-                : `${itemId}-speaker-${segment.speakerId || 0}-${index}`;
-            const isLastSegment = index === speakerSegments.length - 1;
-            const fragment = upsertCompletedFragment(stream, {
-              itemId: segmentItemId,
-              text: segment.text,
-              boundaryMeta: {
-                reason:
-                  isLastSegment && event.speech_final === true
-                    ? 'semantic'
-                    : 'stream',
-                pauseMs:
-                  isLastSegment && event.speech_final === true
-                    ? DEEPGRAM_ENDPOINTING_MS
-                    : 0,
-              },
-            });
-            if (!fragment) return null;
-            fragment.speakerId = Number.isInteger(segment.speakerId)
-              ? segment.speakerId
-              : null;
-            if (speakerSegments.length === 1) {
-              fragment.provisionalTranslations = provisionalTranslations;
-            }
-            return fragment;
-          })
-          .filter(Boolean);
+        const fragment = upsertCompletedFragment(stream, {
+          itemId,
+          text: transcript,
+          boundaryMeta: {
+            reason: event.speech_final === true ? 'semantic' : 'stream',
+            pauseMs: event.speech_final === true ? DEEPGRAM_ENDPOINTING_MS : 0,
+          },
+        });
+        if (fragment) {
+          fragment.speakerId = selectedSpeakerRecognitionEnabled
+            ? getDeepgramDominantSpeakerId(alternative)
+            : null;
+          fragment.provisionalTranslations = provisionalTranslations;
+        }
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
-        fragments.forEach((fragment) => {
+        if (fragment) {
           if (correctionClient) {
             queueTranscriptionCorrection({
               stream,
@@ -10996,7 +10956,7 @@ function startDeepgramTranscription({
             sessionId,
             fragment.itemId,
           );
-        });
+        }
       }
     } else if (transcript) {
       setDraftLine(stream, itemId, transcript);
