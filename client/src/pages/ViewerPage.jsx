@@ -403,6 +403,13 @@ const ViewerPage = () => {
     selectedLiveLanguage === 'source'
       ? '原文（繁體中文）'
       : selectedLiveLanguageDefinition?.name || selectedLiveLanguage.toUpperCase()
+  const selectedLiveLanguageUi = selectedLiveLanguageDefinition?.ui || {
+    live: `Live translation: ${selectedLiveLanguageName}`,
+    preparing: `Preparing ${selectedLiveLanguageName} translation…`,
+    translating: 'Translating…',
+    unavailable: `${selectedLiveLanguageName} translation is temporarily unavailable.`,
+    fallback: `${selectedLiveLanguageName} translation is temporarily unavailable. Untranslated captions are shown in the original language.`,
+  }
   const selectedTranslationState =
     selectedLiveLanguage === 'source'
       ? null
@@ -533,7 +540,7 @@ const ViewerPage = () => {
             ? transcriptionIsFinal
               ? '即時語音 最終稿'
               : '即時語音 草稿'
-            : `即時翻譯：${selectedLiveLanguageName}`}
+            : selectedLiveLanguageUi.live}
         </div>
       )}
 
@@ -563,7 +570,7 @@ const ViewerPage = () => {
           {selectedLiveLanguage !== 'source' &&
             selectedTranslationState?.status === 'pending' && (
               <div className="viewer-live-line viewer-live-line-active">
-                正在翻譯成 {selectedLiveLanguageName}…
+                {selectedLiveLanguageUi.translating}
               </div>
             )}
           {selectedLiveLanguage !== 'source' &&
@@ -571,15 +578,15 @@ const ViewerPage = () => {
             selectedTranslationState?.status !== 'pending' && (
               <div className="viewer-live-line viewer-live-line-active">
                 {selectedTranslationState?.status === 'error'
-                  ? `${selectedLiveLanguageName} 翻譯暫時無法使用`
-                  : `正在準備 ${selectedLiveLanguageName} 翻譯…`}
+                  ? selectedLiveLanguageUi.unavailable
+                  : selectedLiveLanguageUi.preparing}
               </div>
             )}
           {selectedLiveLanguage !== 'source' &&
             visibleLiveEntries.length > 0 &&
             selectedTranslationState?.status === 'error' && (
               <div className="viewer-live-line viewer-live-line-active">
-                {selectedLiveLanguageName} 翻譯暫時無法使用，未翻譯段落改顯示原文
+                {selectedLiveLanguageUi.fallback}
               </div>
             )}
         </div>

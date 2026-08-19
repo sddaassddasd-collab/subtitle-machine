@@ -116,11 +116,84 @@ const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
 const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
 const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
-  { code: 'en', name: 'English', shortName: 'EN' },
-  { code: 'ja', name: '日本語', shortName: 'JA' },
-  { code: 'ko', name: '한국어', shortName: 'KO' },
-  { code: 'es', name: 'Español', shortName: 'ES' },
-  { code: 'fr', name: 'Français', shortName: 'FR' },
+  {
+    code: 'en',
+    name: 'English',
+    shortName: 'EN',
+    ui: {
+      live: 'Live translation: English',
+      preparing: 'Preparing English translation…',
+      translating: 'Translating…',
+      unavailable: 'English translation is temporarily unavailable.',
+      fallback:
+        'English translation is temporarily unavailable. Untranslated captions are shown in the original language.',
+    },
+  },
+  {
+    code: 'ja',
+    name: '日本語',
+    shortName: 'JA',
+    ui: {
+      live: 'リアルタイム翻訳：日本語',
+      preparing: '日本語翻訳を準備しています…',
+      translating: '翻訳中…',
+      unavailable: '日本語翻訳は一時的に利用できません。',
+      fallback:
+        '日本語翻訳は一時的に利用できません。未翻訳の字幕は原文で表示されます。',
+    },
+  },
+  {
+    code: 'ko',
+    name: '한국어',
+    shortName: 'KO',
+    ui: {
+      live: '실시간 번역: 한국어',
+      preparing: '한국어 번역을 준비하고 있습니다…',
+      translating: '번역 중…',
+      unavailable: '한국어 번역을 일시적으로 사용할 수 없습니다.',
+      fallback:
+        '한국어 번역을 일시적으로 사용할 수 없습니다. 번역되지 않은 자막은 원문으로 표시됩니다.',
+    },
+  },
+  {
+    code: 'es',
+    name: 'Español',
+    shortName: 'ES',
+    ui: {
+      live: 'Traducción en directo: Español',
+      preparing: 'Preparando la traducción al español…',
+      translating: 'Traduciendo…',
+      unavailable: 'La traducción al español no está disponible temporalmente.',
+      fallback:
+        'La traducción al español no está disponible temporalmente. Los subtítulos sin traducir se muestran en el idioma original.',
+    },
+  },
+  {
+    code: 'fr',
+    name: 'Français',
+    shortName: 'FR',
+    ui: {
+      live: 'Traduction en direct : Français',
+      preparing: 'Préparation de la traduction française…',
+      translating: 'Traduction en cours…',
+      unavailable: 'La traduction française est temporairement indisponible.',
+      fallback:
+        'La traduction française est temporairement indisponible. Les sous-titres non traduits sont affichés dans la langue originale.',
+    },
+  },
+  {
+    code: 'de',
+    name: 'Deutsch',
+    shortName: 'DE',
+    ui: {
+      live: 'Live-Übersetzung: Deutsch',
+      preparing: 'Deutsche Übersetzung wird vorbereitet…',
+      translating: 'Übersetzung läuft…',
+      unavailable: 'Die deutsche Übersetzung ist vorübergehend nicht verfügbar.',
+      fallback:
+        'Die deutsche Übersetzung ist vorübergehend nicht verfügbar. Nicht übersetzte Untertitel werden in der Originalsprache angezeigt.',
+    },
+  },
 ]);
 const LIVE_TRANSLATION_LANGUAGE_CODES = new Set(
   LIVE_TRANSLATION_LANGUAGES.map((language) => language.code),
