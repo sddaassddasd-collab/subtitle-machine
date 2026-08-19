@@ -71,6 +71,8 @@ const ViewerPage = () => {
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
   const viewerRevisionRef = useRef({ sessionId: '', revision: 0 })
+  const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
+  const lineSourceRef = useRef(lineSource)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -117,6 +119,7 @@ const ViewerPage = () => {
     setLiveLines(next.liveLines)
     setMusicActive(next.musicActive)
     setMusicText(next.musicText)
+    lineSourceRef.current = next.source
     setLineSource(next.source)
     setLanguages(next.languages)
     setViewerDefaultLanguageId(
@@ -198,7 +201,10 @@ const ViewerPage = () => {
     const joinViewerSession = () => {
       socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
       socket.emit('viewer:live-language', {
-        languageCode: 'source',
+        languageCode:
+          lineSourceRef.current === 'transcription'
+            ? selectedLiveLanguageRef.current
+            : 'source',
       })
     }
 
@@ -289,6 +295,7 @@ const ViewerPage = () => {
   ])
 
   useEffect(() => {
+    selectedLiveLanguageRef.current = selectedLiveLanguage
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(
         VIEWER_LIVE_LANGUAGE_STORAGE_KEY,
@@ -300,6 +307,10 @@ const ViewerPage = () => {
         lineSource === 'transcription' ? selectedLiveLanguage : 'source',
     })
   }, [lineSource, selectedLiveLanguage])
+
+  useEffect(() => {
+    lineSourceRef.current = lineSource
+  }, [lineSource])
 
   useEffect(() => {
     if (!languages.length) return

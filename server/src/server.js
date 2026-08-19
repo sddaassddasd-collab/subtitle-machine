@@ -5769,14 +5769,10 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
     transcriptionContext: stream.transcriptionContext,
     signal: abortController.signal,
     onDelta: (translated) => {
-      const newerPendingText =
-        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
-      if (
-        newerPendingText &&
-        newerPendingText !== job.text
-      ) {
-        return;
-      }
+      // Keep showing the active request even when a newer interim transcript
+      // is waiting. Deepgram usually updates faster than translation can
+      // finish; suppressing every superseded request can otherwise leave the
+      // viewer blank for several complete sentences.
       publishStableDraftTranslation({
         stream,
         sessionId,
@@ -5787,14 +5783,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   })
     .then((translated) => {
       if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
-        return;
-      }
-      const newerPendingText =
-        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
-      if (
-        newerPendingText &&
-        newerPendingText !== job.text
-      ) {
         return;
       }
       publishStableDraftTranslation({
