@@ -422,7 +422,6 @@ const ViewerPage = () => {
   const selectedLiveLanguageUi = selectedLiveLanguageDefinition?.ui || {
     live: `Live translation: ${selectedLiveLanguageName}`,
     preparing: `Preparing ${selectedLiveLanguageName} translation…`,
-    translating: 'Translating…',
     unavailable: `${selectedLiveLanguageName} translation is temporarily unavailable.`,
     fallback: `${selectedLiveLanguageName} translation is temporarily unavailable. Untranslated captions are shown in the original language.`,
   }
@@ -444,8 +443,7 @@ const ViewerPage = () => {
       displayText:
         selectedLiveLanguage === 'source'
           ? entry.text
-          : entry.translations?.[selectedLiveLanguage] ||
-            (selectedTranslationState?.status === 'error' ? entry.text : ''),
+          : entry.translations?.[selectedLiveLanguage] || entry.text,
     }))
     .filter((entry) => entry.displayText)
 
@@ -583,12 +581,6 @@ const ViewerPage = () => {
               </div>
             )
           })}
-          {selectedLiveLanguage !== 'source' &&
-            selectedTranslationState?.status === 'pending' && (
-              <div className="viewer-live-line viewer-live-line-active">
-                {selectedLiveLanguageUi.translating}
-              </div>
-            )}
           {selectedLiveLanguage !== 'source' &&
             visibleLiveEntries.length === 0 &&
             selectedTranslationState?.status !== 'pending' && (
