@@ -112,6 +112,19 @@ const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
 const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
 const CURRENT_INDEX_PERSIST_DELAY_MS = 750;
+const LIVE_TRANSLATION_MODEL =
+  process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
+const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
+const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
+  { code: 'en', name: 'English', shortName: 'EN' },
+  { code: 'ja', name: '日本語', shortName: 'JA' },
+  { code: 'ko', name: '한국어', shortName: 'KO' },
+  { code: 'es', name: 'Español', shortName: 'ES' },
+  { code: 'fr', name: 'Français', shortName: 'FR' },
+]);
+const LIVE_TRANSLATION_LANGUAGE_CODES = new Set(
+  LIVE_TRANSLATION_LANGUAGES.map((language) => language.code),
+);
 const USER_ROLES = {
   ADMIN: 'admin',
   OPERATOR: 'operator',
@@ -4994,6 +5007,9 @@ function upsertCompletedFragment(
 
   const existing = stream.fragmentByItemId.get(itemId);
   if (existing) {
+    if (existing.text !== sanitized) {
+      existing.translations = {};
+    }
     existing.text = sanitized;
     existing.corrected = false;
     existing.accurateSegment =
@@ -5012,6 +5028,7 @@ function upsertCompletedFragment(
     corrected: false,
     accurateSegment: accurateSegment || null,
     boundaryMeta: boundaryMeta || null,
+    translations: {},
     speakerId: null,
     completedAt: Date.now(),
   };
@@ -5191,11 +5208,35 @@ function buildTranscriptionDisplayEntries(stream) {
   }
 
   const historyEntries = refreshGroupedTranscriptionLines(stream)
-    .map((line) => ({
-      text: sanitizeTranscriptionText(line?.text || ''),
-      speakerId: Number.isInteger(line?.speakerId) ? line.speakerId : null,
-      isFinal: true,
-    }))
+    .map((line) => {
+      const fragments = Array.isArray(line?.itemIds)
+        ? line.itemIds
+            .map((itemId) => stream.fragmentByItemId.get(itemId) || null)
+            .filter(Boolean)
+        : [];
+      const translations = {};
+      LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
+        if (
+          fragments.length > 0 &&
+          fragments.every((fragment) =>
+            sanitizeTranscriptionText(fragment?.translations?.[languageCode] || ''),
+          )
+        ) {
+          translations[languageCode] = composeFragmentTexts(
+            fragments.map((fragment) => ({
+              text: fragment.translations[languageCode],
+            })),
+          );
+        }
+      });
+      return {
+        id: line?.key || line?.itemIds?.join('|') || '',
+        text: sanitizeTranscriptionText(line?.text || ''),
+        translations,
+        speakerId: Number.isInteger(line?.speakerId) ? line.speakerId : null,
+        isFinal: true,
+      };
+    })
     .filter((entry) => entry.text);
 
   const draftItemId = stream.activeDraftItemId;
@@ -5212,7 +5253,9 @@ function buildTranscriptionDisplayEntries(stream) {
   if (historyEntries.length === 0) {
     return [
       {
+        id: selectedDraftId,
         text: draftText,
+        translations: {},
         speakerId: null,
         isFinal: false,
       },
@@ -5234,7 +5277,9 @@ function buildTranscriptionDisplayEntries(stream) {
     return [
       ...historyEntries,
       {
+        id: selectedDraftId,
         text: draftText,
+        translations: {},
         speakerId: null,
         isFinal: false,
       },
@@ -5243,7 +5288,9 @@ function buildTranscriptionDisplayEntries(stream) {
 
   const mergedEntries = historyEntries.slice(0, -1);
   mergedEntries.push({
+    id: selectedDraftId,
     text: joinTranscriptionTexts(currentLine.text, draftText),
+    translations: currentLine.translations || {},
     speakerId: currentLine.speakerId,
     isFinal: false,
   });
@@ -5342,6 +5389,141 @@ ${original}
     return original;
   }
   return output;
+}
+
+function getLiveTranslationDemand(sessionId) {
+  const demand = {};
+  if (!sessionId) return demand;
+  io.sockets.sockets.forEach((viewerSocket) => {
+    if (viewerSocket.data?.viewerSessionId !== sessionId) return;
+    const languageCode = viewerSocket.data?.liveTranslationLanguage;
+    if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
+    demand[languageCode] = (demand[languageCode] || 0) + 1;
+  });
+  return demand;
+}
+
+function getLiveTranslationStatus(stream) {
+  const result = {};
+  if (!(stream?.liveTranslationStatus instanceof Map)) return result;
+  stream.liveTranslationStatus.forEach((value, languageCode) => {
+    if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
+    result[languageCode] = {
+      status: value?.status || 'idle',
+      error: sanitizeLineText(value?.error || ''),
+      updatedAt: Number.isFinite(value?.updatedAt) ? value.updatedAt : null,
+    };
+  });
+  return result;
+}
+
+async function translateLiveTranscriptionLine({
+  client,
+  text,
+  sourceLanguage,
+  targetLanguage,
+}) {
+  const sourceText = sanitizeTranscriptionText(text);
+  const target = LIVE_TRANSLATION_LANGUAGES.find(
+    (language) => language.code === targetLanguage,
+  );
+  if (!sourceText || !target) return '';
+  const response = await client.responses.create({
+    model: LIVE_TRANSLATION_MODEL,
+    temperature: 0,
+    max_output_tokens: 300,
+    input: [
+      {
+        role: 'system',
+        content:
+          'You translate live captions faithfully and concisely. Preserve meaning, names, numbers, tone, and sentence boundaries. Do not explain, summarize, censor, or add information. Return only the translated caption.',
+      },
+      {
+        role: 'user',
+        content: `Translate this live caption from ${sourceLanguage || 'the source language'} to ${target.name} (${target.code}). Return only the translation:\n${sourceText}`,
+      },
+    ],
+  });
+  return sanitizeTranscriptionText(response.output_text || '');
+}
+
+function queueLiveTranslation({ stream, sessionId, itemId, languageCode }) {
+  if (
+    !stream?.translationClient ||
+    !stream.fragmentByItemId?.has(itemId) ||
+    !LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)
+  ) {
+    return;
+  }
+  const fragment = stream.fragmentByItemId.get(itemId);
+  const sourceText = sanitizeTranscriptionText(fragment?.text || '');
+  if (!sourceText || fragment?.translations?.[languageCode]) return;
+  const requestKey = `${itemId}:${languageCode}:${sourceText}`;
+  if (stream.pendingTranslationKeys.has(requestKey)) return;
+
+  stream.pendingTranslationKeys.add(requestKey);
+  stream.liveTranslationStatus.set(languageCode, {
+    status: 'pending',
+    error: '',
+    updatedAt: Date.now(),
+  });
+  broadcastViewerState(sessionId);
+  broadcastTranscriptionState(sessionId);
+
+  stream.translationChain = stream.translationChain
+    .then(async () => {
+      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+      const translated = await translateLiveTranscriptionLine({
+        client: stream.translationClient,
+        text: sourceText,
+        sourceLanguage: stream.language,
+        targetLanguage: languageCode,
+      });
+      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+      const currentFragment = stream.fragmentByItemId.get(itemId);
+      if (!currentFragment || currentFragment.text !== sourceText || !translated) return;
+      currentFragment.translations = {
+        ...(currentFragment.translations || {}),
+        [languageCode]: translated,
+      };
+      stream.liveTranslationStatus.set(languageCode, {
+        status: 'ready',
+        error: '',
+        updatedAt: Date.now(),
+      });
+      syncTranscriptionStateFromStream(sessionId, stream);
+      broadcastTranscriptionState(sessionId);
+    })
+    .catch((error) => {
+      stream.liveTranslationStatus.set(languageCode, {
+        status: 'error',
+        error: sanitizeLineText(error?.message || '') || '翻譯失敗',
+        updatedAt: Date.now(),
+      });
+      broadcastViewerState(sessionId);
+      broadcastTranscriptionState(sessionId);
+    })
+    .finally(() => {
+      stream.pendingTranslationKeys.delete(requestKey);
+    });
+}
+
+function queueRequestedLiveTranslations(stream, sessionId, itemIds = []) {
+  if (!stream?.translationClient) return;
+  const demand = getLiveTranslationDemand(sessionId);
+  Object.keys(demand).forEach((languageCode) => {
+    itemIds.forEach((itemId) => {
+      queueLiveTranslation({ stream, sessionId, itemId, languageCode });
+    });
+  });
+}
+
+function queueRequestedLiveTranslationsAfterCorrection(stream, sessionId, itemId) {
+  const correctionSettled = stream?.correctionChain || Promise.resolve();
+  correctionSettled.finally(() => {
+    if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
+    queueRequestedLiveTranslations(stream, sessionId, [itemId]);
+  });
 }
 
 async function transcribeAccurateSegmentLine({
@@ -5490,6 +5672,7 @@ function queueTranscriptionCorrection({
       }
 
       fragment.text = nextText;
+      fragment.translations = {};
       fragment.corrected = true;
       clearMergedLineOverridesForItem(stream, itemId);
       syncTranscriptionStateFromStream(sessionId, stream);
@@ -6019,6 +6202,7 @@ function ensureTranscriptionState(session) {
 
 function getPublicTranscriptionState(session) {
   const state = ensureTranscriptionState(session);
+  const stream = transcriptionStreams.get(session.id);
   return {
     active: Boolean(state.active),
     status: state.status || 'idle',
@@ -6053,6 +6237,9 @@ function getPublicTranscriptionState(session) {
       typeof state.updatedAt === 'number' && Number.isFinite(state.updatedAt)
         ? state.updatedAt
         : null,
+    translationLanguages: LIVE_TRANSLATION_LANGUAGES,
+    translationDemand: getLiveTranslationDemand(session.id),
+    translationStatus: getLiveTranslationStatus(stream),
   };
 }
 
@@ -6835,7 +7022,12 @@ function getSessionDisplayState(session) {
   const liveEntries = hasLiveText
     ? buildTranscriptionDisplayEntries(activeStream)
         .map((entry) => ({
+          id: typeof entry?.id === 'string' ? entry.id : '',
           text: sanitizeTranscriptionText(entry?.text || ''),
+          translations:
+            entry?.translations && typeof entry.translations === 'object'
+              ? { ...entry.translations }
+              : {},
           speakerId: Number.isInteger(entry?.speakerId) ? entry.speakerId : null,
           isFinal: entry?.isFinal !== false,
         }))
@@ -10034,10 +10226,12 @@ function startDeepgramTranscription({
   const normalizedCorrectionApiKey = String(
     correctionApiKey || process.env.OPENAI_API_KEY || '',
   ).trim();
-  const correctionClient =
-    TRANSCRIPTION_CORRECTION_ENABLED && normalizedCorrectionApiKey
-      ? new OpenAI({ apiKey: normalizedCorrectionApiKey })
-      : null;
+  const openAIClient = normalizedCorrectionApiKey
+    ? new OpenAI({ apiKey: normalizedCorrectionApiKey })
+    : null;
+  const correctionClient = TRANSCRIPTION_CORRECTION_ENABLED
+    ? openAIClient
+    : null;
   const stream = {
     provider: 'deepgram',
     sessionId,
@@ -10058,6 +10252,10 @@ function startDeepgramTranscription({
     mergedLineOverrides: new Map(),
     mergedLineCorrectionKeys: new Set(),
     correctionChain: Promise.resolve(),
+    translationClient: openAIClient,
+    translationChain: Promise.resolve(),
+    pendingTranslationKeys: new Set(),
+    liveTranslationStatus: new Map(),
     pendingAudioChunks: [],
     trailingSilenceMs: 0,
     lastInputLevel: 0,
@@ -10175,6 +10373,7 @@ function startDeepgramTranscription({
             accurateSegment: null,
           });
         }
+        queueRequestedLiveTranslationsAfterCorrection(stream, sessionId, itemId);
       }
     } else if (transcript) {
       setDraftLine(stream, itemId, transcript);
@@ -10269,6 +10468,10 @@ function startRealtimeTranscription({
     mergedLineOverrides: new Map(),
     mergedLineCorrectionKeys: new Set(),
     correctionChain: Promise.resolve(),
+    translationClient: client,
+    translationChain: Promise.resolve(),
+    pendingTranslationKeys: new Set(),
+    liveTranslationStatus: new Map(),
     speakerRecognitionChain: Promise.resolve(),
     pendingSpeakerWindowKeys: new Set(),
     pendingAudioChunks: [],
@@ -10419,6 +10622,11 @@ function startRealtimeTranscription({
           language: selectedLanguage,
           accurateSegment: lateAccurateSegment,
         });
+        queueRequestedLiveTranslationsAfterCorrection(
+          stream,
+          sessionId,
+          event.item_id,
+        );
       }
     }
   });
@@ -10477,6 +10685,11 @@ function startRealtimeTranscription({
       language: selectedLanguage,
       accurateSegment,
     });
+    queueRequestedLiveTranslationsAfterCorrection(
+      stream,
+      sessionId,
+      event.item_id,
+    );
 
     const mergedLine = stream.finalizedLineByItemId.get(event.item_id) || null;
     if (mergedLine?.itemIds?.length > 1) {
@@ -10646,6 +10859,36 @@ io.on('connection', (socket) => {
     socket.data.publicRole = 'control';
     socket.data.controlSessionId = session.id;
     broadcastControlState(session.id);
+  });
+
+  socket.on('viewer:live-language', ({ languageCode } = {}) => {
+    const sessionId =
+      typeof socket.data?.viewerSessionId === 'string'
+        ? socket.data.viewerSessionId
+        : '';
+    if (!sessionId || socket.data?.publicRole !== 'viewer') return;
+    const normalizedLanguageCode =
+      typeof languageCode === 'string' ? languageCode.trim().toLowerCase() : '';
+    socket.data.liveTranslationLanguage =
+      LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)
+        ? normalizedLanguageCode
+        : 'source';
+
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream && LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)) {
+      const recentItemIds = stream.completedFragments
+        .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
+        .map((fragment) => fragment.itemId);
+      queueRequestedLiveTranslations(stream, sessionId, recentItemIds);
+    }
+    broadcastControlState(sessionId);
+    const viewerSession = getSession(sessionId);
+    if (viewerSession) {
+      socket.emit(
+        'viewer:update',
+        getViewerPayload(viewerSession, socket.data.viewerCellId || null),
+      );
+    }
   });
 
   socket.on('projector:status', (payload) => {
@@ -11797,6 +12040,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    const viewerSessionId =
+      typeof socket.data?.viewerSessionId === 'string'
+        ? socket.data.viewerSessionId
+        : '';
+    if (viewerSessionId) {
+      setImmediate(() => broadcastControlState(viewerSessionId));
+    }
     const projectorSessionId =
       typeof socket.data?.projectorSessionId === 'string'
         ? socket.data.projectorSessionId

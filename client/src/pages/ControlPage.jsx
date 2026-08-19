@@ -88,6 +88,9 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   lastInterimAt: null,
   lastFinalAt: null,
   updatedAt: null,
+  translationLanguages: [],
+  translationDemand: {},
+  translationStatus: {},
 }
 
 const DEFAULT_AUTO_FOLLOW_STATE = {
@@ -225,6 +228,17 @@ const normalizeTranscriptionState = (raw) => {
       typeof raw.lastFinalAt === 'number' && Number.isFinite(raw.lastFinalAt)
         ? raw.lastFinalAt
         : null,
+    translationLanguages: Array.isArray(raw.translationLanguages)
+      ? raw.translationLanguages
+      : [],
+    translationDemand:
+      raw.translationDemand && typeof raw.translationDemand === 'object'
+        ? raw.translationDemand
+        : {},
+    translationStatus:
+      raw.translationStatus && typeof raw.translationStatus === 'object'
+        ? raw.translationStatus
+        : {},
     updatedAt:
       typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
         ? raw.updatedAt
@@ -4718,6 +4732,24 @@ const ControlPage = () => {
                     </span>
                   </>
                 )}
+                {transcription.translationLanguages
+                  .filter(
+                    (language) =>
+                      Number(transcription.translationDemand?.[language.code]) > 0,
+                  )
+                  .map((language) => (
+                    <span key={language.code}>
+                      {language.name} 需求：
+                      {Number(transcription.translationDemand[language.code])} 人
+                      {transcription.translationStatus?.[language.code]?.status ===
+                      'pending'
+                        ? '（翻譯中）'
+                        : transcription.translationStatus?.[language.code]?.status ===
+                            'error'
+                          ? '（翻譯錯誤）'
+                          : ''}
+                    </span>
+                  ))}
               </div>
               <div
                 className={`transcription-preview ${

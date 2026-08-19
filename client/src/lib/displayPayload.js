@@ -125,7 +125,12 @@ export const normalizeDisplayPayload = (payload) => {
   const liveEntries = Array.isArray(payload?.liveEntries)
     ? payload.liveEntries
         .map((entry) => ({
+          id: typeof entry?.id === 'string' ? entry.id : '',
           text: typeof entry?.text === 'string' ? entry.text.trim() : '',
+          translations:
+            entry?.translations && typeof entry.translations === 'object'
+              ? entry.translations
+              : {},
           speakerId:
             Number.isInteger(entry?.speakerId) && entry.speakerId > 0
               ? entry.speakerId
@@ -159,6 +164,14 @@ export const normalizeDisplayPayload = (payload) => {
     languages: Array.isArray(payload?.languages) ? payload.languages : [],
     defaultLanguageId,
     transcriptionIsFinal,
+    liveTranslationLanguages: Array.isArray(transcription.translationLanguages)
+      ? transcription.translationLanguages
+      : [],
+    liveTranslationStatus:
+      transcription.translationStatus &&
+      typeof transcription.translationStatus === 'object'
+        ? transcription.translationStatus
+        : {},
     layout: normalizeProjectorLayout(payload?.layout),
     displayMode: normalizeProjectorDisplayMode(payload?.displayMode),
     languageMode: normalizeProjectorLanguageMode(payload?.languageMode),

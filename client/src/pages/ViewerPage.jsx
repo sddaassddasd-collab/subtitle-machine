@@ -10,6 +10,7 @@ import {
 } from '../lib/displayPayload'
 
 const VIEWER_FONT_STORAGE_KEY = 'subtitleMachineViewerFontPercent'
+const VIEWER_LIVE_LANGUAGE_STORAGE_KEY = 'subtitleMachineViewerLiveLanguage'
 const DEFAULT_VIEWER_FONT_PERCENT = 100
 const MIN_VIEWER_FONT_PERCENT = 70
 const MAX_VIEWER_FONT_PERCENT = 180
@@ -46,6 +47,12 @@ const ViewerPage = () => {
   const [lineSource, setLineSource] = useState('script')
   const [waitingMessage, setWaitingMessage] = useState('')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
+  const [liveTranslationLanguages, setLiveTranslationLanguages] = useState([])
+  const [liveTranslationStatus, setLiveTranslationStatus] = useState({})
+  const [selectedLiveLanguage, setSelectedLiveLanguage] = useState(() => {
+    if (typeof window === 'undefined') return 'source'
+    return window.localStorage.getItem(VIEWER_LIVE_LANGUAGE_STORAGE_KEY) || 'source'
+  })
   const [languages, setLanguages] = useState([])
   const [viewerDefaultLanguageId, setViewerDefaultLanguageId] = useState('primary')
   const [selectedLanguageId, setSelectedLanguageId] = useState('primary')
@@ -58,6 +65,7 @@ const ViewerPage = () => {
   const [connectionIssue, setConnectionIssue] = useState('')
   const [hasLoadedState, setHasLoadedState] = useState(false)
   const liveFeedRef = useRef(null)
+  const socketRef = useRef(null)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
 
@@ -94,6 +102,8 @@ const ViewerPage = () => {
       resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
     )
     setTranscriptionIsFinal(next.transcriptionIsFinal)
+    setLiveTranslationLanguages(next.liveTranslationLanguages)
+    setLiveTranslationStatus(next.liveTranslationStatus)
     setRoleColorEnabled(next.roleColorEnabled)
     hasLoadedStateRef.current = true
     setHasLoadedState(true)
@@ -162,8 +172,12 @@ const ViewerPage = () => {
     if (!resolvedViewerToken) return
 
     const socket = io()
+    socketRef.current = socket
     const joinViewerSession = () => {
       socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
+      socket.emit('viewer:live-language', {
+        languageCode: 'source',
+      })
     }
 
     const fetchViewerState = async () => {
@@ -229,9 +243,28 @@ const ViewerPage = () => {
 
     return () => {
       clearRecoveryTimer()
+      socketRef.current = null
       socket.disconnect()
     }
-  }, [applyViewerPayload, classifyPublicFailure, clearRecoveryTimer, resolvedViewerToken])
+  }, [
+    applyViewerPayload,
+    classifyPublicFailure,
+    clearRecoveryTimer,
+    resolvedViewerToken,
+  ])
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(
+        VIEWER_LIVE_LANGUAGE_STORAGE_KEY,
+        selectedLiveLanguage,
+      )
+    }
+    socketRef.current?.emit('viewer:live-language', {
+      languageCode:
+        lineSource === 'transcription' ? selectedLiveLanguage : 'source',
+    })
+  }, [lineSource, selectedLiveLanguage])
 
   useEffect(() => {
     if (!languages.length) return
@@ -263,6 +296,17 @@ const ViewerPage = () => {
     selectedLanguageId,
     viewerDefaultLanguageId,
   ])
+
+  useEffect(() => {
+    if (!liveTranslationLanguages.length || selectedLiveLanguage === 'source') return
+    if (
+      !liveTranslationLanguages.some(
+        (language) => language?.code === selectedLiveLanguage,
+      )
+    ) {
+      setSelectedLiveLanguage('source')
+    }
+  }, [liveTranslationLanguages, selectedLiveLanguage])
 
   useEffect(() => {
     if (lineSource !== 'transcription') return
@@ -352,6 +396,35 @@ const ViewerPage = () => {
     selectedLanguageId === ALL_LANGUAGES_OPTION_ID
       ? '全部語言'
       : languages.find((language) => language.id === selectedLanguageId)?.name || '語言'
+  const selectedLiveLanguageDefinition = liveTranslationLanguages.find(
+    (language) => language?.code === selectedLiveLanguage,
+  )
+  const selectedLiveLanguageName =
+    selectedLiveLanguage === 'source'
+      ? '原文（繁體中文）'
+      : selectedLiveLanguageDefinition?.name || selectedLiveLanguage.toUpperCase()
+  const selectedTranslationState =
+    selectedLiveLanguage === 'source'
+      ? null
+      : liveTranslationStatus[selectedLiveLanguage] || null
+  const visibleLiveEntries = (liveEntries.length > 0
+    ? liveEntries
+    : liveLines.map((text) => ({
+        id: '',
+        text,
+        translations: {},
+        speakerId: null,
+        isFinal: transcriptionIsFinal,
+      })))
+    .map((entry) => ({
+      ...entry,
+      displayText:
+        selectedLiveLanguage === 'source'
+          ? entry.text
+          : entry.translations?.[selectedLiveLanguage] ||
+            (selectedTranslationState?.status === 'error' ? entry.text : ''),
+    }))
+    .filter((entry) => entry.displayText)
 
   return (
     <div
@@ -380,27 +453,52 @@ const ViewerPage = () => {
           </button>
         </div>
 
-        {languages.length > 1 && (
+        {(lineSource === 'transcription' || languages.length > 1) && (
           <label
             className="viewer-language-menu"
-            title={selectedLanguageName}
+            title={
+              lineSource === 'transcription'
+                ? selectedLiveLanguageName
+                : selectedLanguageName
+            }
             aria-label="切換語言"
           >
             <span aria-hidden="true">▾</span>
             <select
-              value={selectedLanguageId}
+              value={
+                lineSource === 'transcription'
+                  ? selectedLiveLanguage
+                  : selectedLanguageId
+              }
               onChange={(event) => {
-                setSelectedLanguageId(event.target.value)
-                setHasLanguageOverride(true)
+                if (lineSource === 'transcription') {
+                  setSelectedLiveLanguage(event.target.value)
+                } else {
+                  setSelectedLanguageId(event.target.value)
+                  setHasLanguageOverride(true)
+                }
               }}
               aria-label="切換語言"
             >
-              <option value={ALL_LANGUAGES_OPTION_ID}>全部語言</option>
-              {languages.map((language) => (
-                <option key={language.id} value={language.id}>
-                  {language.name}
-                </option>
-              ))}
+              {lineSource === 'transcription' ? (
+                <>
+                  <option value="source">原文（繁體中文）</option>
+                  {liveTranslationLanguages.map((language) => (
+                    <option key={language.code} value={language.code}>
+                      {language.name}
+                    </option>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <option value={ALL_LANGUAGES_OPTION_ID}>全部語言</option>
+                  {languages.map((language) => (
+                    <option key={language.id} value={language.id}>
+                      {language.name}
+                    </option>
+                  ))}
+                </>
+              )}
             </select>
           </label>
         )}
@@ -431,20 +529,17 @@ const ViewerPage = () => {
 
       {lineSource === 'transcription' && displayEnabled && (
         <div className="viewer-live-badge">
-          {transcriptionIsFinal ? '即時語音 最終稿' : '即時語音 草稿'}
+          {selectedLiveLanguage === 'source'
+            ? transcriptionIsFinal
+              ? '即時語音 最終稿'
+              : '即時語音 草稿'
+            : `即時翻譯：${selectedLiveLanguageName}`}
         </div>
       )}
 
       {lineSource === 'transcription' && displayEnabled ? (
         <div className={liveFeedClassName} ref={liveFeedRef}>
-          {(liveEntries.length > 0
-            ? liveEntries
-            : liveLines.map((text) => ({
-                text,
-                speakerId: null,
-                isFinal: transcriptionIsFinal,
-              }))
-          ).map((liveEntry, index, entries) => {
+          {visibleLiveEntries.map((liveEntry, index, entries) => {
             const isLatest = index === entries.length - 1
             const speakerClass =
               Number.isInteger(liveEntry.speakerId) && liveEntry.speakerId > 0
@@ -452,7 +547,7 @@ const ViewerPage = () => {
                 : ''
             return (
               <div
-                key={`${index}-${liveEntry.text}`}
+                key={liveEntry.id || `${index}-${liveEntry.displayText}`}
                 className={`viewer-live-line${speakerClass}${
                   isLatest ? ' viewer-live-line-active' : ''
                 }${
@@ -461,10 +556,32 @@ const ViewerPage = () => {
                     : ''
                 }`}
               >
-                {liveEntry.text}
+                {liveEntry.displayText}
               </div>
             )
           })}
+          {selectedLiveLanguage !== 'source' &&
+            selectedTranslationState?.status === 'pending' && (
+              <div className="viewer-live-line viewer-live-line-active">
+                正在翻譯成 {selectedLiveLanguageName}…
+              </div>
+            )}
+          {selectedLiveLanguage !== 'source' &&
+            visibleLiveEntries.length === 0 &&
+            selectedTranslationState?.status !== 'pending' && (
+              <div className="viewer-live-line viewer-live-line-active">
+                {selectedTranslationState?.status === 'error'
+                  ? `${selectedLiveLanguageName} 翻譯暫時無法使用`
+                  : `正在準備 ${selectedLiveLanguageName} 翻譯…`}
+              </div>
+            )}
+          {selectedLiveLanguage !== 'source' &&
+            visibleLiveEntries.length > 0 &&
+            selectedTranslationState?.status === 'error' && (
+              <div className="viewer-live-line viewer-live-line-active">
+                {selectedLiveLanguageName} 翻譯暫時無法使用，未翻譯段落改顯示原文
+              </div>
+            )}
         </div>
       ) : (
         <div className={textClass} style={roleColor ? { color: roleColor } : undefined}>
