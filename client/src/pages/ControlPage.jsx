@@ -1003,8 +1003,10 @@ const ControlPage = () => {
   const [viewerAliasInput, setViewerAliasInput] = useState('')
   const [programTitleInput, setProgramTitleInput] = useState('')
   const [importingSessionBackup, setImportingSessionBackup] = useState(false)
+  const [simpleImportLanguageId, setSimpleImportLanguageId] = useState('')
   const socketRef = useRef(null)
   const jsonInputRef = useRef(null)
+  const simpleLanguageInputRef = useRef(null)
   const sessionBackupInputRef = useRef(null)
   const lineDraftsRef = useRef({})
   const composingLineDraftsRef = useRef(new Set())
@@ -1613,6 +1615,16 @@ const ControlPage = () => {
       setComparisonLanguageId(extraLanguages[0].id)
     }
   }, [comparisonLanguageId, extraLanguages])
+
+  useEffect(() => {
+    if (!extraLanguages.length) {
+      setSimpleImportLanguageId('')
+      return
+    }
+    if (!extraLanguages.some((language) => language.id === simpleImportLanguageId)) {
+      setSimpleImportLanguageId(extraLanguages[0].id)
+    }
+  }, [extraLanguages, simpleImportLanguageId])
 
   useEffect(() => {
     if (editingCell && editingCell.index >= lines.length) {
@@ -3352,6 +3364,64 @@ const ControlPage = () => {
     setStatus({ kind: 'success', message: '字幕 JSON 已匯出' })
   }
 
+  const handleExportPrimarySimpleJson = () => {
+    if (!lines.length) {
+      setStatus({ kind: 'info', message: '目前沒有字幕可以匯出' })
+      return
+    }
+    const payload = lines.map((line) => ({
+      id: line.id,
+      text: getLineLanguageText(line, 'primary'),
+    }))
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${selectedCell?.name || 'subtitles'}-${primaryLanguageName}-simple.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    setStatus({ kind: 'success', message: `已匯出 ${payload.length} 格原語言字幕` })
+  }
+
+  const handleImportSimpleLanguageJson = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file || !sessionId || !selectedCellId || !simpleImportLanguageId) return
+    try {
+      const parsed = JSON.parse(await file.text())
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error('匯入檔必須是非空的 JSON 陣列')
+      }
+      const data = await performSessionMutation(
+        () =>
+          fetch(
+            `/api/session/${sessionId}/cells/${selectedCellId}/languages/${simpleImportLanguageId}/simple-import`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ entries: parsed }),
+            },
+          ),
+        { keepStatus: true },
+      )
+      const summary = data?.importSummary || {}
+      const targetLanguage = extraLanguages.find(
+        (language) => language.id === simpleImportLanguageId,
+      )
+      setStatus({
+        kind: 'success',
+        message: `${targetLanguage?.name || '指定語言'}已更新 ${summary.updated || 0} 格；空白略過 ${summary.blank || 0}、重複 ${summary.duplicate || 0}、找不到 ID ${summary.notFound || 0}、無效 ${summary.invalid || 0}`,
+      })
+    } catch (error) {
+      setStatus({ kind: 'error', message: error.message || '匯入翻譯失敗' })
+    } finally {
+      if (simpleLanguageInputRef.current) simpleLanguageInputRef.current.value = ''
+    }
+  }
+
   const handleClearCurrentCellSubtitles = async () => {
     if (!sessionId || !selectedCellId || clearingSubtitles) return
     if (!lines.length) {
@@ -4626,6 +4696,48 @@ const ControlPage = () => {
             </ControlSection>
 
             <ControlSection title="匯入與備份">
+            <div className="input-group">
+              <label>翻譯用簡易 JSON</label>
+              <div className="json-actions">
+                <button type="button" onClick={handleExportPrimarySimpleJson}>
+                  匯出原語言簡易 JSON
+                </button>
+              </div>
+              <label htmlFor="simple-import-language">匯入到指定語言</label>
+              <select
+                id="simple-import-language"
+                value={simpleImportLanguageId}
+                disabled={!extraLanguages.length}
+                onChange={(event) => setSimpleImportLanguageId(event.target.value)}
+              >
+                {!extraLanguages.length && <option value="">請先新增第二語言</option>}
+                {extraLanguages.map((language) => (
+                  <option key={language.id} value={language.id}>
+                    {language.name}
+                  </option>
+                ))}
+              </select>
+              <div className="json-actions">
+                <button
+                  type="button"
+                  disabled={!simpleImportLanguageId || !selectedCellId}
+                  onClick={() => simpleLanguageInputRef.current?.click()}
+                >
+                  匯入到所選語言
+                </button>
+                <input
+                  ref={simpleLanguageInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={handleImportSimpleLanguageJson}
+                />
+              </div>
+              <span className="input-note">
+                格式只包含 id 與 text；系統依 id 更新所選語言，空白、重複或找不到的項目會略過，不會修改原語言及其他字幕資料。
+              </span>
+            </div>
+
             <div className="input-group">
               <label>目前場次 JSON 匯入 / 匯出</label>
               <div className="json-actions">

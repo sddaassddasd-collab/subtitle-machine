@@ -10441,6 +10441,90 @@ app.delete('/api/session/:sessionId/languages/:languageId', requireAuth, (req, r
   res.json(getControlPayload(session));
 });
 
+app.put(
+  '/api/session/:sessionId/cells/:cellId/languages/:languageId/simple-import',
+  requireAuth,
+  (req, res) => {
+    const session = getOwnedSessionFromRequest(req, res);
+    if (!session) return;
+
+    const { cellId, languageId } = req.params;
+    if (languageId === 'primary') {
+      return res.status(400).json({ error: '請選擇第一語言以外的目標語言' });
+    }
+    if (!session.languages.some((language) => language.id === languageId)) {
+      return res.status(404).json({ error: '找不到指定語言' });
+    }
+    const cell = session.cells.find((entry) => entry.id === cellId);
+    if (!cell) {
+      return res.status(404).json({ error: '找不到場次' });
+    }
+    const entries = req.body?.entries;
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({ error: '匯入檔必須是非空的 JSON 陣列' });
+    }
+
+    const occurrences = new Map();
+    entries.forEach((entry) => {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+      if (id) occurrences.set(id, (occurrences.get(id) || 0) + 1);
+    });
+    const lineIds = new Set(cell.lines.map((line) => line.id));
+    const updates = new Map();
+    let invalid = 0;
+    let blank = 0;
+    let duplicate = 0;
+    let notFound = 0;
+
+    entries.forEach((entry) => {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+      if (!id || typeof entry?.text !== 'string') {
+        invalid += 1;
+        return;
+      }
+      if ((occurrences.get(id) || 0) > 1) {
+        duplicate += 1;
+        return;
+      }
+      const text = sanitizeLineText(entry.text);
+      if (!text) {
+        blank += 1;
+        return;
+      }
+      if (!lineIds.has(id)) {
+        notFound += 1;
+        return;
+      }
+      updates.set(id, text);
+    });
+
+    if (updates.size > 0) {
+      pushSessionHistory(session);
+      cell.lines = cell.lines.map((line) =>
+        updates.has(line.id)
+          ? updateSessionLineLanguageText(line, languageId, updates.get(line.id))
+          : line,
+      );
+      if (session.selectedCellId === cell.id) syncSelectedCellLines(session);
+      persistSession(session);
+      broadcastControlState(session.id);
+      broadcastViewerState(session.id);
+    }
+
+    res.json({
+      ...getControlPayload(session),
+      importSummary: {
+        total: entries.length,
+        updated: updates.size,
+        blank,
+        duplicate,
+        notFound,
+        invalid,
+      },
+    });
+  },
+);
+
 app.post(
   '/api/session/:sessionId/cells/:cellId/languages/:languageId/parse',
   requireAuth,
