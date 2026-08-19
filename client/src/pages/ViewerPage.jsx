@@ -227,12 +227,12 @@ const ViewerPage = () => {
       }
     }
 
-    const scheduleRecoveryFetch = () => {
+    const scheduleRecoveryFetch = (delayMs = PUBLIC_RECOVERY_RETRY_DELAY_MS) => {
       clearRecoveryTimer()
       recoveryTimerRef.current = window.setTimeout(() => {
         recoveryTimerRef.current = null
         void fetchViewerState()
-      }, PUBLIC_RECOVERY_RETRY_DELAY_MS)
+      }, delayMs)
     }
 
     socket.on('connect', () => {
@@ -271,9 +271,14 @@ const ViewerPage = () => {
 
     const recoverVisibleViewer = () => {
       if (document.visibilityState === 'hidden') return
-      if (!socket.connected) socket.connect()
-      if (socket.connected) joinViewerSession()
-      void fetchViewerState()
+      if (!socket.connected) {
+        socket.connect()
+        return
+      }
+      // pageshow, online and visibilitychange often fire together. A healthy
+      // socket is already in its room, so only coalesce a compact state fetch;
+      // reconnecting or joining again creates an avoidable event storm.
+      scheduleRecoveryFetch(150)
     }
     window.addEventListener('pageshow', recoverVisibleViewer)
     window.addEventListener('online', recoverVisibleViewer)

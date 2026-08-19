@@ -11705,11 +11705,15 @@ io.on('connection', (socket) => {
       transcriptionStreams.get(sessionId)?.language ||
         liveSession?.transcriptionLanguage,
     );
-    socket.data.liveTranslationLanguage =
+    const nextLiveTranslationLanguage =
       LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode) &&
       normalizedLanguageCode.toLowerCase() !== currentSourceLanguage.toLowerCase()
         ? normalizedLanguageCode
         : 'source';
+    if (socket.data.liveTranslationLanguage === nextLiveTranslationLanguage) {
+      return;
+    }
+    socket.data.liveTranslationLanguage = nextLiveTranslationLanguage;
 
     const stream = transcriptionStreams.get(sessionId);
     if (stream && LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)) {
@@ -11723,7 +11727,10 @@ io.on('connection', (socket) => {
         'history',
       );
     }
-    broadcastControlState(sessionId);
+    // Viewer demand changes only affect the compact transcription diagnostics.
+    // Broadcasting the full control payload here serializes every subtitle
+    // line once per viewer reconnect and can starve live Deepgram events.
+    broadcastTranscriptionState(sessionId);
     const viewerSession = getSession(sessionId);
     if (viewerSession) {
       socket.emit(
