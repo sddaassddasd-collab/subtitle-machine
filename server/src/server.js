@@ -132,6 +132,8 @@ const LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS = Number.isFinite(
 )
   ? Math.max(1, parsedDraftTranslationMinNewChars)
   : 3;
+const LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS = 220;
+const LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS = 2;
 const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
 const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
   {
@@ -5687,6 +5689,57 @@ function isCurrentDraftTranslationJob(stream, sessionId, job) {
   );
 }
 
+function publishStableDraftTranslation({
+  stream,
+  sessionId,
+  job,
+  translated,
+  force = false,
+}) {
+  const candidate = sanitizeTranscriptionText(translated);
+  if (!candidate || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
+    return false;
+  }
+
+  const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
+    sourceText: job.text,
+    translations: {},
+  };
+  const published = sanitizeTranscriptionText(
+    draftState.translations?.[job.languageCode] || '',
+  );
+  const now = Date.now();
+  const isCompatibleExtension = !published || candidate.startsWith(published);
+  const addedChars = Math.max(0, candidate.length - published.length);
+  const publishIntervalElapsed =
+    now - (job.lastPublishedAt || job.startedAt) >=
+    LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS;
+
+  // Never replace an already visible draft with a shorter or contradictory
+  // partial response. Such revisions stay buffered until the formal final
+  // translation can replace the provisional caption in one atomic update.
+  if (
+    !isCompatibleExtension ||
+    candidate.length < published.length ||
+    (!force &&
+      (addedChars < LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS ||
+        !publishIntervalElapsed))
+  ) {
+    return false;
+  }
+  if (candidate === published) return false;
+
+  draftState.sourceText = job.text;
+  draftState.translations = {
+    ...draftState.translations,
+    [job.languageCode]: candidate,
+  };
+  stream.draftTranslationsByItemId.set(job.itemId, draftState);
+  job.lastPublishedAt = now;
+  syncTranscriptionStateFromStream(sessionId, stream);
+  return true;
+}
+
 function runDraftTranslationWorker(stream, sessionId, languageCode) {
   if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
   const worker = getDraftTranslationWorker(stream, languageCode);
@@ -5707,6 +5760,8 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   }
 
   const job = worker.pending;
+  job.startedAt = Date.now();
+  job.lastPublishedAt = 0;
   worker.pending = null;
   worker.active = true;
   const abortController = new AbortController();
@@ -5722,7 +5777,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   broadcastTranscriptionState(sessionId);
   broadcastViewerState(sessionId);
 
-  let lastBroadcastAt = 0;
   streamDraftTranslation({
     client: stream.translationClient,
     text: job.text,
@@ -5731,47 +5785,32 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
     transcriptionContext: stream.transcriptionContext,
     signal: abortController.signal,
     onDelta: (translated) => {
-      if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
-        return;
-      }
-      const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
-        sourceText: job.text,
-        translations: {},
-      };
-      draftState.sourceText = job.text;
-      draftState.translations = {
-        ...draftState.translations,
-        [languageCode]: translated,
-      };
-      stream.draftTranslationsByItemId.set(job.itemId, draftState);
-      const now = Date.now();
-      if (now - lastBroadcastAt >= 60) {
-        lastBroadcastAt = now;
-        syncTranscriptionStateFromStream(sessionId, stream);
-      }
+      publishStableDraftTranslation({
+        stream,
+        sessionId,
+        job,
+        translated,
+      });
     },
   })
     .then((translated) => {
       if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
         return;
       }
-      const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
-        sourceText: job.text,
-        translations: {},
-      };
-      draftState.sourceText = job.text;
-      draftState.translations = {
-        ...draftState.translations,
-        [languageCode]: translated,
-      };
-      stream.draftTranslationsByItemId.set(job.itemId, draftState);
+      publishStableDraftTranslation({
+        stream,
+        sessionId,
+        job,
+        translated,
+        force: true,
+      });
       stream.liveTranslationStatus.set(languageCode, {
         status: 'ready',
         error: '',
         updatedAt: Date.now(),
       });
-      syncTranscriptionStateFromStream(sessionId, stream);
       broadcastTranscriptionState(sessionId);
+      broadcastViewerState(sessionId);
     })
     .catch((error) => {
       if (!isCurrentDraftTranslationJob(stream, sessionId, job)) return;
