@@ -70,6 +70,7 @@ const ViewerPage = () => {
   const socketRef = useRef(null)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
+  const viewerRevisionRef = useRef({ sessionId: '', revision: 0 })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -86,6 +87,24 @@ const ViewerPage = () => {
   }, [])
 
   const applyViewerPayload = useCallback((payload) => {
+    const incomingSessionId =
+      typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+    const incomingRevision = Number(payload?.viewerRevision)
+    const previousRevision = viewerRevisionRef.current
+    if (
+      incomingSessionId &&
+      previousRevision.sessionId === incomingSessionId &&
+      Number.isSafeInteger(incomingRevision) &&
+      incomingRevision < previousRevision.revision
+    ) {
+      return
+    }
+    if (incomingSessionId && Number.isSafeInteger(incomingRevision)) {
+      viewerRevisionRef.current = {
+        sessionId: incomingSessionId,
+        revision: incomingRevision,
+      }
+    }
     const next = normalizeDisplayPayload(payload)
     setWaitingMessage(
       payload?.source === 'waiting'
@@ -138,7 +157,7 @@ const ViewerPage = () => {
     let cancelled = false
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const response = await fetch(`/api/viewer/${resolvedViewerToken}?compact=1`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入字幕')
@@ -185,7 +204,7 @@ const ViewerPage = () => {
 
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const response = await fetch(`/api/viewer/${resolvedViewerToken}?compact=1`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入字幕')
@@ -244,7 +263,20 @@ const ViewerPage = () => {
       scheduleRecoveryFetch()
     })
 
+    const recoverVisibleViewer = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!socket.connected) socket.connect()
+      if (socket.connected) joinViewerSession()
+      void fetchViewerState()
+    }
+    window.addEventListener('pageshow', recoverVisibleViewer)
+    window.addEventListener('online', recoverVisibleViewer)
+    document.addEventListener('visibilitychange', recoverVisibleViewer)
+
     return () => {
+      window.removeEventListener('pageshow', recoverVisibleViewer)
+      window.removeEventListener('online', recoverVisibleViewer)
+      document.removeEventListener('visibilitychange', recoverVisibleViewer)
       clearRecoveryTimer()
       socketRef.current = null
       socket.disconnect()

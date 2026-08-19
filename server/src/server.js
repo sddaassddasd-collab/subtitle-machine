@@ -104,6 +104,7 @@ const projectorSessionTombstones = new Map();
 const projectorConnections = new Map();
 const projectorPresence = new Map();
 const currentIndexPersistTimers = new Map();
+const viewerStateRevisions = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -111,7 +112,9 @@ const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
 const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
 const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
-const CURRENT_INDEX_PERSIST_DELAY_MS = 750;
+// Playback position is hot state. Persist after navigation settles instead of
+// rewriting the entire application store on every cue during a live show.
+const CURRENT_INDEX_PERSIST_DELAY_MS = 2500;
 const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
 const LIVE_DRAFT_TRANSLATION_ENABLED =
@@ -7614,7 +7617,22 @@ function getSessionDisplayState(session) {
   };
 }
 
-function getViewerPayload(session, viewerCellId = null) {
+function getViewerStateRevision(sessionId) {
+  if (!sessionId) return 0;
+  if (!viewerStateRevisions.has(sessionId)) {
+    viewerStateRevisions.set(sessionId, Date.now());
+  }
+  return viewerStateRevisions.get(sessionId);
+}
+
+function bumpViewerStateRevision(sessionId) {
+  const previous = getViewerStateRevision(sessionId);
+  const next = Math.max(Date.now(), previous + 1);
+  viewerStateRevisions.set(sessionId, next);
+  return next;
+}
+
+function getViewerPayload(session, viewerCellId = null, options = {}) {
   const {
     normalized,
     activeScriptLine,
@@ -7626,18 +7644,23 @@ function getViewerPayload(session, viewerCellId = null) {
     musicText,
     transcription,
   } = getSessionDisplayState(session);
-  const publicLines = ensureSessionLines(normalized).map((line) =>
-    toPublicLine(line),
-  );
+  const includeLines = options.includeLines !== false;
+  const sourceLines = ensureSessionLines(normalized);
+  const publicLines = includeLines
+    ? sourceLines.map((line) => toPublicLine(line))
+    : null;
   const currentIndex =
-    publicLines.length > 0
-      ? Math.min(Math.max(normalized.currentIndex, 0), publicLines.length - 1)
+    sourceLines.length > 0
+      ? Math.min(Math.max(normalized.currentIndex, 0), sourceLines.length - 1)
       : 0;
   const viewerCell = viewerCellId
     ? normalized.cells.find((cell) => cell.id === viewerCellId) || null
     : getSelectedCell(normalized);
   const isActiveCell = !viewerCell || viewerCell.id === normalized.selectedCellId;
   const viewerToken = viewerCell?.viewerToken || normalized.viewerToken;
+  const viewerRevision = Number.isSafeInteger(options.revision)
+    ? options.revision
+    : getViewerStateRevision(normalized.id);
 
   if (!isActiveCell) {
     return {
@@ -7649,7 +7672,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: null,
       text: '',
@@ -7672,7 +7696,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: null,
       text: '',
@@ -7694,7 +7719,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
@@ -7719,7 +7745,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: null,
       text: '',
@@ -7740,7 +7767,8 @@ function getViewerPayload(session, viewerCellId = null) {
     status: normalized.status,
     languages: normalized.languages,
     defaultLanguageId: normalized.viewerDefaultLanguageId,
-    lines: publicLines,
+    lines: includeLines ? publicLines : undefined,
+    viewerRevision,
     currentIndex,
     line: toPublicLine(activeScriptLine),
     text:
@@ -8069,14 +8097,18 @@ function broadcastTranscriptionState(sessionId) {
 function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
+  const revision = bumpViewerStateRevision(sessionId);
 
   session.cells.forEach((cell) => {
     io.to(`viewer:${sessionId}:${cell.id}`).emit(
       'viewer:update',
-      getViewerPayload(session, cell.id),
+      getViewerPayload(session, cell.id, { includeLines: false, revision }),
     );
   });
-  io.to(`viewer:${sessionId}`).emit('viewer:update', getViewerPayload(session));
+  io.to(`viewer:${sessionId}`).emit(
+    'viewer:update',
+    getViewerPayload(session, null, { includeLines: false, revision }),
+  );
   io.to(`projector:${sessionId}`).emit(
     'projector:update',
     getProjectorPayload(session),
@@ -10158,7 +10190,11 @@ app.get('/api/viewer/:viewerToken', (req, res) => {
       .status(410)
       .json(getPublicSessionUnavailablePayload('viewer', { session: null, token: viewerToken }));
   }
-  res.json(getViewerPayload(target.session, target.cell?.id));
+  res.json(
+    getViewerPayload(target.session, target.cell?.id, {
+      includeLines: req.query?.compact !== '1',
+    }),
+  );
 });
 
 app.get('/api/projector/:projectorToken', (req, res) => {
@@ -11582,7 +11618,10 @@ io.on('connection', (socket) => {
       }
       socket.data.publicRole = 'viewer';
       socket.data.viewerSessionId = viewerSession.id;
-      socket.emit('viewer:update', getViewerPayload(viewerSession, viewerCell?.id));
+      socket.emit(
+        'viewer:update',
+        getViewerPayload(viewerSession, viewerCell?.id, { includeLines: false }),
+      );
       return;
     }
 
@@ -11672,7 +11711,9 @@ io.on('connection', (socket) => {
     if (viewerSession) {
       socket.emit(
         'viewer:update',
-        getViewerPayload(viewerSession, socket.data.viewerCellId || null),
+        getViewerPayload(viewerSession, socket.data.viewerCellId || null, {
+          includeLines: false,
+        }),
       );
     }
   });

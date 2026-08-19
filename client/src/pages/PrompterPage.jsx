@@ -78,7 +78,7 @@ const PrompterPage = () => {
   const applyViewerPayload = useCallback((payload) => {
     const next = normalizeDisplayPayload(payload)
     setDisplayEnabled(next.enabled)
-    setLines(next.lines)
+    if (Array.isArray(payload?.lines)) setLines(next.lines)
     setCurrentIndex(next.currentIndex)
     setLiveEntries(next.liveEntries)
     setLiveLines(next.liveLines)
