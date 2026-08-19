@@ -16,8 +16,8 @@ const DEFAULT_VIEWER_FONT_PERCENT = 100
 const MIN_VIEWER_FONT_PERCENT = 70
 const MAX_VIEWER_FONT_PERCENT = 180
 const VIEWER_FONT_STEP = 10
-const PUBLIC_STATE_REFRESH_INTERVAL_MS = 15000
 const PUBLIC_RECOVERY_RETRY_DELAY_MS = 1200
+const PUBLIC_RECOVERY_JITTER_MS = 600
 const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 
 const getInitialViewerFontPercent = () => {
@@ -74,6 +74,7 @@ const ViewerPage = () => {
   const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
   const lineSourceRef = useRef(lineSource)
   const liveTranslationPatchRef = useRef({ streamId: '', revision: 0 })
+  const viewerStateRevisionRef = useRef({ sessionId: '', revision: 0 })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -91,6 +92,26 @@ const ViewerPage = () => {
 
   const applyViewerPayload = useCallback((payload) => {
     const next = normalizeDisplayPayload(payload)
+    const sessionId =
+      typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+    const previousRevision = viewerStateRevisionRef.current
+    if (
+      sessionId &&
+      previousRevision.sessionId === sessionId &&
+      next.viewerRevision > 0 &&
+      next.viewerRevision <= previousRevision.revision
+    ) {
+      return
+    }
+    if (sessionId && next.viewerRevision > 0) {
+      viewerStateRevisionRef.current = {
+        sessionId,
+        revision:
+          previousRevision.sessionId === sessionId
+            ? Math.max(next.viewerRevision, previousRevision.revision)
+            : next.viewerRevision,
+      }
+    }
     setWaitingMessage(
       payload?.source === 'waiting'
         ? payload?.waitingMessage || '本場次尚未開始'
@@ -140,45 +161,6 @@ const ViewerPage = () => {
       return
     }
 
-    let cancelled = false
-    const fetchViewerState = async () => {
-      try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) {
-          const failure = classifyPublicFailure(response, data, '無法載入字幕')
-          if (cancelled) return
-          if (failure.fatal) {
-            setFatalError(failure.message)
-          } else {
-            setConnectionIssue(failure.message)
-          }
-          return
-        }
-        if (!cancelled) {
-          applyViewerPayload(data)
-        }
-      } catch (fetchError) {
-        if (!cancelled) {
-          setConnectionIssue(fetchError.message || '無法載入字幕')
-        }
-      }
-    }
-
-    void fetchViewerState()
-    const intervalId = window.setInterval(() => {
-      void fetchViewerState()
-    }, PUBLIC_STATE_REFRESH_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      clearRecoveryTimer()
-      window.clearInterval(intervalId)
-    }
-  }, [applyViewerPayload, classifyPublicFailure, clearRecoveryTimer, resolvedViewerToken])
-
-  useEffect(() => {
-    if (!resolvedViewerToken) return
-
     const socket = io()
     socketRef.current = socket
     const joinViewerSession = () => {
@@ -193,7 +175,9 @@ const ViewerPage = () => {
 
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const response = await fetch(
+          `/api/viewer/${encodeURIComponent(resolvedViewerToken)}`,
+        )
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入字幕')
@@ -212,21 +196,34 @@ const ViewerPage = () => {
 
     const scheduleRecoveryFetch = () => {
       clearRecoveryTimer()
-      recoveryTimerRef.current = window.setTimeout(() => {
-        recoveryTimerRef.current = null
-        void fetchViewerState()
-      }, PUBLIC_RECOVERY_RETRY_DELAY_MS)
+      recoveryTimerRef.current = window.setTimeout(
+        () => {
+          recoveryTimerRef.current = null
+          void fetchViewerState()
+        },
+        PUBLIC_RECOVERY_RETRY_DELAY_MS +
+          Math.floor(Math.random() * PUBLIC_RECOVERY_JITTER_MS),
+      )
     }
 
     socket.on('connect', () => {
+      clearRecoveryTimer()
+      setConnectionIssue('')
       joinViewerSession()
-      void fetchViewerState()
     })
 
     socket.on('disconnect', () => {
       if (hasLoadedStateRef.current) {
         setConnectionIssue('與伺服器連線中斷，正在重新連線')
       }
+      scheduleRecoveryFetch()
+    })
+
+    socket.on('connect_error', () => {
+      if (hasLoadedStateRef.current) {
+        setConnectionIssue('與伺服器連線不穩，正在重新連線')
+      }
+      scheduleRecoveryFetch()
     })
 
     socket.on('viewer:update', (payload) => {
@@ -277,8 +274,27 @@ const ViewerPage = () => {
       scheduleRecoveryFetch()
     })
 
+    const recoverConnection = () => {
+      if (document.visibilityState === 'hidden') return
+      if (socket.connected) {
+        joinViewerSession()
+        return
+      }
+      socket.connect()
+      scheduleRecoveryFetch()
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') recoverConnection()
+    }
+    window.addEventListener('online', recoverConnection)
+    window.addEventListener('pageshow', recoverConnection)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
     return () => {
       clearRecoveryTimer()
+      window.removeEventListener('online', recoverConnection)
+      window.removeEventListener('pageshow', recoverConnection)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       socketRef.current = null
       socket.disconnect()
     }

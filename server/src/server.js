@@ -104,6 +104,8 @@ const projectorSessionTombstones = new Map();
 const projectorConnections = new Map();
 const projectorPresence = new Map();
 const currentIndexPersistTimers = new Map();
+const viewerStateRevisions = new Map();
+const viewerDemandBroadcastTimers = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -111,7 +113,11 @@ const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
 const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
 const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
-const CURRENT_INDEX_PERSIST_DELAY_MS = 750;
+// Playback position is hot state during a show. Persist only after navigation
+// settles so one-second cue changes do not rewrite the complete application
+// store every second.
+const CURRENT_INDEX_PERSIST_DELAY_MS = 3000;
+const VIEWER_DEMAND_BROADCAST_DELAY_MS = 500;
 const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
 const LIVE_DRAFT_TRANSLATION_ENABLED =
@@ -1693,10 +1699,25 @@ function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
       reason: 'deleted',
     });
     io.to(`viewer:${session.id}`).emit('viewer:expired', viewerPayload);
+    io.to(`prompter:${session.id}`).emit('viewer:expired', viewerPayload);
+    ensureSessionStructure(session).cells.forEach((cell) => {
+      io.to(`viewer:${session.id}:${cell.id}`).emit(
+        'viewer:expired',
+        viewerPayload,
+      );
+      io.to(`prompter:${session.id}:${cell.id}`).emit(
+        'viewer:expired',
+        viewerPayload,
+      );
+    });
     io.to(`projector:${session.id}`).emit('projector:expired', projectorPayload);
     rememberPublicSessionTombstones(session, 'deleted');
     clearProjectorPresence(session.id);
     projectorConnections.delete(session.id);
+    viewerStateRevisions.delete(session.id);
+    const demandTimer = viewerDemandBroadcastTimers.get(session.id);
+    if (demandTimer) clearTimeout(demandTimer);
+    viewerDemandBroadcastTimers.delete(session.id);
     sessions.delete(session.id);
   });
 
@@ -3876,6 +3897,7 @@ function collapseToGlobalSession() {
   }
   clearPublicSessionTombstones(nextSession);
   sessions.clear();
+  viewerStateRevisions.clear();
   sessions.set(DEFAULT_SESSION_ID, ensureSessionStructure(nextSession));
   return sessions.get(DEFAULT_SESSION_ID);
 }
@@ -4038,6 +4060,7 @@ function hydrateApplicationStore(persistedStore) {
   users.clear();
   authSessions.clear();
   sessions.clear();
+  viewerStateRevisions.clear();
 
   persistedStore.users.forEach((user) => {
     if (!user || typeof user !== 'object') return;
@@ -5540,14 +5563,20 @@ ${original}
   return output;
 }
 
+function getLiveTranslationRoom(sessionId, languageCode) {
+  return `viewer-live:${sessionId}:${languageCode}`;
+}
+
 function getLiveTranslationDemand(sessionId) {
   const demand = {};
   if (!sessionId) return demand;
-  io.sockets.sockets.forEach((viewerSocket) => {
-    if (viewerSocket.data?.viewerSessionId !== sessionId) return;
-    const languageCode = viewerSocket.data?.liveTranslationLanguage;
-    if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
-    demand[languageCode] = (demand[languageCode] || 0) + 1;
+  LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
+    const room = io.sockets.adapter.rooms.get(
+      getLiveTranslationRoom(sessionId, languageCode),
+    );
+    if (room?.size) {
+      demand[languageCode] = room.size;
+    }
   });
   return demand;
 }
@@ -7726,7 +7755,22 @@ function getSessionDisplayState(session) {
   };
 }
 
-function getViewerPayload(session, viewerCellId = null) {
+function getViewerStateRevision(sessionId) {
+  if (!sessionId) return 0;
+  if (!viewerStateRevisions.has(sessionId)) {
+    viewerStateRevisions.set(sessionId, Date.now());
+  }
+  return viewerStateRevisions.get(sessionId);
+}
+
+function bumpViewerStateRevision(sessionId) {
+  const previous = getViewerStateRevision(sessionId);
+  const next = Math.max(Date.now(), previous + 1);
+  viewerStateRevisions.set(sessionId, next);
+  return next;
+}
+
+function getViewerPayload(session, viewerCellId = null, options = {}) {
   const {
     normalized,
     activeScriptLine,
@@ -7738,18 +7782,23 @@ function getViewerPayload(session, viewerCellId = null) {
     musicText,
     transcription,
   } = getSessionDisplayState(session);
-  const publicLines = ensureSessionLines(normalized).map((line) =>
-    toPublicLine(line),
-  );
+  const includeLines = options.includeLines !== false;
+  const sourceLines = ensureSessionLines(normalized);
+  const publicLines = includeLines
+    ? sourceLines.map((line) => toPublicLine(line))
+    : null;
   const currentIndex =
-    publicLines.length > 0
-      ? Math.min(Math.max(normalized.currentIndex, 0), publicLines.length - 1)
+    sourceLines.length > 0
+      ? Math.min(Math.max(normalized.currentIndex, 0), sourceLines.length - 1)
       : 0;
   const viewerCell = viewerCellId
     ? normalized.cells.find((cell) => cell.id === viewerCellId) || null
     : getSelectedCell(normalized);
   const isActiveCell = !viewerCell || viewerCell.id === normalized.selectedCellId;
   const viewerToken = viewerCell?.viewerToken || normalized.viewerToken;
+  const viewerRevision = Number.isSafeInteger(options.revision)
+    ? options.revision
+    : getViewerStateRevision(normalized.id);
 
   if (!isActiveCell) {
     return {
@@ -7761,7 +7810,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: null,
       text: '',
@@ -7784,7 +7834,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: null,
       text: '',
@@ -7806,7 +7857,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
@@ -7831,7 +7883,8 @@ function getViewerPayload(session, viewerCellId = null) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: publicLines,
+      lines: includeLines ? publicLines : undefined,
+      viewerRevision,
       currentIndex,
       line: null,
       text: '',
@@ -7852,7 +7905,8 @@ function getViewerPayload(session, viewerCellId = null) {
     status: normalized.status,
     languages: normalized.languages,
     defaultLanguageId: normalized.viewerDefaultLanguageId,
-    lines: publicLines,
+    lines: includeLines ? publicLines : undefined,
+    viewerRevision,
     currentIndex,
     line: toPublicLine(activeScriptLine),
     text:
@@ -8178,6 +8232,20 @@ function broadcastTranscriptionState(sessionId) {
   });
 }
 
+function hasSocketRoomConnections(roomName) {
+  return Boolean(io.sockets.adapter.rooms.get(roomName)?.size);
+}
+
+function scheduleViewerDemandBroadcast(sessionId) {
+  if (!sessionId || viewerDemandBroadcastTimers.has(sessionId)) return;
+  const timer = setTimeout(() => {
+    viewerDemandBroadcastTimers.delete(sessionId);
+    broadcastTranscriptionState(sessionId);
+  }, VIEWER_DEMAND_BROADCAST_DELAY_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  viewerDemandBroadcastTimers.set(sessionId, timer);
+}
+
 function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
   const session = getSession(sessionId);
   if (!session || transcriptionStreams.get(sessionId) !== stream) return null;
@@ -8226,15 +8294,10 @@ function broadcastLiveTranslationState(sessionId, stream, languageCode) {
   // Translation deltas are intentionally sent only to viewers that requested
   // this language. They must never trigger the full viewer/control payload,
   // which includes every script line and can delay microphone audio delivery.
-  io.sockets.sockets.forEach((viewerSocket) => {
-    if (
-      viewerSocket.data?.publicRole === 'viewer' &&
-      viewerSocket.data?.viewerSessionId === sessionId &&
-      viewerSocket.data?.liveTranslationLanguage === languageCode
-    ) {
-      viewerSocket.emit('viewer:translation-patch', payload);
-    }
-  });
+  io.to(getLiveTranslationRoom(sessionId, languageCode)).emit(
+    'viewer:translation-patch',
+    payload,
+  );
 
   // Use the same small patch for the projector so translations cannot replace
   // unrelated display state while they are streaming.
@@ -8244,18 +8307,50 @@ function broadcastLiveTranslationState(sessionId, stream, languageCode) {
 function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
+  const revision = bumpViewerStateRevision(sessionId);
 
   session.cells.forEach((cell) => {
-    io.to(`viewer:${sessionId}:${cell.id}`).emit(
-      'viewer:update',
-      getViewerPayload(session, cell.id),
-    );
+    const viewerRoom = `viewer:${sessionId}:${cell.id}`;
+    if (hasSocketRoomConnections(viewerRoom)) {
+      io.to(viewerRoom).emit(
+        'viewer:update',
+        getViewerPayload(session, cell.id, {
+          includeLines: false,
+          revision,
+        }),
+      );
+    }
+    const prompterRoom = `prompter:${sessionId}:${cell.id}`;
+    if (hasSocketRoomConnections(prompterRoom)) {
+      io.to(prompterRoom).emit(
+        'prompter:update',
+        getViewerPayload(session, cell.id, {
+          includeLines: true,
+          revision,
+        }),
+      );
+    }
   });
-  io.to(`viewer:${sessionId}`).emit('viewer:update', getViewerPayload(session));
-  io.to(`projector:${sessionId}`).emit(
-    'projector:update',
-    getProjectorPayload(session),
-  );
+  const viewerRoom = `viewer:${sessionId}`;
+  if (hasSocketRoomConnections(viewerRoom)) {
+    io.to(viewerRoom).emit(
+      'viewer:update',
+      getViewerPayload(session, null, { includeLines: false, revision }),
+    );
+  }
+  const prompterRoom = `prompter:${sessionId}`;
+  if (hasSocketRoomConnections(prompterRoom)) {
+    io.to(prompterRoom).emit(
+      'prompter:update',
+      getViewerPayload(session, null, { includeLines: true, revision }),
+    );
+  }
+  if (hasSocketRoomConnections(`projector:${sessionId}`)) {
+    io.to(`projector:${sessionId}`).emit(
+      'projector:update',
+      getProjectorPayload(session),
+    );
+  }
 }
 
 function applyCurrentIndexChange(session, nextIndex, options = {}) {
@@ -10333,7 +10428,11 @@ app.get('/api/viewer/:viewerToken', (req, res) => {
       .status(410)
       .json(getPublicSessionUnavailablePayload('viewer', { session: null, token: viewerToken }));
   }
-  res.json(getViewerPayload(target.session, target.cell?.id));
+  res.json(
+    getViewerPayload(target.session, target.cell?.id, {
+      includeLines: req.query?.includeLines === '1',
+    }),
+  );
 });
 
 app.get('/api/projector/:projectorToken', (req, res) => {
@@ -11750,8 +11849,8 @@ io.on('connection', (socket) => {
     return getOwnedSession(sessionId, socketUser.id);
   };
 
-  socket.on('join', ({ sessionId, role, viewerToken, projectorToken }) => {
-    if (role === 'viewer') {
+  socket.on('join', ({ sessionId, role, viewerToken, projectorToken } = {}) => {
+    if (role === 'viewer' || role === 'prompter') {
       const viewerTarget = viewerToken ? getViewerTargetByToken(viewerToken) : null;
       const viewerSession = viewerTarget?.session || getSession(sessionId);
       if (!viewerSession) {
@@ -11765,15 +11864,62 @@ io.on('connection', (socket) => {
         return;
       }
       const viewerCell = viewerTarget?.cell || getSelectedCell(viewerSession);
+      const roomPrefix = role === 'prompter' ? 'prompter' : 'viewer';
+      const previousViewerSessionId =
+        typeof socket.data.viewerSessionId === 'string'
+          ? socket.data.viewerSessionId
+          : viewerSession.id;
+      const previousViewerRoom =
+        typeof socket.data.viewerRoom === 'string'
+          ? socket.data.viewerRoom
+          : '';
+      const nextViewerRoom = viewerCell
+        ? `${roomPrefix}:${viewerSession.id}:${viewerCell.id}`
+        : `${roomPrefix}:${viewerSession.id}`;
+      if (previousViewerRoom && previousViewerRoom !== nextViewerRoom) {
+        socket.leave(previousViewerRoom);
+      }
       if (viewerCell) {
-        socket.join(`viewer:${viewerSession.id}:${viewerCell.id}`);
+        socket.join(nextViewerRoom);
         socket.data.viewerCellId = viewerCell.id;
       } else {
-        socket.join(`viewer:${viewerSession.id}`);
+        socket.join(nextViewerRoom);
+        socket.data.viewerCellId = null;
       }
-      socket.data.publicRole = 'viewer';
+      socket.data.viewerRoom = nextViewerRoom;
+      const previousLiveTranslationLanguage =
+        typeof socket.data.liveTranslationLanguage === 'string'
+          ? socket.data.liveTranslationLanguage
+          : '';
+      if (
+        LIVE_TRANSLATION_LANGUAGE_CODES.has(previousLiveTranslationLanguage)
+      ) {
+        socket.leave(
+          getLiveTranslationRoom(
+            previousViewerSessionId,
+            previousLiveTranslationLanguage,
+          ),
+        );
+        scheduleViewerDemandBroadcast(previousViewerSessionId);
+      }
+      socket.data.liveTranslationLanguage = 'source';
+      socket.data.publicRole = role;
       socket.data.viewerSessionId = viewerSession.id;
-      socket.emit('viewer:update', getViewerPayload(viewerSession, viewerCell?.id));
+      if (role === 'prompter') {
+        socket.emit(
+          'prompter:update',
+          getViewerPayload(viewerSession, viewerCell?.id, {
+            includeLines: true,
+          }),
+        );
+      } else {
+        socket.emit(
+          'viewer:update',
+          getViewerPayload(viewerSession, viewerCell?.id, {
+            includeLines: false,
+          }),
+        );
+      }
       return;
     }
 
@@ -11848,10 +11994,31 @@ io.on('connection', (socket) => {
     if (socket.data.liveTranslationLanguage === nextLiveTranslationLanguage) {
       return;
     }
+    const previousLiveTranslationLanguage =
+      typeof socket.data.liveTranslationLanguage === 'string'
+        ? socket.data.liveTranslationLanguage
+        : 'source';
+    if (
+      LIVE_TRANSLATION_LANGUAGE_CODES.has(previousLiveTranslationLanguage)
+    ) {
+      socket.leave(
+        getLiveTranslationRoom(sessionId, previousLiveTranslationLanguage),
+      );
+    }
+    if (
+      LIVE_TRANSLATION_LANGUAGE_CODES.has(nextLiveTranslationLanguage)
+    ) {
+      socket.join(
+        getLiveTranslationRoom(sessionId, nextLiveTranslationLanguage),
+      );
+    }
     socket.data.liveTranslationLanguage = nextLiveTranslationLanguage;
 
     const stream = transcriptionStreams.get(sessionId);
-    if (stream && LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)) {
+    if (
+      stream &&
+      LIVE_TRANSLATION_LANGUAGE_CODES.has(nextLiveTranslationLanguage)
+    ) {
       const recentItemIds = stream.completedFragments
         .slice(-LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT)
         .map((fragment) => fragment.itemId);
@@ -11861,13 +12028,18 @@ io.on('connection', (socket) => {
         recentItemIds,
         'history',
       );
+      stream.draftByItemId.forEach((draftText, itemId) => {
+        scheduleDraftTranslations(stream, sessionId, itemId, draftText);
+      });
     }
-    broadcastTranscriptionState(sessionId);
+    scheduleViewerDemandBroadcast(sessionId);
     const viewerSession = getSession(sessionId);
     if (viewerSession) {
       socket.emit(
         'viewer:update',
-        getViewerPayload(viewerSession, socket.data.viewerCellId || null),
+        getViewerPayload(viewerSession, socket.data.viewerCellId || null, {
+          includeLines: false,
+        }),
       );
     }
   });
@@ -13045,8 +13217,8 @@ io.on('connection', (socket) => {
       typeof socket.data?.viewerSessionId === 'string'
         ? socket.data.viewerSessionId
         : '';
-    if (viewerSessionId) {
-      setImmediate(() => broadcastControlState(viewerSessionId));
+    if (viewerSessionId && socket.data?.publicRole === 'viewer') {
+      setImmediate(() => scheduleViewerDemandBroadcast(viewerSessionId));
     }
     const projectorSessionId =
       typeof socket.data?.projectorSessionId === 'string'

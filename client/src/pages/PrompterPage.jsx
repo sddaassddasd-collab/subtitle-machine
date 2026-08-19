@@ -60,6 +60,7 @@ const PrompterPage = () => {
   const scrollRef = useRef(null)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
+  const viewerStateRevisionRef = useRef({ sessionId: '', revision: 0 })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -77,6 +78,26 @@ const PrompterPage = () => {
 
   const applyViewerPayload = useCallback((payload) => {
     const next = normalizeDisplayPayload(payload)
+    const sessionId =
+      typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+    const previousRevision = viewerStateRevisionRef.current
+    if (
+      sessionId &&
+      previousRevision.sessionId === sessionId &&
+      next.viewerRevision > 0 &&
+      next.viewerRevision <= previousRevision.revision
+    ) {
+      return
+    }
+    if (sessionId && next.viewerRevision > 0) {
+      viewerStateRevisionRef.current = {
+        sessionId,
+        revision:
+          previousRevision.sessionId === sessionId
+            ? Math.max(next.viewerRevision, previousRevision.revision)
+            : next.viewerRevision,
+      }
+    }
     setDisplayEnabled(next.enabled)
     setLines(next.lines)
     setCurrentIndex(next.currentIndex)
@@ -121,7 +142,9 @@ const PrompterPage = () => {
     let cancelled = false
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const response = await fetch(
+          `/api/viewer/${encodeURIComponent(resolvedViewerToken)}?includeLines=1`,
+        )
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入提詞')
@@ -164,12 +187,14 @@ const PrompterPage = () => {
 
     const socket = io()
     const joinViewerSession = () => {
-      socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
+      socket.emit('join', { viewerToken: resolvedViewerToken, role: 'prompter' })
     }
 
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
+        const response = await fetch(
+          `/api/viewer/${encodeURIComponent(resolvedViewerToken)}?includeLines=1`,
+        )
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入提詞')
@@ -195,8 +220,8 @@ const PrompterPage = () => {
     }
 
     socket.on('connect', () => {
+      setConnectionIssue('')
       joinViewerSession()
-      void fetchViewerState()
     })
 
     socket.on('disconnect', () => {
@@ -205,7 +230,7 @@ const PrompterPage = () => {
       }
     })
 
-    socket.on('viewer:update', (payload) => {
+    socket.on('prompter:update', (payload) => {
       applyViewerPayload(payload)
     })
 
