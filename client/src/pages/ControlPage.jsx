@@ -2403,7 +2403,6 @@ const ControlPage = () => {
               dualChannelEnabled: transcription.provider === 'openai',
               transcriptionContext: transcription.transcriptionContext || '',
               speakerRecognitionEnabled:
-                transcription.provider === 'openai' &&
                 transcription.speakerRecognitionEnabled === true,
             },
             (error, response) => {
@@ -4695,7 +4694,6 @@ const ControlPage = () => {
                         : DEFAULT_TRANSCRIPTION_MODEL,
                     dualChannelEnabled: provider === 'openai',
                     speakerRecognitionEnabled:
-                      provider === 'openai' &&
                       prev.speakerRecognitionEnabled === true,
                   }))
                 }}
@@ -4738,9 +4736,7 @@ const ControlPage = () => {
                 <input
                   type="checkbox"
                   checked={speakerRecognitionEnabled}
-                  disabled={
-                    transcriptionBusy || transcription.provider !== 'openai'
-                  }
+                  disabled={transcriptionBusy}
                   onChange={(event) => {
                     setTranscription((prev) => ({
                       ...prev,
@@ -4748,7 +4744,7 @@ const ControlPage = () => {
                     }))
                   }}
                 />
-                辨認講者（僅 OpenAI）
+                辨認講者
               </label>
               <div className="transcription-actions">
                 <button

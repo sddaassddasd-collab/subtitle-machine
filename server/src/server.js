@@ -5152,6 +5152,13 @@ function shouldBreakBetweenFragments({
   const right = sanitizeTranscriptionText(nextFragment?.text || '');
   if (!left) return false;
   if (!right) return true;
+  if (
+    Number.isInteger(previousFragment?.speakerId) &&
+    Number.isInteger(nextFragment?.speakerId) &&
+    previousFragment.speakerId !== nextFragment.speakerId
+  ) {
+    return true;
+  }
 
   const mergedText = joinTranscriptionTexts(left, right);
   const leftLength = getTranscriptionTextLength(left);
@@ -6676,7 +6683,6 @@ function ensureTranscriptionState(session) {
       normalized.language || session.transcriptionLanguage,
     );
     normalized.dualChannelEnabled = false;
-    normalized.speakerRecognitionEnabled = false;
   } else if (
     typeof normalized.model !== 'string' ||
     !VALID_TRANSCRIPTION_MODELS.has(normalized.model)
@@ -6695,9 +6701,9 @@ function ensureTranscriptionState(session) {
   normalized.transcriptionContext = normalizeTranscriptionContextValue(
     normalized.transcriptionContext,
   );
-  normalized.speakerRecognitionEnabled =
-    normalized.provider === 'openai' &&
-    normalizeSpeakerRecognitionEnabled(normalized.speakerRecognitionEnabled);
+  normalized.speakerRecognitionEnabled = normalizeSpeakerRecognitionEnabled(
+    normalized.speakerRecognitionEnabled,
+  );
   session.transcription = normalized;
   return session.transcription;
 }
@@ -10713,16 +10719,63 @@ app.post('/api/session/:sessionId/display', requireAuth, (req, res) => {
   res.json(getControlPayload(session));
 });
 
+function buildDeepgramSpeakerSegments(alternative, language, fallbackText) {
+  const words = Array.isArray(alternative?.words) ? alternative.words : [];
+  const firstKnownSpeaker = words.find((word) =>
+    Number.isInteger(Number(word?.speaker)),
+  )?.speaker;
+  let previousSpeaker = Number.isInteger(Number(firstKnownSpeaker))
+    ? Number(firstKnownSpeaker)
+    : null;
+  const groups = [];
+
+  words.forEach((word) => {
+    const rawText = word?.punctuated_word || word?.word || '';
+    const wordText = normalizeTranscriptionOutputText(rawText, language);
+    if (!wordText) return;
+    const parsedSpeaker = Number(word?.speaker);
+    const speaker = Number.isInteger(parsedSpeaker)
+      ? parsedSpeaker
+      : previousSpeaker;
+    const current = groups[groups.length - 1];
+    if (!current || current.speaker !== speaker) {
+      groups.push({ speaker, text: wordText });
+    } else {
+      current.text = joinTranscriptionTexts(current.text, wordText);
+    }
+    if (Number.isInteger(speaker)) previousSpeaker = speaker;
+  });
+
+  const normalizedGroups = groups
+    .map((group) => ({
+      text: normalizeTranscriptionOutputText(group.text, language),
+      speakerId: Number.isInteger(group.speaker) ? group.speaker + 1 : null,
+    }))
+    .filter((group) => group.text);
+
+  if (normalizedGroups.length > 0) return normalizedGroups;
+  const normalizedFallback = normalizeTranscriptionOutputText(
+    fallbackText || '',
+    language,
+  );
+  return normalizedFallback
+    ? [{ text: normalizedFallback, speakerId: null }]
+    : [];
+}
+
 function startDeepgramTranscription({
   sessionId,
   socketId,
   apiKey,
   correctionApiKey,
   language,
+  speakerRecognitionEnabled,
   transcriptionContext,
   startAcknowledge,
 }) {
   const selectedLanguage = normalizeTranscriptionSourceLanguage(language);
+  const selectedSpeakerRecognitionEnabled =
+    normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled);
   const selectedContext = normalizeTranscriptionContextValue(
     transcriptionContext,
   );
@@ -10739,6 +10792,9 @@ function startDeepgramTranscription({
     punctuate: 'true',
     smart_format: 'true',
   });
+  if (selectedSpeakerRecognitionEnabled) {
+    query.set('diarize_model', 'latest');
+  }
   const socket = new WebSocket(
     `wss://api.deepgram.com/v1/listen?${query.toString()}`,
     { headers: { Authorization: `Token ${apiKey}` } },
@@ -10762,7 +10818,7 @@ function startDeepgramTranscription({
     transcriptionContext: selectedContext,
     semanticSegmentationEnabled: true,
     dualChannelEnabled: false,
-    speakerRecognitionEnabled: false,
+    speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
     draftByItemId: new Map(),
     activeDraftItemId: null,
     completedFragments: [],
@@ -10836,7 +10892,7 @@ function startDeepgramTranscription({
       transcriptionContext: selectedContext,
       semanticSegmentationEnabled: true,
       dualChannelEnabled: false,
-      speakerRecognitionEnabled: false,
+      speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
       error: '',
       lastSpeechStartedAt: null,
       lastInterimAt: null,
@@ -10884,30 +10940,63 @@ function startDeepgramTranscription({
       const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
       takeDraftLine(stream, itemId);
       if (transcript) {
-        const fragment = upsertCompletedFragment(stream, {
-          itemId,
-          text: transcript,
-          boundaryMeta: {
-            reason: event.speech_final === true ? 'semantic' : 'stream',
-            pauseMs: event.speech_final === true ? DEEPGRAM_ENDPOINTING_MS : 0,
-          },
-        });
-        if (fragment) {
-          fragment.provisionalTranslations = provisionalTranslations;
-        }
+        const speakerSegments = selectedSpeakerRecognitionEnabled
+          ? buildDeepgramSpeakerSegments(
+              alternative,
+              selectedLanguage,
+              transcript,
+            )
+          : [{ text: transcript, speakerId: null }];
+        const fragments = speakerSegments
+          .map((segment, index) => {
+            const segmentItemId =
+              speakerSegments.length === 1 && !Number.isInteger(segment.speakerId)
+                ? itemId
+                : `${itemId}-speaker-${segment.speakerId || 0}-${index}`;
+            const isLastSegment = index === speakerSegments.length - 1;
+            const fragment = upsertCompletedFragment(stream, {
+              itemId: segmentItemId,
+              text: segment.text,
+              boundaryMeta: {
+                reason:
+                  isLastSegment && event.speech_final === true
+                    ? 'semantic'
+                    : 'stream',
+                pauseMs:
+                  isLastSegment && event.speech_final === true
+                    ? DEEPGRAM_ENDPOINTING_MS
+                    : 0,
+              },
+            });
+            if (!fragment) return null;
+            fragment.speakerId = Number.isInteger(segment.speakerId)
+              ? segment.speakerId
+              : null;
+            if (speakerSegments.length === 1) {
+              fragment.provisionalTranslations = provisionalTranslations;
+            }
+            return fragment;
+          })
+          .filter(Boolean);
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
-        if (correctionClient) {
-          queueTranscriptionCorrection({
+        fragments.forEach((fragment) => {
+          if (correctionClient) {
+            queueTranscriptionCorrection({
+              stream,
+              isCurrent,
+              client: correctionClient,
+              sessionId,
+              itemId: fragment.itemId,
+              language: selectedLanguage,
+              accurateSegment: null,
+            });
+          }
+          queueRequestedLiveTranslationsAfterCorrection(
             stream,
-            isCurrent,
-            client: correctionClient,
             sessionId,
-            itemId,
-            language: selectedLanguage,
-            accurateSegment: null,
-          });
-        }
-        queueRequestedLiveTranslationsAfterCorrection(stream, sessionId, itemId);
+            fragment.itemId,
+          );
+        });
       }
     } else if (transcript) {
       setDraftLine(stream, itemId, transcript);
@@ -11589,9 +11678,9 @@ io.on('connection', (socket) => {
         dualChannelEnabled:
           selectedProvider === 'openai' &&
           normalizeDualChannelEnabled(dualChannelEnabled),
-        speakerRecognitionEnabled:
-          selectedProvider === 'openai' &&
-          normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled),
+        speakerRecognitionEnabled: normalizeSpeakerRecognitionEnabled(
+          speakerRecognitionEnabled,
+        ),
         error: '',
         lastSpeechStartedAt: null,
         lastInterimAt: null,
