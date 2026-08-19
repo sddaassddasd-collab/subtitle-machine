@@ -134,6 +134,7 @@ const LIVE_DRAFT_TRANSLATION_MIN_NEW_CHARS = Number.isFinite(
   : 3;
 const LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS = 220;
 const LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS = 2;
+const LIVE_DRAFT_TRANSLATION_MAX_CONCURRENCY = 2;
 const LIVE_TRANSLATION_RECENT_FRAGMENT_LIMIT = 10;
 const LIVE_TRANSLATION_LANGUAGES = Object.freeze([
   {
@@ -5330,23 +5331,19 @@ function buildTranscriptionDisplayEntries(stream) {
         : [];
       const translations = {};
       LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
-        if (
-          fragments.length > 0 &&
-          fragments.every((fragment) =>
-            sanitizeTranscriptionText(
-              fragment?.translations?.[languageCode] ||
-                fragment?.provisionalTranslations?.[languageCode] ||
-                '',
-            ),
-          )
-        ) {
+        const translatedPrefix = [];
+        for (const fragment of fragments) {
+          const translated = sanitizeTranscriptionText(
+            fragment?.translations?.[languageCode] ||
+              fragment?.provisionalTranslations?.[languageCode] ||
+              '',
+          );
+          if (!translated) break;
+          translatedPrefix.push({ text: translated });
+        }
+        if (translatedPrefix.length > 0) {
           translations[languageCode] = composeFragmentTexts(
-            fragments.map((fragment) => ({
-              text:
-                fragment.translations[languageCode] ||
-                fragment.provisionalTranslations?.[languageCode] ||
-                '',
-            })),
+            translatedPrefix,
           );
         }
       });
@@ -5642,14 +5639,12 @@ async function streamDraftTranslation({
 function getDraftTranslationWorker(stream, languageCode) {
   if (!stream.draftTranslationWorkers.has(languageCode)) {
     stream.draftTranslationWorkers.set(languageCode, {
-      active: false,
       pending: null,
       timer: null,
       lastStartedAt: 0,
       lastRequestedTextByItemId: new Map(),
-      abortController: null,
-      currentItemId: null,
-      activeJob: null,
+      activeJobs: new Map(),
+      visibleVersionByItemId: new Map(),
     });
   }
   return stream.draftTranslationWorkers.get(languageCode);
@@ -5664,8 +5659,9 @@ function isCurrentDraftTranslationJob(stream, sessionId, job) {
     return false;
   }
   return (
-    getDraftTranslationWorker(stream, job.languageCode).activeJob === job &&
-    stream.draftByItemId.has(job.itemId)
+    getDraftTranslationWorker(stream, job.languageCode).activeJobs.has(job) &&
+    (stream.draftByItemId.has(job.itemId) ||
+      stream.fragmentByItemId.has(job.itemId))
   );
 }
 
@@ -5681,9 +5677,13 @@ function publishStableDraftTranslation({
     return false;
   }
 
+  const worker = getDraftTranslationWorker(stream, job.languageCode);
+  const visibleVersion = worker.visibleVersionByItemId.get(job.itemId) || 0;
+  if (job.version < visibleVersion) return false;
+  const completedFragment = stream.fragmentByItemId.get(job.itemId) || null;
   const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
     sourceText: job.text,
-    translations: {},
+    translations: completedFragment?.provisionalTranslations || {},
   };
   const published = sanitizeTranscriptionText(
     draftState.translations?.[job.languageCode] || '',
@@ -5694,27 +5694,50 @@ function publishStableDraftTranslation({
   const publishIntervalElapsed =
     now - (job.lastPublishedAt || job.startedAt) >=
     LIVE_DRAFT_TRANSLATION_PUBLISH_INTERVAL_MS;
+  const switchesToNewerSource = job.version > visibleVersion;
+
+  // Keep the previous readable translation visible until a newer source
+  // version has produced at least one useful token, then switch atomically.
+  if (
+    switchesToNewerSource &&
+    !force &&
+    candidate.length < LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS
+  ) {
+    return false;
+  }
 
   // Stream only compatible extensions. If a newer source requires a different
   // word order, keep that revision buffered and replace the visible draft once
   // when this request completes instead of leaving an obsolete short caption.
   if (
-    (!isCompatibleExtension && !force) ||
-    (candidate.length < published.length && !force) ||
-    (!force &&
-      (addedChars < LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS ||
-        !publishIntervalElapsed))
+    !switchesToNewerSource &&
+    ((!isCompatibleExtension && !force) ||
+      (candidate.length < published.length && !force) ||
+      (!force &&
+        (addedChars < LIVE_DRAFT_TRANSLATION_PUBLISH_MIN_NEW_CHARS ||
+          !publishIntervalElapsed)))
   ) {
     return false;
   }
-  if (candidate === published) return false;
+  if (candidate === published) {
+    if (switchesToNewerSource) {
+      worker.visibleVersionByItemId.set(job.itemId, job.version);
+    }
+    return false;
+  }
 
-  draftState.sourceText = job.text;
-  draftState.translations = {
+  const nextTranslations = {
     ...draftState.translations,
     [job.languageCode]: candidate,
   };
-  stream.draftTranslationsByItemId.set(job.itemId, draftState);
+  if (completedFragment) {
+    completedFragment.provisionalTranslations = nextTranslations;
+  } else {
+    draftState.sourceText = job.text;
+    draftState.translations = nextTranslations;
+    stream.draftTranslationsByItemId.set(job.itemId, draftState);
+  }
+  worker.visibleVersionByItemId.set(job.itemId, job.version);
   job.lastPublishedAt = now;
   syncTranscriptionStateFromStream(sessionId, stream);
   return true;
@@ -5723,7 +5746,12 @@ function publishStableDraftTranslation({
 function runDraftTranslationWorker(stream, sessionId, languageCode) {
   if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
   const worker = getDraftTranslationWorker(stream, languageCode);
-  if (worker.active || !worker.pending) return;
+  if (
+    worker.activeJobs.size >= LIVE_DRAFT_TRANSLATION_MAX_CONCURRENCY ||
+    !worker.pending
+  ) {
+    return;
+  }
   const delay = Math.max(
     0,
     LIVE_DRAFT_TRANSLATION_INTERVAL_MS -
@@ -5743,11 +5771,8 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   job.startedAt = Date.now();
   job.lastPublishedAt = 0;
   worker.pending = null;
-  worker.active = true;
-  worker.activeJob = job;
   const abortController = new AbortController();
-  worker.abortController = abortController;
-  worker.currentItemId = job.itemId;
+  worker.activeJobs.set(job, abortController);
   worker.lastStartedAt = Date.now();
   worker.lastRequestedTextByItemId.set(job.itemId, job.text);
   stream.liveTranslationStatus.set(languageCode, {
@@ -5766,14 +5791,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
     transcriptionContext: stream.transcriptionContext,
     signal: abortController.signal,
     onDelta: (translated) => {
-      const newerPendingText =
-        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
-      if (
-        newerPendingText &&
-        newerPendingText !== job.text
-      ) {
-        return;
-      }
       publishStableDraftTranslation({
         stream,
         sessionId,
@@ -5784,14 +5801,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   })
     .then((translated) => {
       if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
-        return;
-      }
-      const newerPendingText =
-        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
-      if (
-        newerPendingText &&
-        newerPendingText !== job.text
-      ) {
         return;
       }
       publishStableDraftTranslation({
@@ -5820,16 +5829,21 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
       broadcastViewerState(sessionId);
     })
     .finally(() => {
-      if (worker.abortController === abortController) {
-        worker.abortController = null;
+      worker.activeJobs.delete(job);
+      const itemStillActive = Array.from(worker.activeJobs.keys()).some(
+        (activeJob) => activeJob.itemId === job.itemId,
+      );
+      if (
+        stream.fragmentByItemId.has(job.itemId) &&
+        worker.pending?.itemId !== job.itemId &&
+        !itemStillActive
+      ) {
+        worker.lastRequestedTextByItemId.delete(job.itemId);
+        worker.visibleVersionByItemId.delete(job.itemId);
+        stream.draftTranslationVersions.delete(
+          getDraftTranslationVersionKey(job.itemId, languageCode),
+        );
       }
-      if (worker.currentItemId === job.itemId) {
-        worker.currentItemId = null;
-      }
-      if (worker.activeJob === job) {
-        worker.activeJob = null;
-      }
-      worker.active = false;
       if (worker.pending) {
         runDraftTranslationWorker(stream, sessionId, languageCode);
       }
@@ -5905,10 +5919,20 @@ function finalizeDraftTranslations(stream, itemId) {
     if (worker.pending?.itemId === itemId) {
       worker.pending = null;
     }
-    if (worker.currentItemId === itemId && worker.abortController) {
-      worker.abortController.abort();
-    }
+    worker.activeJobs.forEach((abortController, job) => {
+      if (job.itemId === itemId) abortController.abort();
+    });
+    worker.visibleVersionByItemId.delete(itemId);
   });
+  stream.draftTranslationsByItemId.delete(itemId);
+  return draftState?.translations && typeof draftState.translations === 'object'
+    ? { ...draftState.translations }
+    : {};
+}
+
+function promoteDeepgramDraftTranslations(stream, itemId) {
+  if (!stream || !itemId) return {};
+  const draftState = stream.draftTranslationsByItemId.get(itemId) || null;
   stream.draftTranslationsByItemId.delete(itemId);
   return draftState?.translations && typeof draftState.translations === 'object'
     ? { ...draftState.translations }
@@ -6857,7 +6881,8 @@ function stopTranscriptionStream(sessionId, options = {}) {
     stream.draftTranslationWorkers.forEach((worker) => {
       if (worker?.timer) clearTimeout(worker.timer);
       if (worker) {
-        if (worker.abortController) worker.abortController.abort();
+        worker.activeJobs?.forEach((abortController) => abortController.abort());
+        worker.activeJobs?.clear();
         worker.timer = null;
         worker.pending = null;
       }
@@ -11088,7 +11113,10 @@ function startDeepgramTranscription({
     if (event.is_final === true) {
       const provisionalSpeakerId =
         stream.draftSpeakerByItemId.get(itemId)?.speakerId ?? null;
-      const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
+      const provisionalTranslations = promoteDeepgramDraftTranslations(
+        stream,
+        itemId,
+      );
       takeDraftLine(stream, itemId);
       if (transcript) {
         const fragment = upsertCompletedFragment(stream, {
@@ -11103,10 +11131,19 @@ function startDeepgramTranscription({
           fragment.speakerId = selectedSpeakerRecognitionEnabled
             ? getDeepgramDominantSpeakerId(alternative) ?? provisionalSpeakerId
             : null;
-          fragment.provisionalTranslations = provisionalTranslations;
+          fragment.provisionalTranslations = {
+            ...(fragment.provisionalTranslations || {}),
+            ...provisionalTranslations,
+          };
         }
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
         if (fragment) {
+          queueRequestedLiveTranslations(
+            stream,
+            sessionId,
+            [fragment.itemId],
+            'live',
+          );
           if (correctionClient) {
             queueTranscriptionCorrection({
               stream,
@@ -11649,11 +11686,15 @@ io.on('connection', (socket) => {
       transcriptionStreams.get(sessionId)?.language ||
         liveSession?.transcriptionLanguage,
     );
-    socket.data.liveTranslationLanguage =
+    const nextLiveTranslationLanguage =
       LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode) &&
       normalizedLanguageCode.toLowerCase() !== currentSourceLanguage.toLowerCase()
         ? normalizedLanguageCode
         : 'source';
+    if (socket.data.liveTranslationLanguage === nextLiveTranslationLanguage) {
+      return;
+    }
+    socket.data.liveTranslationLanguage = nextLiveTranslationLanguage;
 
     const stream = transcriptionStreams.get(sessionId);
     if (stream && LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)) {
@@ -11667,7 +11708,7 @@ io.on('connection', (socket) => {
         'history',
       );
     }
-    broadcastControlState(sessionId);
+    broadcastTranscriptionState(sessionId);
     const viewerSession = getSession(sessionId);
     if (viewerSession) {
       socket.emit(
