@@ -187,6 +187,42 @@ export const normalizeDisplayPayload = (payload) => {
   }
 }
 
+export const normalizeLiveTranslationPatch = (payload) => {
+  const liveEntries = Array.isArray(payload?.liveEntries)
+    ? payload.liveEntries
+        .map((entry) => ({
+          id: typeof entry?.id === 'string' ? entry.id : '',
+          text: typeof entry?.text === 'string' ? entry.text.trim() : '',
+          translations:
+            entry?.translations && typeof entry.translations === 'object'
+              ? entry.translations
+              : {},
+          speakerId:
+            Number.isInteger(entry?.speakerId) && entry.speakerId > 0
+              ? entry.speakerId
+              : null,
+          isFinal: entry?.isFinal !== false,
+        }))
+        .filter((entry) => entry.text)
+    : []
+  const liveLines = Array.isArray(payload?.liveLines)
+    ? payload.liveLines
+        .filter((line) => typeof line === 'string')
+        .map((line) => line.trim())
+        .filter(Boolean)
+    : liveEntries.map((entry) => entry.text)
+
+  return {
+    streamId: typeof payload?.streamId === 'string' ? payload.streamId : '',
+    revision: normalizeInt(payload?.revision, 0, 0, Number.MAX_SAFE_INTEGER),
+    languageCode:
+      typeof payload?.languageCode === 'string' ? payload.languageCode : '',
+    liveEntries,
+    liveLines,
+    transcriptionIsFinal: payload?.transcriptionIsFinal !== false,
+  }
+}
+
 export const resolveAvailableLanguageId = (languages, preferredLanguageId) => {
   const list = Array.isArray(languages) ? languages : []
   if (

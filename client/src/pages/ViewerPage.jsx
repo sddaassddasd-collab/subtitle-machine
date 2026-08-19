@@ -3,6 +3,7 @@ import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import {
   normalizeDisplayPayload,
+  normalizeLiveTranslationPatch,
   resolveAvailableLanguageId,
   resolveLanguageDisplayList,
   resolveLineText,
@@ -72,6 +73,7 @@ const ViewerPage = () => {
   const recoveryTimerRef = useRef(null)
   const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
   const lineSourceRef = useRef(lineSource)
+  const liveTranslationPatchRef = useRef({ streamId: '', revision: 0 })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -229,6 +231,31 @@ const ViewerPage = () => {
 
     socket.on('viewer:update', (payload) => {
       applyViewerPayload(payload)
+    })
+
+    socket.on('viewer:translation-patch', (payload) => {
+      const patch = normalizeLiveTranslationPatch(payload)
+      if (
+        !patch.streamId ||
+        patch.languageCode !== selectedLiveLanguageRef.current ||
+        lineSourceRef.current !== 'transcription'
+      ) {
+        return
+      }
+      const previous = liveTranslationPatchRef.current
+      if (
+        previous.streamId === patch.streamId &&
+        patch.revision <= previous.revision
+      ) {
+        return
+      }
+      liveTranslationPatchRef.current = {
+        streamId: patch.streamId,
+        revision: patch.revision,
+      }
+      setLiveEntries(patch.liveEntries)
+      setLiveLines(patch.liveLines)
+      setTranscriptionIsFinal(patch.transcriptionIsFinal)
     })
 
     socket.on('viewer:expired', (payload) => {

@@ -5739,7 +5739,7 @@ function publishStableDraftTranslation({
   }
   worker.visibleVersionByItemId.set(job.itemId, job.version);
   job.lastPublishedAt = now;
-  syncTranscriptionStateFromStream(sessionId, stream);
+  broadcastLiveTranslationState(sessionId, stream, job.languageCode);
   return true;
 }
 
@@ -5780,8 +5780,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
     error: '',
     updatedAt: Date.now(),
   });
-  broadcastTranscriptionState(sessionId);
-  broadcastViewerState(sessionId);
 
   streamDraftTranslation({
     client: stream.translationClient,
@@ -5815,8 +5813,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
         error: '',
         updatedAt: Date.now(),
       });
-      broadcastTranscriptionState(sessionId);
-      broadcastViewerState(sessionId);
     })
     .catch((error) => {
       if (!isCurrentDraftTranslationJob(stream, sessionId, job)) return;
@@ -5826,7 +5822,6 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
         updatedAt: Date.now(),
       });
       broadcastTranscriptionState(sessionId);
-      broadcastViewerState(sessionId);
     })
     .finally(() => {
       worker.activeJobs.delete(job);
@@ -5964,8 +5959,6 @@ function runFinalTranslationWorker(stream, sessionId, languageCode) {
     error: '',
     updatedAt: Date.now(),
   });
-  broadcastViewerState(sessionId);
-  broadcastTranscriptionState(sessionId);
 
   translateLiveTranscriptionLine({
     client: stream.translationClient,
@@ -5989,8 +5982,8 @@ function runFinalTranslationWorker(stream, sessionId, languageCode) {
         error: '',
         updatedAt: Date.now(),
       });
-      syncTranscriptionStateFromStream(sessionId, stream);
       broadcastTranscriptionState(sessionId);
+      broadcastLiveTranslationState(sessionId, stream, languageCode);
     })
     .catch((error) => {
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return;
@@ -5999,7 +5992,6 @@ function runFinalTranslationWorker(stream, sessionId, languageCode) {
         error: sanitizeLineText(error?.message || '') || '翻譯失敗',
         updatedAt: Date.now(),
       });
-      broadcastViewerState(sessionId);
       broadcastTranscriptionState(sessionId);
     })
     .finally(() => {
@@ -8089,6 +8081,69 @@ function broadcastTranscriptionState(sessionId) {
     transcription: getPublicTranscriptionState(session),
     autoFollow: getPublicAutoFollowState(session),
   });
+}
+
+function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
+  const session = getSession(sessionId);
+  if (!session || transcriptionStreams.get(sessionId) !== stream) return null;
+
+  const liveEntries = buildTranscriptionDisplayEntries(stream)
+    .map((entry) => ({
+      id: typeof entry?.id === 'string' ? entry.id : '',
+      text: sanitizeTranscriptionText(entry?.text || ''),
+      translations:
+        entry?.translations && typeof entry.translations === 'object'
+          ? { ...entry.translations }
+          : {},
+      speakerId: Number.isInteger(entry?.speakerId) ? entry.speakerId : null,
+      isFinal: entry?.isFinal !== false,
+    }))
+    .filter((entry) => entry.text);
+  const revision = (stream.liveTranslationRevision || 0) + 1;
+  stream.liveTranslationRevision = revision;
+
+  return {
+    sessionId,
+    streamId: stream.liveTranslationStreamId,
+    revision,
+    languageCode,
+    liveEntries,
+    liveLines: liveEntries.map((entry) => entry.text),
+    transcriptionIsFinal:
+      liveEntries.length === 0 || liveEntries[liveEntries.length - 1].isFinal,
+    translationStatus: getLiveTranslationStatus(stream)[languageCode] || {
+      status: 'idle',
+      error: '',
+      updatedAt: null,
+    },
+  };
+}
+
+function broadcastLiveTranslationState(sessionId, stream, languageCode) {
+  if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
+  const payload = getLiveTranslationPatchPayload(
+    sessionId,
+    stream,
+    languageCode,
+  );
+  if (!payload) return;
+
+  // Translation deltas are intentionally sent only to viewers that requested
+  // this language. They must never trigger the full viewer/control payload,
+  // which includes every script line and can delay microphone audio delivery.
+  io.sockets.sockets.forEach((viewerSocket) => {
+    if (
+      viewerSocket.data?.publicRole === 'viewer' &&
+      viewerSocket.data?.viewerSessionId === sessionId &&
+      viewerSocket.data?.liveTranslationLanguage === languageCode
+    ) {
+      viewerSocket.emit('viewer:translation-patch', payload);
+    }
+  });
+
+  // Use the same small patch for the projector so translations cannot replace
+  // unrelated display state while they are streaming.
+  io.to(`projector:${sessionId}`).emit('projector:translation-patch', payload);
 }
 
 function broadcastViewerState(sessionId) {
@@ -11009,6 +11064,8 @@ function startDeepgramTranscription({
     translationWorkers: new Map(),
     pendingTranslationKeys: new Set(),
     liveTranslationStatus: new Map(),
+    liveTranslationStreamId: crypto.randomUUID(),
+    liveTranslationRevision: 0,
     pendingAudioChunks: [],
     trailingSilenceMs: 0,
     lastInputLevel: 0,
@@ -11266,6 +11323,8 @@ function startRealtimeTranscription({
     translationWorkers: new Map(),
     pendingTranslationKeys: new Set(),
     liveTranslationStatus: new Map(),
+    liveTranslationStreamId: crypto.randomUUID(),
+    liveTranslationRevision: 0,
     speakerRecognitionChain: Promise.resolve(),
     pendingSpeakerWindowKeys: new Set(),
     pendingAudioChunks: [],

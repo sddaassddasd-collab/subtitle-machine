@@ -4,6 +4,7 @@ import { io } from 'socket.io-client'
 import {
   DEFAULT_PROJECTOR_LAYOUT,
   normalizeDisplayPayload,
+  normalizeLiveTranslationPatch,
   normalizeProjectorLayout,
   normalizeProjectorRevision,
   resolveAvailableLanguageId,
@@ -47,6 +48,7 @@ const ProjectorPage = () => {
   const recoveryTimerRef = useRef(null)
   const pendingStatusReportsRef = useRef([])
   const lastStatusReportKeyRef = useRef('')
+  const liveTranslationPatchRef = useRef({ streamId: '', revision: 0 })
 
   const clearRecoveryTimer = useCallback(() => {
     if (!recoveryTimerRef.current) return
@@ -304,6 +306,24 @@ const ProjectorPage = () => {
     socket.on('projector:update', (payload) => {
       applyProjectorDisplayPayload(payload)
       markProjectorRecovered()
+    })
+
+    socket.on('projector:translation-patch', (payload) => {
+      const patch = normalizeLiveTranslationPatch(payload)
+      if (!patch.streamId) return
+      const previous = liveTranslationPatchRef.current
+      if (
+        previous.streamId === patch.streamId &&
+        patch.revision <= previous.revision
+      ) {
+        return
+      }
+      liveTranslationPatchRef.current = {
+        streamId: patch.streamId,
+        revision: patch.revision,
+      }
+      setLiveEntries(patch.liveEntries)
+      setLiveLines(patch.liveLines)
     })
 
     socket.on('projector:layout', (payload) => {
