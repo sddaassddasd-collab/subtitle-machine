@@ -104,7 +104,6 @@ const projectorSessionTombstones = new Map();
 const projectorConnections = new Map();
 const projectorPresence = new Map();
 const currentIndexPersistTimers = new Map();
-const viewerStateRevisions = new Map();
 const AUTH_COOKIE_NAME = 'subtitle_machine_auth';
 const ACCESS_COOKIE_NAME = 'subtitle_machine_access';
 const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -112,9 +111,7 @@ const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
 const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
 const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
-// Playback position is hot state. Persist after navigation settles instead of
-// rewriting the entire application store on every cue during a live show.
-const CURRENT_INDEX_PERSIST_DELAY_MS = 2500;
+const CURRENT_INDEX_PERSIST_DELAY_MS = 750;
 const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
 const LIVE_DRAFT_TRANSLATION_ENABLED =
@@ -5333,19 +5330,23 @@ function buildTranscriptionDisplayEntries(stream) {
         : [];
       const translations = {};
       LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
-        const translatedPrefix = [];
-        for (const fragment of fragments) {
-          const translated = sanitizeTranscriptionText(
-            fragment?.translations?.[languageCode] ||
-              fragment?.provisionalTranslations?.[languageCode] ||
-              '',
-          );
-          if (!translated) break;
-          translatedPrefix.push({ text: translated });
-        }
-        if (translatedPrefix.length > 0) {
+        if (
+          fragments.length > 0 &&
+          fragments.every((fragment) =>
+            sanitizeTranscriptionText(
+              fragment?.translations?.[languageCode] ||
+                fragment?.provisionalTranslations?.[languageCode] ||
+                '',
+            ),
+          )
+        ) {
           translations[languageCode] = composeFragmentTexts(
-            translatedPrefix,
+            fragments.map((fragment) => ({
+              text:
+                fragment.translations[languageCode] ||
+                fragment.provisionalTranslations?.[languageCode] ||
+                '',
+            })),
           );
         }
       });
@@ -5664,8 +5665,7 @@ function isCurrentDraftTranslationJob(stream, sessionId, job) {
   }
   return (
     getDraftTranslationWorker(stream, job.languageCode).activeJob === job &&
-    (stream.draftByItemId.has(job.itemId) ||
-      stream.fragmentByItemId.has(job.itemId))
+    stream.draftByItemId.has(job.itemId)
   );
 }
 
@@ -5681,10 +5681,9 @@ function publishStableDraftTranslation({
     return false;
   }
 
-  const completedFragment = stream.fragmentByItemId.get(job.itemId) || null;
   const draftState = stream.draftTranslationsByItemId.get(job.itemId) || {
     sourceText: job.text,
-    translations: completedFragment?.provisionalTranslations || {},
+    translations: {},
   };
   const published = sanitizeTranscriptionText(
     draftState.translations?.[job.languageCode] || '',
@@ -5710,17 +5709,12 @@ function publishStableDraftTranslation({
   }
   if (candidate === published) return false;
 
-  const nextTranslations = {
+  draftState.sourceText = job.text;
+  draftState.translations = {
     ...draftState.translations,
     [job.languageCode]: candidate,
   };
-  if (completedFragment) {
-    completedFragment.provisionalTranslations = nextTranslations;
-  } else {
-    draftState.sourceText = job.text;
-    draftState.translations = nextTranslations;
-    stream.draftTranslationsByItemId.set(job.itemId, draftState);
-  }
+  stream.draftTranslationsByItemId.set(job.itemId, draftState);
   job.lastPublishedAt = now;
   syncTranscriptionStateFromStream(sessionId, stream);
   return true;
@@ -5772,10 +5766,14 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
     transcriptionContext: stream.transcriptionContext,
     signal: abortController.signal,
     onDelta: (translated) => {
-      // Keep showing the active request even when a newer interim transcript
-      // is waiting. Deepgram usually updates faster than translation can
-      // finish; suppressing every superseded request can otherwise leave the
-      // viewer blank for several complete sentences.
+      const newerPendingText =
+        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
+      if (
+        newerPendingText &&
+        newerPendingText !== job.text
+      ) {
+        return;
+      }
       publishStableDraftTranslation({
         stream,
         sessionId,
@@ -5786,6 +5784,14 @@ function runDraftTranslationWorker(stream, sessionId, languageCode) {
   })
     .then((translated) => {
       if (!translated || !isCurrentDraftTranslationJob(stream, sessionId, job)) {
+        return;
+      }
+      const newerPendingText =
+        worker.pending?.itemId === job.itemId ? worker.pending.text : '';
+      if (
+        newerPendingText &&
+        newerPendingText !== job.text
+      ) {
         return;
       }
       publishStableDraftTranslation({
@@ -5903,15 +5909,6 @@ function finalizeDraftTranslations(stream, itemId) {
       worker.abortController.abort();
     }
   });
-  stream.draftTranslationsByItemId.delete(itemId);
-  return draftState?.translations && typeof draftState.translations === 'object'
-    ? { ...draftState.translations }
-    : {};
-}
-
-function promoteDeepgramDraftTranslations(stream, itemId) {
-  if (!stream || !itemId) return {};
-  const draftState = stream.draftTranslationsByItemId.get(itemId) || null;
   stream.draftTranslationsByItemId.delete(itemId);
   return draftState?.translations && typeof draftState.translations === 'object'
     ? { ...draftState.translations }
@@ -7617,22 +7614,7 @@ function getSessionDisplayState(session) {
   };
 }
 
-function getViewerStateRevision(sessionId) {
-  if (!sessionId) return 0;
-  if (!viewerStateRevisions.has(sessionId)) {
-    viewerStateRevisions.set(sessionId, Date.now());
-  }
-  return viewerStateRevisions.get(sessionId);
-}
-
-function bumpViewerStateRevision(sessionId) {
-  const previous = getViewerStateRevision(sessionId);
-  const next = Math.max(Date.now(), previous + 1);
-  viewerStateRevisions.set(sessionId, next);
-  return next;
-}
-
-function getViewerPayload(session, viewerCellId = null, options = {}) {
+function getViewerPayload(session, viewerCellId = null) {
   const {
     normalized,
     activeScriptLine,
@@ -7644,23 +7626,18 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     musicText,
     transcription,
   } = getSessionDisplayState(session);
-  const includeLines = options.includeLines !== false;
-  const sourceLines = ensureSessionLines(normalized);
-  const publicLines = includeLines
-    ? sourceLines.map((line) => toPublicLine(line))
-    : null;
+  const publicLines = ensureSessionLines(normalized).map((line) =>
+    toPublicLine(line),
+  );
   const currentIndex =
-    sourceLines.length > 0
-      ? Math.min(Math.max(normalized.currentIndex, 0), sourceLines.length - 1)
+    publicLines.length > 0
+      ? Math.min(Math.max(normalized.currentIndex, 0), publicLines.length - 1)
       : 0;
   const viewerCell = viewerCellId
     ? normalized.cells.find((cell) => cell.id === viewerCellId) || null
     : getSelectedCell(normalized);
   const isActiveCell = !viewerCell || viewerCell.id === normalized.selectedCellId;
   const viewerToken = viewerCell?.viewerToken || normalized.viewerToken;
-  const viewerRevision = Number.isSafeInteger(options.revision)
-    ? options.revision
-    : getViewerStateRevision(normalized.id);
 
   if (!isActiveCell) {
     return {
@@ -7672,8 +7649,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: includeLines ? publicLines : undefined,
-      viewerRevision,
+      lines: publicLines,
       currentIndex,
       line: null,
       text: '',
@@ -7696,8 +7672,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: includeLines ? publicLines : undefined,
-      viewerRevision,
+      lines: publicLines,
       currentIndex,
       line: null,
       text: '',
@@ -7719,8 +7694,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: includeLines ? publicLines : undefined,
-      viewerRevision,
+      lines: publicLines,
       currentIndex,
       line: {
         text: liveLines[liveLines.length - 1] || liveText,
@@ -7745,8 +7719,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.viewerDefaultLanguageId,
-      lines: includeLines ? publicLines : undefined,
-      viewerRevision,
+      lines: publicLines,
       currentIndex,
       line: null,
       text: '',
@@ -7767,8 +7740,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     status: normalized.status,
     languages: normalized.languages,
     defaultLanguageId: normalized.viewerDefaultLanguageId,
-    lines: includeLines ? publicLines : undefined,
-    viewerRevision,
+    lines: publicLines,
     currentIndex,
     line: toPublicLine(activeScriptLine),
     text:
@@ -8097,18 +8069,14 @@ function broadcastTranscriptionState(sessionId) {
 function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
-  const revision = bumpViewerStateRevision(sessionId);
 
   session.cells.forEach((cell) => {
     io.to(`viewer:${sessionId}:${cell.id}`).emit(
       'viewer:update',
-      getViewerPayload(session, cell.id, { includeLines: false, revision }),
+      getViewerPayload(session, cell.id),
     );
   });
-  io.to(`viewer:${sessionId}`).emit(
-    'viewer:update',
-    getViewerPayload(session, null, { includeLines: false, revision }),
-  );
+  io.to(`viewer:${sessionId}`).emit('viewer:update', getViewerPayload(session));
   io.to(`projector:${sessionId}`).emit(
     'projector:update',
     getProjectorPayload(session),
@@ -10190,11 +10158,7 @@ app.get('/api/viewer/:viewerToken', (req, res) => {
       .status(410)
       .json(getPublicSessionUnavailablePayload('viewer', { session: null, token: viewerToken }));
   }
-  res.json(
-    getViewerPayload(target.session, target.cell?.id, {
-      includeLines: req.query?.compact !== '1',
-    }),
-  );
+  res.json(getViewerPayload(target.session, target.cell?.id));
 });
 
 app.get('/api/projector/:projectorToken', (req, res) => {
@@ -11124,13 +11088,7 @@ function startDeepgramTranscription({
     if (event.is_final === true) {
       const provisionalSpeakerId =
         stream.draftSpeakerByItemId.get(itemId)?.speakerId ?? null;
-      // Deepgram `is_final` confirms only this ASR chunk, not necessarily the
-      // whole spoken sentence. Promote what is already visible without
-      // cancelling the active/pending fast translations for this chunk.
-      const provisionalTranslations = promoteDeepgramDraftTranslations(
-        stream,
-        itemId,
-      );
+      const provisionalTranslations = finalizeDraftTranslations(stream, itemId);
       takeDraftLine(stream, itemId);
       if (transcript) {
         const fragment = upsertCompletedFragment(stream, {
@@ -11145,21 +11103,10 @@ function startDeepgramTranscription({
           fragment.speakerId = selectedSpeakerRecognitionEnabled
             ? getDeepgramDominantSpeakerId(alternative) ?? provisionalSpeakerId
             : null;
-          fragment.provisionalTranslations = {
-            ...(fragment.provisionalTranslations || {}),
-            ...provisionalTranslations,
-          };
+          fragment.provisionalTranslations = provisionalTranslations;
         }
         handleAutoFollowTranscript(sessionId, transcript, { isFinal: true });
         if (fragment) {
-          // Start a translation of the stable Deepgram chunk immediately.
-          // Correction runs in parallel and can replace it once if needed.
-          queueRequestedLiveTranslations(
-            stream,
-            sessionId,
-            [fragment.itemId],
-            'live',
-          );
           if (correctionClient) {
             queueTranscriptionCorrection({
               stream,
@@ -11635,10 +11582,7 @@ io.on('connection', (socket) => {
       }
       socket.data.publicRole = 'viewer';
       socket.data.viewerSessionId = viewerSession.id;
-      socket.emit(
-        'viewer:update',
-        getViewerPayload(viewerSession, viewerCell?.id, { includeLines: false }),
-      );
+      socket.emit('viewer:update', getViewerPayload(viewerSession, viewerCell?.id));
       return;
     }
 
@@ -11705,15 +11649,11 @@ io.on('connection', (socket) => {
       transcriptionStreams.get(sessionId)?.language ||
         liveSession?.transcriptionLanguage,
     );
-    const nextLiveTranslationLanguage =
+    socket.data.liveTranslationLanguage =
       LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode) &&
       normalizedLanguageCode.toLowerCase() !== currentSourceLanguage.toLowerCase()
         ? normalizedLanguageCode
         : 'source';
-    if (socket.data.liveTranslationLanguage === nextLiveTranslationLanguage) {
-      return;
-    }
-    socket.data.liveTranslationLanguage = nextLiveTranslationLanguage;
 
     const stream = transcriptionStreams.get(sessionId);
     if (stream && LIVE_TRANSLATION_LANGUAGE_CODES.has(normalizedLanguageCode)) {
@@ -11727,17 +11667,12 @@ io.on('connection', (socket) => {
         'history',
       );
     }
-    // Viewer demand changes only affect the compact transcription diagnostics.
-    // Broadcasting the full control payload here serializes every subtitle
-    // line once per viewer reconnect and can starve live Deepgram events.
-    broadcastTranscriptionState(sessionId);
+    broadcastControlState(sessionId);
     const viewerSession = getSession(sessionId);
     if (viewerSession) {
       socket.emit(
         'viewer:update',
-        getViewerPayload(viewerSession, socket.data.viewerCellId || null, {
-          includeLines: false,
-        }),
+        getViewerPayload(viewerSession, socket.data.viewerCellId || null),
       );
     }
   });

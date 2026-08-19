@@ -115,9 +115,7 @@ export const normalizeDisplayPayload = (payload) => {
     payload?.currentIndex,
     0,
     0,
-    Array.isArray(payload?.lines)
-      ? Math.max(lines.length - 1, 0)
-      : Number.MAX_SAFE_INTEGER,
+    Math.max(lines.length - 1, 0),
   )
 
   const transcription = payload?.transcription || {}
@@ -185,12 +183,6 @@ export const normalizeDisplayPayload = (payload) => {
     displayMode: normalizeProjectorDisplayMode(payload?.displayMode),
     languageMode: normalizeProjectorLanguageMode(payload?.languageMode),
     revision: normalizeProjectorRevision(payload?.revision),
-    viewerRevision: normalizeInt(
-      payload?.viewerRevision,
-      0,
-      0,
-      Number.MAX_SAFE_INTEGER,
-    ),
     roleColorEnabled,
   }
 }

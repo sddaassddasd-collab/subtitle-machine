@@ -70,9 +70,6 @@ const ViewerPage = () => {
   const socketRef = useRef(null)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
-  const viewerRevisionRef = useRef({ sessionId: '', revision: 0 })
-  const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
-  const lineSourceRef = useRef(lineSource)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -89,24 +86,6 @@ const ViewerPage = () => {
   }, [])
 
   const applyViewerPayload = useCallback((payload) => {
-    const incomingSessionId =
-      typeof payload?.sessionId === 'string' ? payload.sessionId : ''
-    const incomingRevision = Number(payload?.viewerRevision)
-    const previousRevision = viewerRevisionRef.current
-    if (
-      incomingSessionId &&
-      previousRevision.sessionId === incomingSessionId &&
-      Number.isSafeInteger(incomingRevision) &&
-      incomingRevision < previousRevision.revision
-    ) {
-      return
-    }
-    if (incomingSessionId && Number.isSafeInteger(incomingRevision)) {
-      viewerRevisionRef.current = {
-        sessionId: incomingSessionId,
-        revision: incomingRevision,
-      }
-    }
     const next = normalizeDisplayPayload(payload)
     setWaitingMessage(
       payload?.source === 'waiting'
@@ -119,7 +98,6 @@ const ViewerPage = () => {
     setLiveLines(next.liveLines)
     setMusicActive(next.musicActive)
     setMusicText(next.musicText)
-    lineSourceRef.current = next.source
     setLineSource(next.source)
     setLanguages(next.languages)
     setViewerDefaultLanguageId(
@@ -160,7 +138,7 @@ const ViewerPage = () => {
     let cancelled = false
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}?compact=1`)
+        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入字幕')
@@ -201,16 +179,13 @@ const ViewerPage = () => {
     const joinViewerSession = () => {
       socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
       socket.emit('viewer:live-language', {
-        languageCode:
-          lineSourceRef.current === 'transcription'
-            ? selectedLiveLanguageRef.current
-            : 'source',
+        languageCode: 'source',
       })
     }
 
     const fetchViewerState = async () => {
       try {
-        const response = await fetch(`/api/viewer/${resolvedViewerToken}?compact=1`)
+        const response = await fetch(`/api/viewer/${resolvedViewerToken}`)
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入字幕')
@@ -227,12 +202,12 @@ const ViewerPage = () => {
       }
     }
 
-    const scheduleRecoveryFetch = (delayMs = PUBLIC_RECOVERY_RETRY_DELAY_MS) => {
+    const scheduleRecoveryFetch = () => {
       clearRecoveryTimer()
       recoveryTimerRef.current = window.setTimeout(() => {
         recoveryTimerRef.current = null
         void fetchViewerState()
-      }, delayMs)
+      }, PUBLIC_RECOVERY_RETRY_DELAY_MS)
     }
 
     socket.on('connect', () => {
@@ -269,25 +244,7 @@ const ViewerPage = () => {
       scheduleRecoveryFetch()
     })
 
-    const recoverVisibleViewer = () => {
-      if (document.visibilityState === 'hidden') return
-      if (!socket.connected) {
-        socket.connect()
-        return
-      }
-      // pageshow, online and visibilitychange often fire together. A healthy
-      // socket is already in its room, so only coalesce a compact state fetch;
-      // reconnecting or joining again creates an avoidable event storm.
-      scheduleRecoveryFetch(150)
-    }
-    window.addEventListener('pageshow', recoverVisibleViewer)
-    window.addEventListener('online', recoverVisibleViewer)
-    document.addEventListener('visibilitychange', recoverVisibleViewer)
-
     return () => {
-      window.removeEventListener('pageshow', recoverVisibleViewer)
-      window.removeEventListener('online', recoverVisibleViewer)
-      document.removeEventListener('visibilitychange', recoverVisibleViewer)
       clearRecoveryTimer()
       socketRef.current = null
       socket.disconnect()
@@ -300,7 +257,6 @@ const ViewerPage = () => {
   ])
 
   useEffect(() => {
-    selectedLiveLanguageRef.current = selectedLiveLanguage
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(
         VIEWER_LIVE_LANGUAGE_STORAGE_KEY,
@@ -312,10 +268,6 @@ const ViewerPage = () => {
         lineSource === 'transcription' ? selectedLiveLanguage : 'source',
     })
   }, [lineSource, selectedLiveLanguage])
-
-  useEffect(() => {
-    lineSourceRef.current = lineSource
-  }, [lineSource])
 
   useEffect(() => {
     if (!languages.length) return
