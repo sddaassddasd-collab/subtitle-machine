@@ -61,6 +61,7 @@ const PrompterPage = () => {
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
   const viewerStateRevisionRef = useRef({ sessionId: '', revision: 0 })
+  const liveTranscriptionPatchRef = useRef({ streamId: '', revision: 0 })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -232,6 +233,30 @@ const PrompterPage = () => {
 
     socket.on('prompter:update', (payload) => {
       applyViewerPayload(payload)
+    })
+
+    socket.on('prompter:live-update', (payload) => {
+      const streamId =
+        typeof payload?.streamId === 'string' ? payload.streamId : ''
+      const revision = Number.isSafeInteger(payload?.revision)
+        ? payload.revision
+        : 0
+      if (!streamId || revision <= 0 || payload?.active !== true) return
+      const previous = liveTranscriptionPatchRef.current
+      if (previous.streamId === streamId && revision <= previous.revision) {
+        return
+      }
+      liveTranscriptionPatchRef.current = { streamId, revision }
+
+      const next = normalizeDisplayPayload(payload)
+      setDisplayEnabled(next.enabled)
+      setLiveEntries(next.liveEntries)
+      setLiveLines(next.liveLines)
+      setTranscriptionIsFinal(next.transcriptionIsFinal)
+      setLineSource('transcription')
+      hasLoadedStateRef.current = true
+      setHasLoadedState(true)
+      setConnectionIssue('')
     })
 
     socket.on('viewer:expired', (payload) => {

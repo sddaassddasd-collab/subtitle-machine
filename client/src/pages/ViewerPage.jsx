@@ -74,6 +74,7 @@ const ViewerPage = () => {
   const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
   const lineSourceRef = useRef(lineSource)
   const liveTranslationPatchRef = useRef({ streamId: '', revision: 0 })
+  const liveTranscriptionPatchRef = useRef({ streamId: '', revision: 0 })
   const viewerStateRevisionRef = useRef({ sessionId: '', revision: 0 })
 
   useEffect(() => {
@@ -228,6 +229,36 @@ const ViewerPage = () => {
 
     socket.on('viewer:update', (payload) => {
       applyViewerPayload(payload)
+    })
+
+    socket.on('viewer:live-update', (payload) => {
+      const streamId =
+        typeof payload?.streamId === 'string' ? payload.streamId : ''
+      const revision = Number.isSafeInteger(payload?.revision)
+        ? payload.revision
+        : 0
+      if (!streamId || revision <= 0 || payload?.active !== true) return
+      const previous = liveTranscriptionPatchRef.current
+      if (previous.streamId === streamId && revision <= previous.revision) {
+        return
+      }
+      liveTranscriptionPatchRef.current = { streamId, revision }
+
+      const next = normalizeDisplayPayload(payload)
+      setDisplayEnabled(next.enabled)
+      setLine(next.line)
+      setLiveEntries(next.liveEntries)
+      setLiveLines(next.liveLines)
+      setTranscriptionIsFinal(next.transcriptionIsFinal)
+      setLiveTranslationLanguages(next.liveTranslationLanguages)
+      setTranscriptionLanguage(next.transcriptionLanguage)
+      setTranscriptionSourceLanguages(next.transcriptionSourceLanguages)
+      lineSourceRef.current = 'transcription'
+      setLineSource('transcription')
+      setWaitingMessage('')
+      hasLoadedStateRef.current = true
+      setHasLoadedState(true)
+      setConnectionIssue('')
     })
 
     socket.on('viewer:translation-patch', (payload) => {

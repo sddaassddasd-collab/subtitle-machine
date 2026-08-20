@@ -1052,6 +1052,7 @@ const ControlPage = () => {
     sourceNode: null,
     captureNode: null,
     silenceNode: null,
+    resumeListenersCleanup: null,
   })
   const projectorLayoutInputValues = useMemo(
     () => ({
@@ -1452,7 +1453,12 @@ const ControlPage = () => {
       silenceNode,
       audioContext,
       mediaStream,
+      resumeListenersCleanup,
     } = state
+
+    if (typeof resumeListenersCleanup === 'function') {
+      resumeListenersCleanup()
+    }
 
     if (captureNode) {
       try {
@@ -1500,6 +1506,7 @@ const ControlPage = () => {
       sourceNode: null,
       captureNode: null,
       silenceNode: null,
+      resumeListenersCleanup: null,
     }
     setMicDiagnostics((prev) => ({
       ...prev,
@@ -2401,12 +2408,62 @@ const ControlPage = () => {
       }
 
       silenceNode.connect(audioContext.destination)
+      let resumeInFlight = false
+      const resumeAudioCapture = async () => {
+        if (
+          resumeInFlight ||
+          audioContext.state !== 'suspended' ||
+          stream.getAudioTracks().every((track) => track.readyState !== 'live')
+        ) {
+          return
+        }
+        resumeInFlight = true
+        try {
+          await audioContext.resume()
+        } catch {
+          // Some browsers require the page to be visible before resuming.
+        } finally {
+          resumeInFlight = false
+        }
+      }
+      const handleCaptureVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          void resumeAudioCapture()
+        }
+      }
+      const handleAudioContextStateChange = () => {
+        if (audioContext.state === 'suspended') {
+          void resumeAudioCapture()
+        }
+      }
+      document.addEventListener(
+        'visibilitychange',
+        handleCaptureVisibilityChange,
+      )
+      window.addEventListener('pageshow', resumeAudioCapture)
+      window.addEventListener('focus', resumeAudioCapture)
+      window.addEventListener('online', resumeAudioCapture)
+      audioContext.addEventListener('statechange', handleAudioContextStateChange)
+      const resumeListenersCleanup = () => {
+        document.removeEventListener(
+          'visibilitychange',
+          handleCaptureVisibilityChange,
+        )
+        window.removeEventListener('pageshow', resumeAudioCapture)
+        window.removeEventListener('focus', resumeAudioCapture)
+        window.removeEventListener('online', resumeAudioCapture)
+        audioContext.removeEventListener(
+          'statechange',
+          handleAudioContextStateChange,
+        )
+      }
       captureStateRef.current = {
         mediaStream: stream,
         audioContext,
         sourceNode,
         captureNode,
         silenceNode,
+        resumeListenersCleanup,
       }
 
       const startResult = await new Promise((resolve, reject) => {

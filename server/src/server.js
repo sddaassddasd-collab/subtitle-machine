@@ -97,6 +97,7 @@ app.get('/healthz', (_req, res) => {
 
 const sessions = new Map();
 const transcriptionStreams = new Map();
+const deepgramReconnectTimers = new Map();
 const users = new Map();
 const authSessions = new Map();
 const viewerSessionTombstones = new Map();
@@ -120,6 +121,9 @@ const SESSION_HISTORY_LIMIT = 80;
 const CURRENT_INDEX_PERSIST_DELAY_MS = 3000;
 const VIEWER_DEMAND_BROADCAST_DELAY_MS = 500;
 const LATEST_STATE_KEYFRAME_DELAY_MS = 1500;
+const DEEPGRAM_KEEP_ALIVE_INTERVAL_MS = 3000;
+const DEEPGRAM_RECONNECT_MAX_ATTEMPTS = 3;
+const DEEPGRAM_RECONNECT_BASE_DELAY_MS = 500;
 const LIVE_TRANSLATION_MODEL =
   process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
 const LIVE_DRAFT_TRANSLATION_ENABLED =
@@ -230,8 +234,18 @@ function getAllowedLiveTranslationLanguageCodes(session) {
 
 function isLiveTranslationLanguageAllowed(sessionOrId, languageCode) {
   if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return false;
+  if (typeof sessionOrId === 'string') {
+    const stream = transcriptionStreams.get(sessionOrId);
+    if (stream?.allowedTranslationLanguageCodes instanceof Set) {
+      return stream.allowedTranslationLanguageCodes.has(languageCode);
+    }
+  }
+  // Live transcription is a high-frequency runtime path. Reading the
+  // allow-list must never normalize every script line in the session.
   const session =
-    typeof sessionOrId === 'string' ? getSession(sessionOrId) : sessionOrId;
+    typeof sessionOrId === 'string'
+      ? getSessionRecord(sessionOrId)
+      : sessionOrId;
   if (!session) return false;
   return getAllowedLiveTranslationLanguageCodes(session).includes(languageCode);
 }
@@ -5550,7 +5564,7 @@ function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
     ...patch,
   });
   broadcastTranscriptionState(sessionId);
-  broadcastViewerState(sessionId);
+  broadcastLiveTranscriptionState(sessionId, stream);
 }
 
 async function correctTranscriptionLine({
@@ -5632,6 +5646,9 @@ function applyLiveTranslationLanguageRestrictions(session) {
   );
   const affectedViewerSockets = new Map();
   const stream = transcriptionStreams.get(session.id);
+  if (stream) {
+    stream.allowedTranslationLanguageCodes = allowedCodes;
+  }
 
   LIVE_TRANSLATION_LANGUAGE_CODES.forEach((languageCode) => {
     if (allowedCodes.has(languageCode)) return;
@@ -7059,7 +7076,7 @@ function getPublicTranscriptionState(session) {
 }
 
 function updateTranscriptionState(sessionId, patch = {}) {
-  const session = getSession(sessionId);
+  const session = getSessionRecord(sessionId);
   if (!session) return;
 
   const state = ensureTranscriptionState(session);
@@ -7068,6 +7085,7 @@ function updateTranscriptionState(sessionId, patch = {}) {
 }
 
 function applyTranscriptionError(sessionId, message) {
+  clearLatestRoomStateKeyframesForSession(sessionId);
   updateTranscriptionState(sessionId, {
     active: false,
     status: 'error',
@@ -7079,6 +7097,12 @@ function applyTranscriptionError(sessionId, message) {
 }
 
 function stopTranscriptionStream(sessionId, options = {}) {
+  clearLatestRoomStateKeyframesForSession(sessionId);
+  const reconnectTimer = deepgramReconnectTimers.get(sessionId);
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer.timer || reconnectTimer);
+    deepgramReconnectTimers.delete(sessionId);
+  }
   const stream = transcriptionStreams.get(sessionId);
   if (!stream) {
     const session = getSession(sessionId);
@@ -8212,8 +8236,13 @@ function ensureSession(sessionId, ownerUserId = '') {
   return ensureSessionStructure(session);
 }
 
+function getSessionRecord(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  return sessions.get(sessionId) || null;
+}
+
 function getSession(sessionId) {
-  const session = sessions.get(sessionId);
+  const session = getSessionRecord(sessionId);
   return session ? ensureSessionStructure(session) : null;
 }
 
@@ -8362,7 +8391,7 @@ function broadcastControlState(sessionId) {
 }
 
 function broadcastTranscriptionState(sessionId) {
-  const session = getSession(sessionId);
+  const session = getSessionRecord(sessionId);
   if (!session) return;
 
   io.to(`control:${sessionId}`).emit('control:transcription', {
@@ -8438,8 +8467,92 @@ function scheduleViewerDemandBroadcast(sessionId) {
   viewerDemandBroadcastTimers.set(sessionId, timer);
 }
 
+function getLiveTranscriptionPatchPayload(sessionId, stream) {
+  const session = getSessionRecord(sessionId);
+  if (!session || transcriptionStreams.get(sessionId) !== stream) return null;
+
+  const state = ensureTranscriptionState(session);
+  const liveText = sanitizeTranscriptionMultilineText(state.text);
+  const liveEntries = liveText
+    ? buildTranscriptionDisplayEntries(stream)
+        .map((entry) => ({
+          id: typeof entry?.id === 'string' ? entry.id : '',
+          text: sanitizeTranscriptionText(entry?.text || ''),
+          translations:
+            entry?.translations && typeof entry.translations === 'object'
+              ? { ...entry.translations }
+              : {},
+          speakerId: Number.isInteger(entry?.speakerId) ? entry.speakerId : null,
+          isFinal: entry?.isFinal !== false,
+        }))
+        .filter((entry) => entry.text)
+    : [];
+  const liveLines = liveEntries.length > 0
+    ? liveEntries.map((entry) => entry.text)
+    : liveText
+        .split('\n')
+        .map((line) => sanitizeTranscriptionText(line))
+        .filter(Boolean);
+  const revision = (stream.liveTranscriptionRevision || 0) + 1;
+  stream.liveTranscriptionRevision = revision;
+
+  return {
+    sessionId,
+    streamId: stream.liveTranslationStreamId,
+    revision,
+    active: state.active === true,
+    displayEnabled: session.displayEnabled !== false,
+    source: 'transcription',
+    text: liveText,
+    line: liveLines.length > 0
+      ? {
+          text: liveLines[liveLines.length - 1],
+          type: LINE_TYPES.DIALOGUE,
+        }
+      : null,
+    liveEntries,
+    liveLines,
+    transcriptionIsFinal: state.isFinal !== false,
+    transcription: getPublicTranscriptionState(session),
+  };
+}
+
+function broadcastLiveTranscriptionState(sessionId, stream) {
+  const session = getSessionRecord(sessionId);
+  const payload = getLiveTranscriptionPatchPayload(sessionId, stream);
+  if (!session || !payload) return;
+
+  const selectedCell = getSelectedCell(session);
+  if (selectedCell?.id) {
+    const selectedViewerRoom = `viewer:${sessionId}:${selectedCell.id}`;
+    const selectedPrompterRoom = `prompter:${sessionId}:${selectedCell.id}`;
+    if (hasSocketRoomConnections(selectedViewerRoom)) {
+      emitLatestRoomState(selectedViewerRoom, 'viewer:live-update', payload);
+    }
+    if (hasSocketRoomConnections(selectedPrompterRoom)) {
+      emitLatestRoomState(selectedPrompterRoom, 'prompter:live-update', payload);
+    }
+  }
+  const viewerRoom = `viewer:${sessionId}`;
+  const prompterRoom = `prompter:${sessionId}`;
+  if (hasSocketRoomConnections(viewerRoom)) {
+    emitLatestRoomState(viewerRoom, 'viewer:live-update', payload);
+  }
+  if (hasSocketRoomConnections(prompterRoom)) {
+    emitLatestRoomState(prompterRoom, 'prompter:live-update', payload);
+  }
+
+  if (
+    normalizeProjectorDisplayMode(session.projectorDisplayMode) ===
+      PROJECTOR_DISPLAY_MODES.TRANSCRIPTION &&
+    hasSocketRoomConnections(`projector:${sessionId}`)
+  ) {
+    io.to(`projector:${sessionId}`).emit('projector:live-update', payload);
+  }
+}
+
 function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
-  const session = getSession(sessionId);
+  const session = getSessionRecord(sessionId);
   if (!session || transcriptionStreams.get(sessionId) !== stream) return null;
 
   const liveEntries = buildTranscriptionDisplayEntries(stream)
@@ -8499,6 +8612,7 @@ function broadcastLiveTranslationState(sessionId, stream, languageCode) {
 }
 
 function broadcastViewerState(sessionId) {
+  clearLatestRoomStateKeyframesForSession(sessionId);
   const session = getSession(sessionId);
   if (!session) return;
   const revision = bumpViewerStateRevision(sessionId);
@@ -11392,7 +11506,13 @@ function startDeepgramTranscription({
   speakerRecognitionEnabled,
   transcriptionContext,
   startAcknowledge,
+  reconnectAttempt = 0,
 }) {
+  const pendingReconnectTimer = deepgramReconnectTimers.get(sessionId);
+  if (pendingReconnectTimer) {
+    clearTimeout(pendingReconnectTimer.timer || pendingReconnectTimer);
+    deepgramReconnectTimers.delete(sessionId);
+  }
   const selectedLanguage = normalizeTranscriptionSourceLanguage(language);
   const selectedSpeakerRecognitionEnabled =
     normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled);
@@ -11456,7 +11576,11 @@ function startDeepgramTranscription({
     translationWorkers: new Map(),
     pendingTranslationKeys: new Set(),
     liveTranslationStatus: new Map(),
+    allowedTranslationLanguageCodes: new Set(
+      getAllowedLiveTranslationLanguageCodes(getSessionRecord(sessionId)),
+    ),
     liveTranslationStreamId: crypto.randomUUID(),
+    liveTranscriptionRevision: 0,
     liveTranslationRevision: 0,
     pendingAudioChunks: [],
     trailingSilenceMs: 0,
@@ -11493,6 +11617,7 @@ function startDeepgramTranscription({
 
   socket.on('open', () => {
     if (!isCurrent()) return;
+    reconnectAttempt = 0;
     stream.ready = true;
     if (stream.initTimeout) {
       clearTimeout(stream.initTimeout);
@@ -11502,10 +11627,15 @@ function startDeepgramTranscription({
       stream.startAcknowledge({ ok: true, readyAt: Date.now() });
       stream.startAcknowledge = null;
     }
-    stream.keepAliveTimer = setInterval(() => {
+    const sendKeepAlive = () => {
       if (!isCurrent() || socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: 'KeepAlive' }));
-    }, 8000);
+    };
+    sendKeepAlive();
+    stream.keepAliveTimer = setInterval(
+      sendKeepAlive,
+      DEEPGRAM_KEEP_ALIVE_INTERVAL_MS,
+    );
     updateTranscriptionState(sessionId, {
       active: true,
       status: 'running',
@@ -11628,24 +11758,89 @@ function startDeepgramTranscription({
 
   socket.on('error', (error) => {
     if (!isCurrent()) return;
-    const message =
+    stream.lastTransportError =
       sanitizeLineText(error?.message || '') || 'Deepgram 辨識連線發生錯誤';
-    stopTranscriptionStream(sessionId, {
-      keepText: true,
-      reason: 'deepgram error',
-      errorMessage: message,
-    });
   });
 
   socket.on('close', (code, reason) => {
     if (!isCurrent() || stream.closing) return;
     if (stream.keepAliveTimer) clearInterval(stream.keepAliveTimer);
+    stream.keepAliveTimer = null;
+    if (stream.initTimeout) clearTimeout(stream.initTimeout);
+    stream.initTimeout = null;
+    stream.ready = false;
     const closeReason = normalizeCloseReason(reason);
     const message =
       closeReason ||
+      stream.lastTransportError ||
       (code === 1008
         ? 'Deepgram 驗證失敗，請確認 API Key 與額度'
         : `Deepgram 連線已中斷（${code}）`);
+
+    const canReconnect =
+      code !== 1000 &&
+      code !== 1008 &&
+      reconnectAttempt < DEEPGRAM_RECONNECT_MAX_ATTEMPTS &&
+      Boolean(getSessionRecord(sessionId));
+    if (canReconnect) {
+      const nextAttempt = reconnectAttempt + 1;
+      const retryDelay = Math.min(
+        DEEPGRAM_RECONNECT_BASE_DELAY_MS * 2 ** (nextAttempt - 1),
+        4000,
+      );
+      const pendingStartAcknowledge = stream.startAcknowledge;
+      stream.startAcknowledge = null;
+      stream.closing = true;
+      transcriptionStreams.delete(sessionId);
+      updateTranscriptionState(sessionId, {
+        active: true,
+        status: 'connecting',
+        error: '',
+      });
+      broadcastTranscriptionState(sessionId);
+
+      const reconnectTimer = setTimeout(() => {
+        deepgramReconnectTimers.delete(sessionId);
+        const session = getSessionRecord(sessionId);
+        const state = session ? ensureTranscriptionState(session) : null;
+        if (!session || state?.status !== 'connecting') {
+          if (typeof pendingStartAcknowledge === 'function') {
+            pendingStartAcknowledge({
+              ok: false,
+              reason: 'transcription_stopped',
+            });
+          }
+          return;
+        }
+        try {
+          startDeepgramTranscription({
+            sessionId,
+            socketId,
+            apiKey,
+            correctionApiKey,
+            language: selectedLanguage,
+            speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
+            transcriptionContext: selectedContext,
+            startAcknowledge: pendingStartAcknowledge,
+            reconnectAttempt: nextAttempt,
+          });
+        } catch (error) {
+          const retryError =
+            sanitizeLineText(error?.message || '') || message;
+          if (typeof pendingStartAcknowledge === 'function') {
+            pendingStartAcknowledge({ ok: false, reason: retryError });
+          }
+          applyTranscriptionError(sessionId, retryError);
+        }
+      }, retryDelay);
+      if (typeof reconnectTimer.unref === 'function') reconnectTimer.unref();
+      deepgramReconnectTimers.set(sessionId, {
+        timer: reconnectTimer,
+        socketId,
+      });
+      return;
+    }
+
     transcriptionStreams.delete(sessionId);
     applyTranscriptionError(sessionId, message);
   });
@@ -11715,7 +11910,11 @@ function startRealtimeTranscription({
     translationWorkers: new Map(),
     pendingTranslationKeys: new Set(),
     liveTranslationStatus: new Map(),
+    allowedTranslationLanguageCodes: new Set(
+      getAllowedLiveTranslationLanguageCodes(getSessionRecord(sessionId)),
+    ),
     liveTranslationStreamId: crypto.randomUUID(),
+    liveTranscriptionRevision: 0,
     liveTranslationRevision: 0,
     speakerRecognitionChain: Promise.resolve(),
     pendingSpeakerWindowKeys: new Set(),
@@ -12446,6 +12645,31 @@ io.on('connection', (socket) => {
     handleAutoFollowAudioLevel(session.id, normalizedLevel);
 
     if (!stream.ready) {
+      stream.pendingAudioChunks.push({
+        audio,
+        durationMs: normalizedDurationMs,
+        level: normalizedLevel,
+      });
+      if (stream.pendingAudioChunks.length > MAX_PENDING_AUDIO_CHUNKS) {
+        stream.pendingAudioChunks.splice(
+          0,
+          stream.pendingAudioChunks.length - MAX_PENDING_AUDIO_CHUNKS,
+        );
+      }
+      acknowledge({
+        ok: true,
+        queued: true,
+        receivedAt: Date.now(),
+        level: Number(normalizedLevel.toFixed(4)),
+      });
+      return;
+    }
+
+    if (
+      stream.provider === 'deepgram' &&
+      stream.socket?.readyState !== WebSocket.OPEN
+    ) {
+      stream.ready = false;
       stream.pendingAudioChunks.push({
         audio,
         durationMs: normalizedDurationMs,
@@ -13513,10 +13737,15 @@ io.on('connection', (socket) => {
       }
     }
 
-    const ownedSessions = [];
+    const ownedSessions = new Set();
     transcriptionStreams.forEach((stream, sessionId) => {
       if (stream.socketId === socket.id) {
-        ownedSessions.push(sessionId);
+        ownedSessions.add(sessionId);
+      }
+    });
+    deepgramReconnectTimers.forEach((entry, sessionId) => {
+      if (entry?.socketId === socket.id) {
+        ownedSessions.add(sessionId);
       }
     });
 
