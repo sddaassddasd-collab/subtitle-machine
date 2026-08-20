@@ -3973,6 +3973,11 @@ function serializeSessionForStorage(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
+    transcription: {
+      transcriptionContext: normalizeTranscriptionContextValue(
+        normalized.transcription?.transcriptionContext,
+      ),
+    },
     allowedLiveTranslationLanguageCodes:
       normalized.allowedLiveTranslationLanguageCodes,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
@@ -12740,6 +12745,35 @@ io.on('connection', (socket) => {
     broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
   });
+
+  socket.on(
+    'transcription:set-context',
+    ({ sessionId, transcriptionContext } = {}, ack) => {
+      const acknowledge = typeof ack === 'function' ? ack : () => {};
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) {
+        acknowledge({ ok: false, reason: 'session_not_allowed' });
+        return;
+      }
+
+      const selectedContext = normalizeTranscriptionContextValue(
+        transcriptionContext,
+      );
+      updateTranscriptionState(sessionId, {
+        transcriptionContext: selectedContext,
+      });
+      const stream = transcriptionStreams.get(sessionId);
+      if (stream) {
+        stream.transcriptionContext = selectedContext;
+      }
+      persistSession(session);
+      broadcastTranscriptionState(sessionId);
+      acknowledge({
+        ok: true,
+        transcriptionContext: selectedContext,
+      });
+    },
+  );
 
   socket.on(
     'transcription:set-viewer-language-access',

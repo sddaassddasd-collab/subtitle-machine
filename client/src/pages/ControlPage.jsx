@@ -182,6 +182,7 @@ const PROJECTOR_LAYOUT_INPUT_PATTERN = /^[+-]?\d+$/
 const PROJECTOR_REPEAT_START_DELAY_MS = 320
 const PROJECTOR_REPEAT_INTERVAL_MS = 85
 const CUE_CONFIRM_TIMEOUT_MS = 2000
+const TRANSCRIPTION_CONTEXT_SAVE_DELAY_MS = 500
 
 const TARGET_SAMPLE_RATE = 24000
 const MIC_CAPTURE_WORKLET_URL = new URL(
@@ -1025,6 +1026,10 @@ const ControlPage = () => {
   const pendingLineClickTimeoutRef = useRef(null)
   const skipBlurRef = useRef(new Set())
   const lastTranscriptionErrorRef = useRef('')
+  const transcriptionContextDraftRef = useRef('')
+  const transcriptionContextDirtyRef = useRef(false)
+  const transcriptionContextRevisionRef = useRef(0)
+  const transcriptionContextSaveTimerRef = useRef(null)
   const projectorRevisionRef = useRef(0)
   const projectorLayoutDirtyRef = useRef(false)
   const projectorLayoutDraftRef = useRef(normalizeProjectorLayout())
@@ -1369,6 +1374,22 @@ const ControlPage = () => {
     setProjectorLanguageMode(nextLanguageMode)
   }, [])
 
+  const applyTranscriptionPayload = useCallback((rawTranscription) => {
+    const nextTranscription = normalizeTranscriptionState(rawTranscription)
+    setTranscription(() => {
+      if (transcriptionContextDirtyRef.current) {
+        return {
+          ...nextTranscription,
+          transcriptionContext: transcriptionContextDraftRef.current,
+        }
+      }
+
+      transcriptionContextDraftRef.current =
+        nextTranscription.transcriptionContext
+      return nextTranscription
+    })
+  }, [])
+
   const applySessionPayload = useCallback(
     (payload) => {
       const nextSession =
@@ -1428,7 +1449,7 @@ const ControlPage = () => {
       )
       setRoleColorEnabled(payload?.roleColorEnabled !== false)
       applyProjectorSettingsPayload(payload?.projector)
-      setTranscription(normalizeTranscriptionState(payload?.transcription))
+      applyTranscriptionPayload(payload?.transcription)
       setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
       setHistoryState({
         canUndo: payload?.history?.canUndo === true,
@@ -1437,10 +1458,93 @@ const ControlPage = () => {
     },
     [
       applyProjectorSettingsPayload,
+      applyTranscriptionPayload,
       editingModeEnabled,
       requestCueScroll,
       syncLanguageSourceDrafts,
     ],
+  )
+
+  const clearTranscriptionContextSaveTimer = useCallback(() => {
+    if (!transcriptionContextSaveTimerRef.current) return
+    window.clearTimeout(transcriptionContextSaveTimerRef.current)
+    transcriptionContextSaveTimerRef.current = null
+  }, [])
+
+  const persistTranscriptionContext = useCallback(() => {
+    clearTranscriptionContextSaveTimer()
+    if (!transcriptionContextDirtyRef.current || !sessionId) {
+      return Promise.resolve(true)
+    }
+
+    const socket = socketRef.current
+    if (!socket?.connected) {
+      return Promise.resolve(false)
+    }
+
+    const revision = transcriptionContextRevisionRef.current
+    const context = transcriptionContextDraftRef.current
+    return new Promise((resolve) => {
+      socket.timeout(5000).emit(
+        'transcription:set-context',
+        { sessionId, transcriptionContext: context },
+        (error, response) => {
+          if (error || response?.ok !== true) {
+            if (transcriptionContextRevisionRef.current === revision) {
+              setStatus({
+                kind: 'error',
+                message: '無法保存辨識主題／術語提示，請再試一次',
+              })
+            }
+            resolve(false)
+            return
+          }
+
+          if (
+            transcriptionContextRevisionRef.current !== revision ||
+            transcriptionContextDraftRef.current !== context
+          ) {
+            resolve(true)
+            return
+          }
+
+          const savedContext =
+            typeof response.transcriptionContext === 'string'
+              ? response.transcriptionContext
+              : context
+          transcriptionContextDirtyRef.current = false
+          transcriptionContextDraftRef.current = savedContext
+          setTranscription((previousTranscription) => ({
+            ...previousTranscription,
+            transcriptionContext: savedContext,
+          }))
+          resolve(true)
+        },
+      )
+    })
+  }, [clearTranscriptionContextSaveTimer, sessionId])
+
+  const scheduleTranscriptionContextSave = useCallback(() => {
+    clearTranscriptionContextSaveTimer()
+    transcriptionContextSaveTimerRef.current = window.setTimeout(() => {
+      transcriptionContextSaveTimerRef.current = null
+      void persistTranscriptionContext()
+    }, TRANSCRIPTION_CONTEXT_SAVE_DELAY_MS)
+  }, [clearTranscriptionContextSaveTimer, persistTranscriptionContext])
+
+  const handleTranscriptionContextChange = useCallback(
+    (event) => {
+      const nextContext = event.target.value
+      transcriptionContextDraftRef.current = nextContext
+      transcriptionContextDirtyRef.current = true
+      transcriptionContextRevisionRef.current += 1
+      setTranscription((previousTranscription) => ({
+        ...previousTranscription,
+        transcriptionContext: nextContext,
+      }))
+      scheduleTranscriptionContextSave()
+    },
+    [scheduleTranscriptionContextSave],
   )
 
   const releaseMicrophoneCapture = () => {
@@ -1699,6 +1803,13 @@ const ControlPage = () => {
   }, [sessionId])
 
   useEffect(() => {
+    clearTranscriptionContextSaveTimer()
+    transcriptionContextDraftRef.current = ''
+    transcriptionContextDirtyRef.current = false
+    transcriptionContextRevisionRef.current += 1
+  }, [clearTranscriptionContextSaveTimer, sessionId])
+
+  useEffect(() => {
     if (!cueScrollRequest) return
     const targetIndex = linesRef.current.findIndex(
       (line) => line?.id === cueScrollRequest.lineId,
@@ -1748,10 +1859,13 @@ const ControlPage = () => {
     const rejoinAndRefresh = () => {
       joinSession()
       refreshSession()
+      if (transcriptionContextDirtyRef.current) {
+        void persistTranscriptionContext()
+      }
     }
 
     const handleTranscriptionUpdate = (payload) => {
-      setTranscription(normalizeTranscriptionState(payload?.transcription))
+      applyTranscriptionPayload(payload?.transcription)
       setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
     }
 
@@ -1802,14 +1916,22 @@ const ControlPage = () => {
       socket.disconnect()
       socketRef.current = null
     }
-  }, [authReady, user, sessionId, applySessionPayload])
+  }, [
+    authReady,
+    user,
+    sessionId,
+    applySessionPayload,
+    applyTranscriptionPayload,
+    persistTranscriptionContext,
+  ])
 
   useEffect(() => {
     return () => {
       clearPendingLineClick()
+      clearTranscriptionContextSaveTimer()
       releaseMicrophoneCapture()
     }
-  }, [clearPendingLineClick])
+  }, [clearPendingLineClick, clearTranscriptionContextSaveTimer])
 
   useEffect(() => {
     if (transcription.active || transcription.status === 'connecting') {
@@ -2211,6 +2333,8 @@ const ControlPage = () => {
       setStatus({ kind: 'error', message: '尚未連上節目，無法啟動語音辨識' })
       return false
     }
+
+    void persistTranscriptionContext()
 
     if (transcription.provider === 'openai' && !apiKey) {
       setStatus({ kind: 'error', message: '請先填入 OpenAI API Key' })
@@ -4977,11 +5101,9 @@ const ControlPage = () => {
                 placeholder="例如：主題、關鍵詞、專有名詞"
                 value={transcription.transcriptionContext}
                 disabled={transcriptionBusy}
-                onChange={(event) => {
-                  setTranscription((prev) => ({
-                    ...prev,
-                    transcriptionContext: event.target.value,
-                  }))
+                onChange={handleTranscriptionContextChange}
+                onBlur={() => {
+                  void persistTranscriptionContext()
                 }}
               />
               <label className="checkbox-row">
