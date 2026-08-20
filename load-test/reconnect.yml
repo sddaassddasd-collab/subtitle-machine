@@ -1,0 +1,23 @@
+config:
+  target: "{{ $env.TARGET }}"
+  phases:
+    - duration: "{{ $env.TEST_SECONDS }}"
+      arrivalRate: "{{ $env.RECONNECTS_PER_SECOND }}"
+      name: "持續模擬手機回到前景後重新連線"
+
+scenarios:
+  - name: "重新取得目前字幕、加入房間後短暫保持連線"
+    engine: socketio
+    flow:
+      - get:
+          url: "/api/viewer/{{ $env.VIEWER_TOKEN }}"
+      - emit:
+          channel: "join"
+          data:
+            viewerToken: "{{ $env.VIEWER_TOKEN }}"
+            role: "viewer"
+      - emit:
+          channel: "viewer:live-language"
+          data:
+            languageCode: "source"
+      - think: "{{ $env.RECONNECT_HOLD_SECONDS }}"

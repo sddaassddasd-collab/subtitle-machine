@@ -1,0 +1,23 @@
+config:
+  target: "{{ $env.TARGET }}"
+  phases:
+    - duration: "{{ $env.RAMP_SECONDS }}"
+      arrivalCount: "{{ $env.ARRIVAL_COUNT }}"
+      name: "逐步建立觀眾連線"
+
+scenarios:
+  - name: "觀眾載入字幕並保持 Socket.IO 連線"
+    engine: socketio
+    flow:
+      - get:
+          url: "/api/viewer/{{ $env.VIEWER_TOKEN }}"
+      - emit:
+          channel: "join"
+          data:
+            viewerToken: "{{ $env.VIEWER_TOKEN }}"
+            role: "viewer"
+      - emit:
+          channel: "viewer:live-language"
+          data:
+            languageCode: "source"
+      - think: "{{ $env.HOLD_SECONDS }}"
