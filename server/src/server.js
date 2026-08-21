@@ -13541,44 +13541,64 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('insertLineAfter', ({ sessionId, index, type, languageId }) => {
-    const session = getOwnedSocketSession(sessionId);
-    if (!session) return;
+  socket.on(
+    'insertLineAfter',
+    ({ sessionId, index, lineId, type, languageId } = {}, ack) => {
+      const acknowledge = typeof ack === 'function' ? ack : () => {};
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) {
+        acknowledge({ ok: false, reason: 'session_not_allowed' });
+        return;
+      }
 
-    if (!Number.isInteger(index) || index < 0 || index >= session.lines.length) {
-      return;
-    }
+      const requestedLineId =
+        typeof lineId === 'string' && lineId.trim() ? lineId.trim() : '';
+      const resolvedIndex = requestedLineId
+        ? session.lines.findIndex((line) => line?.id === requestedLineId)
+        : index;
 
-    const targetLanguageId = resolveSessionLanguageId(session, languageId);
-    const existing = session.lines[index];
-    const baseType =
-      clampLineType(type) ||
-      (existing && typeof existing === 'object'
-        ? clampLineType(existing.type)
-        : null) ||
-      LINE_TYPES.DIALOGUE;
-    pushSessionHistory(session);
+      if (
+        !Number.isInteger(resolvedIndex) ||
+        resolvedIndex < 0 ||
+        resolvedIndex >= session.lines.length
+      ) {
+        acknowledge({ ok: false, reason: 'line_not_found' });
+        return;
+      }
 
-    session.lines.splice(
-      index + 1,
-      0,
-      createBlankSessionLine(session, {
+      const targetLanguageId = resolveSessionLanguageId(session, languageId);
+      const existing = session.lines[resolvedIndex];
+      const baseType =
+        clampLineType(type) ||
+        (existing && typeof existing === 'object'
+          ? clampLineType(existing.type)
+          : null) ||
+        LINE_TYPES.DIALOGUE;
+      pushSessionHistory(session);
+
+      const insertedLine = createBlankSessionLine(session, {
         type: baseType,
         music: isLineMarkedMusic(existing),
         role: existing?.role || null,
         languageId: targetLanguageId,
         text: '',
-      }),
-    );
+      });
+      session.lines.splice(resolvedIndex + 1, 0, insertedLine);
 
-    if (session.currentIndex > index) {
-      session.currentIndex += 1;
-    }
+      if (session.currentIndex > resolvedIndex) {
+        session.currentIndex += 1;
+      }
 
-    persistSession(session);
-    broadcastControlState(sessionId);
-    broadcastViewerState(sessionId);
-  });
+      persistSession(session);
+      acknowledge({
+        ok: true,
+        index: resolvedIndex + 1,
+        lineId: insertedLine.id,
+      });
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+    },
+  );
 
   socket.on('mergeLineIntoPrevious', ({ sessionId, index, currentText, languageId }) => {
     const session = getOwnedSocketSession(sessionId);

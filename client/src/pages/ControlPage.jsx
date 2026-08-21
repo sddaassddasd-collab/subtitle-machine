@@ -1007,6 +1007,7 @@ const ControlPage = () => {
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
   const liveCurrentIndexRef = useRef(0)
   const liveLineIdRef = useRef(null)
+  const lineInsertionAnchorIdRef = useRef(null)
   const pendingCueRequestRef = useRef(null)
   const [cueScrollRequest, setCueScrollRequest] = useState(null)
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
@@ -1637,6 +1638,8 @@ const ControlPage = () => {
         pendingCueRequestRef.current = { index, requestedAt: Date.now() }
         liveCurrentIndexRef.current = index
         liveLineIdRef.current = linesRef.current[index]?.id || null
+        lineInsertionAnchorIdRef.current =
+          linesRef.current[index]?.id || null
         setLiveCurrentIndex(index)
         setCurrentIndex(index)
         if (!editingModeEnabled) {
@@ -1800,6 +1803,7 @@ const ControlPage = () => {
 
   useEffect(() => {
     liveLineIdRef.current = null
+    lineInsertionAnchorIdRef.current = null
     setCueScrollRequest(null)
   }, [sessionId])
 
@@ -2763,6 +2767,7 @@ const ControlPage = () => {
     pendingCueRequestRef.current = { index, requestedAt: Date.now() }
     liveCurrentIndexRef.current = index
     liveLineIdRef.current = lines[index]?.id || null
+    lineInsertionAnchorIdRef.current = lines[index]?.id || null
     setLiveCurrentIndex(index)
     setCurrentIndex(index)
     if (!editingModeEnabled) requestCueScroll(lines[index]?.id)
@@ -2926,6 +2931,7 @@ const ControlPage = () => {
 
   const handleLineTextClick = (event, index, languageId) => {
     event.stopPropagation()
+    lineInsertionAnchorIdRef.current = lines[index]?.id || null
     if (
       editingCell &&
       (editingCell.lineId
@@ -2945,6 +2951,7 @@ const ControlPage = () => {
     setRoleEditor(null)
     const lineId = lines[index]?.id
     if (!lineId) return
+    lineInsertionAnchorIdRef.current = lineId
     setEditingCell({
       index,
       lineId,
@@ -3275,6 +3282,7 @@ const ControlPage = () => {
       socketRef.current.emit('insertLineAfter', {
         sessionId,
         index,
+        lineId: currentLine?.id,
         type: currentType,
         languageId,
       })
@@ -3391,6 +3399,7 @@ const ControlPage = () => {
     socketRef.current.emit('insertLineAfter', {
       sessionId,
       index,
+      lineId: currentLine.id,
       type: currentType,
       languageId,
     })
@@ -3496,11 +3505,32 @@ const ControlPage = () => {
   const handleAddLine = async () => {
     if (!sessionId || !selectedCellId) return
 
-    const nextIndex = lines.length
-    const draftLine = createDraftLine(lines[nextIndex - 1] || null)
+    const editingLineIndex = editingCell?.lineId
+      ? lines.findIndex((line) => line?.id === editingCell.lineId)
+      : Number.isInteger(editingCell?.index)
+        ? editingCell.index
+        : -1
+    const rememberedAnchorIndex = editingModeEnabled
+      ? lines.findIndex(
+          (line) => line?.id === lineInsertionAnchorIdRef.current,
+        )
+      : -1
+    const insertAfterIndex =
+      editingLineIndex >= 0 && editingLineIndex < lines.length
+        ? editingLineIndex
+        : rememberedAnchorIndex >= 0
+          ? rememberedAnchorIndex
+          : lines.length > 0
+            ? clampLineIndex(currentIndex, lines.length)
+            : -1
+    const insertionIndex = insertAfterIndex + 1
+    const anchorLine = lines[insertAfterIndex] || null
+    const draftLine = createDraftLine(anchorLine)
     setRoleEditor(null)
 
-    if (nextIndex === 0 || !socketRef.current?.connected) {
+    if (lines.length === 0 || !socketRef.current?.connected) {
+      const nextLines = [...lines]
+      nextLines.splice(insertionIndex, 0, draftLine)
       try {
         await performSessionMutation(
           () =>
@@ -3509,30 +3539,86 @@ const ControlPage = () => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 cellId: selectedCellId,
-                lines: [...lines, draftLine],
+                lines: nextLines,
               }),
             }),
           {
             successMessage:
-              nextIndex === 0 ? '已新增第一個字幕格' : '已新增字幕格',
+              lines.length === 0 ? '已新增第一個字幕格' : '已在目前字幕下方新增字幕格',
           },
         )
-        setEditingCell({ index: nextIndex, lineId: draftLine.id, languageId: 'primary' })
+        lineInsertionAnchorIdRef.current = draftLine.id
+        setEditingCell({
+          index: insertionIndex,
+          lineId: draftLine.id,
+          languageId: 'primary',
+        })
       } catch {
         // performSessionMutation already reports the error.
       }
       return
     }
 
-    setLines((prev) => [...prev, draftLine])
-    setEditingCell({ index: nextIndex, lineId: draftLine.id, languageId: 'primary' })
-    socketRef.current.emit('insertLineAfter', {
-      sessionId,
-      index: nextIndex - 1,
-      type: draftLine.type,
+    setLines((prev) => {
+      const next = [...prev]
+      next.splice(insertionIndex, 0, draftLine)
+      return next
+    })
+    shiftIndexesAfterLineInsertion(insertAfterIndex)
+    lineInsertionAnchorIdRef.current = draftLine.id
+    setEditingCell({
+      index: insertionIndex,
+      lineId: draftLine.id,
       languageId: 'primary',
     })
-    setStatus({ kind: 'success', message: '已新增字幕格' })
+    socketRef.current.timeout(5000).emit(
+      'insertLineAfter',
+      {
+        sessionId,
+        index: insertAfterIndex,
+        lineId: anchorLine?.id,
+        type: draftLine.type,
+        languageId: 'primary',
+      },
+      (ackError, result) => {
+        if (ackError || result?.ok !== true) {
+          const draftIndex = linesRef.current.findIndex(
+            (line) => line?.id === draftLine.id,
+          )
+          if (draftIndex < 0) {
+            setStatus({ kind: 'success', message: '已在目前字幕下方新增字幕格' })
+            return
+          }
+          setLines((prev) =>
+            prev.filter((line) => line?.id !== draftLine.id),
+          )
+          shiftIndexesAfterLineRemoval(draftIndex)
+          lineInsertionAnchorIdRef.current = anchorLine?.id || null
+          setStatus({
+            kind: 'error',
+            message: '伺服器未確認新增字幕格，已撤回暫時空白格',
+          })
+          return
+        }
+
+        const savedLineId =
+          typeof result.lineId === 'string' && result.lineId
+            ? result.lineId
+            : draftLine.id
+        lineInsertionAnchorIdRef.current = savedLineId
+        setLines((prev) =>
+          prev.map((line) =>
+            line?.id === draftLine.id ? { ...line, id: savedLineId } : line,
+          ),
+        )
+        setEditingCell((prev) =>
+          prev?.lineId === draftLine.id
+            ? { ...prev, lineId: savedLineId }
+            : prev,
+        )
+        setStatus({ kind: 'success', message: '已在目前字幕下方新增字幕格' })
+      },
+    )
   }
 
   const handleImportJson = async (event) => {
