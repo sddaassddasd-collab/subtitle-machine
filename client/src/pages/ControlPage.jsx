@@ -854,6 +854,7 @@ const EditableSubtitleText = ({
 
     if (wasEditingRef.current) return
     wasEditingRef.current = true
+    if (node.textContent !== text) node.textContent = text
     node.focus()
     const range = document.createRange()
     range.selectNodeContents(node)
