@@ -52,6 +52,8 @@ const TRANSCRIPTION_PROVIDERS = new Set(['deepgram', 'openai'])
 const PRIMARY_ONLY_OPTION_ID = '__primary_only__'
 const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 const NEW_ROLE_OPTION_ID = '__new_role__'
+const DEFAULT_MUSIC_TEXT = '此處有音樂'
+const MAX_MUSIC_TEXT_CHARS = 80
 const ControlSection = ({ title, defaultOpen = false, children }) => {
   const [open, setOpen] = useState(defaultOpen)
 
@@ -386,33 +388,105 @@ const int16ToBase64 = (samples) => {
 const isLineMarkedMusic = (line) =>
   Boolean(line && typeof line === 'object' && line.music === true)
 
-const applyLineMusicState = (sourceLines, index, music) =>
-  sourceLines.map((line, lineIndex) => {
+const createMusicCueId = () =>
+  `music-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+const getMusicCueId = (line) =>
+  isLineMarkedMusic(line) && typeof line.musicCueId === 'string'
+    ? line.musicCueId.trim()
+    : ''
+
+const getMusicText = (line) => {
+  if (!isLineMarkedMusic(line)) return ''
+  const text = typeof line.musicText === 'string' ? line.musicText.trim() : ''
+  return text || DEFAULT_MUSIC_TEXT
+}
+
+const normalizeMusicCueRuns = (sourceLines) => {
+  const seenCueIds = new Set()
+  let previousOriginalCueId = ''
+  let assignedCueId = ''
+
+  return sourceLines.map((line) => {
+    if (!isLineMarkedMusic(line)) {
+      previousOriginalCueId = ''
+      assignedCueId = ''
+      return line && typeof line === 'object'
+        ? { ...line, music: false, musicCueId: null, musicText: '' }
+        : line
+    }
+
+    const originalCueId = getMusicCueId(line) || createMusicCueId()
+    if (originalCueId !== previousOriginalCueId) {
+      assignedCueId = seenCueIds.has(originalCueId)
+        ? createMusicCueId()
+        : originalCueId
+      seenCueIds.add(originalCueId)
+      seenCueIds.add(assignedCueId)
+    }
+    previousOriginalCueId = originalCueId
+    return {
+      ...line,
+      music: true,
+      musicCueId: assignedCueId,
+      musicText: getMusicText(line),
+    }
+  })
+}
+
+const applyLineMusicState = (
+  sourceLines,
+  index,
+  music,
+  { musicCueId = '', musicText = DEFAULT_MUSIC_TEXT } = {},
+) =>
+  normalizeMusicCueRuns(sourceLines.map((line, lineIndex) => {
     if (lineIndex !== index) return line
     if (line && typeof line === 'object') {
-      return { ...line, music }
+      return {
+        ...line,
+        music,
+        musicCueId: music ? musicCueId || createMusicCueId() : null,
+        musicText: music ? musicText || DEFAULT_MUSIC_TEXT : '',
+      }
     }
     return {
       text: typeof line === 'string' ? line : '',
       type: 'dialogue',
       music,
+      musicCueId: music ? musicCueId || createMusicCueId() : null,
+      musicText: music ? musicText || DEFAULT_MUSIC_TEXT : '',
     }
-  })
+  }))
 
-const applyMusicRangeState = (sourceLines, startIndex, endIndex, music) => {
+const applyMusicRangeState = (
+  sourceLines,
+  startIndex,
+  endIndex,
+  music,
+  { musicCueId = '', musicText = DEFAULT_MUSIC_TEXT } = {},
+) => {
   const rangeStart = Math.min(startIndex, endIndex)
   const rangeEnd = Math.max(startIndex, endIndex)
-  return sourceLines.map((line, index) => {
+  const nextCueId = music ? musicCueId || createMusicCueId() : null
+  return normalizeMusicCueRuns(sourceLines.map((line, index) => {
     if (index < rangeStart || index > rangeEnd) return line
     if (line && typeof line === 'object') {
-      return { ...line, music }
+      return {
+        ...line,
+        music,
+        musicCueId: nextCueId,
+        musicText: music ? musicText || DEFAULT_MUSIC_TEXT : '',
+      }
     }
     return {
       text: typeof line === 'string' ? line : '',
       type: 'dialogue',
       music,
+      musicCueId: nextCueId,
+      musicText: music ? musicText || DEFAULT_MUSIC_TEXT : '',
     }
-  })
+  }))
 }
 
 const clampLineIndex = (index, lineCount) => {
@@ -531,6 +605,9 @@ const mergeLineRecords = (previousLine, currentLine, currentTextOverride = null)
     previousLine?.translations,
     currentLine?.translations,
   )
+  const mergedMusicSource = isLineMarkedMusic(previousLine)
+    ? previousLine
+    : currentLine
 
   return {
     ...(previousLine && typeof previousLine === 'object' ? previousLine : {}),
@@ -540,6 +617,8 @@ const mergeLineRecords = (previousLine, currentLine, currentTextOverride = null)
         ? 'direction'
         : 'dialogue',
     music: isLineMarkedMusic(previousLine) || isLineMarkedMusic(currentLine),
+    musicCueId: getMusicCueId(mergedMusicSource) || null,
+    musicText: getMusicText(mergedMusicSource),
     role:
       previousLine && typeof previousLine === 'object' && previousLine.role
         ? previousLine.role
@@ -580,7 +659,15 @@ const lineHasAnyLanguageText = (line) => {
 
 const createBlankLineRecord = (
   languages,
-  { type = 'dialogue', music = false, role = null, languageId = 'primary', text = '' } = {},
+  {
+    type = 'dialogue',
+    music = false,
+    musicCueId = '',
+    musicText = DEFAULT_MUSIC_TEXT,
+    role = null,
+    languageId = 'primary',
+    text = '',
+  } = {},
 ) => {
   const normalizedText = typeof text === 'string' ? text : ''
   const primaryText = languageId === 'primary' ? normalizedText : ''
@@ -590,6 +677,8 @@ const createBlankLineRecord = (
     text: primaryText,
     type,
     music,
+    musicCueId: music ? musicCueId || createMusicCueId() : null,
+    musicText: music ? musicText || DEFAULT_MUSIC_TEXT : '',
     role: type === 'direction' ? null : role,
     translations: {
       ...buildBlankTranslations(languages),
@@ -753,6 +842,8 @@ const applyLineLanguageSuffixMoveToNext = (
           ? 'direction'
           : 'dialogue',
       music: isLineMarkedMusic(currentLine),
+      musicCueId: getMusicCueId(currentLine),
+      musicText: getMusicText(currentLine),
       role: currentLine?.role || null,
       languageId,
       text: afterText,
@@ -1022,6 +1113,7 @@ const ControlPage = () => {
   const simpleLanguageInputRef = useRef(null)
   const sessionBackupInputRef = useRef(null)
   const lineDraftsRef = useRef({})
+  const musicCueTextDraftsRef = useRef({})
   const composingLineDraftsRef = useRef(new Set())
   const rowRefs = useRef([])
   const serverDraftInputsRef = useRef({})
@@ -1396,7 +1488,24 @@ const ControlPage = () => {
     (payload) => {
       const nextSession =
         payload && typeof payload.session === 'object' ? payload.session : null
-      const nextLines = Array.isArray(payload?.lines) ? payload.lines : []
+      const nextLines = Array.isArray(payload?.lines)
+        ? payload.lines.map((line) => {
+            const cueId = getMusicCueId(line)
+            if (
+              cueId &&
+              Object.prototype.hasOwnProperty.call(
+                musicCueTextDraftsRef.current,
+                cueId,
+              )
+            ) {
+              return {
+                ...line,
+                musicText: musicCueTextDraftsRef.current[cueId],
+              }
+            }
+            return line
+          })
+        : []
       const nextLiveIndex = clampLineIndex(
         Number.isInteger(payload?.currentIndex) ? payload.currentIndex : 0,
         nextLines.length,
@@ -3142,7 +3251,17 @@ const ControlPage = () => {
     if (shiftPressed && anchorIndex >= 0 && anchorIndex !== index) {
       const rangeStart = Math.min(anchorIndex, index)
       const rangeEnd = Math.max(anchorIndex, index)
-      setLines((prev) => applyMusicRangeState(prev, rangeStart, rangeEnd, checked))
+      const anchorLine = lines[anchorIndex]
+      const musicCueId = checked
+        ? getMusicCueId(anchorLine) || createMusicCueId()
+        : ''
+      const musicText = checked ? getMusicText(anchorLine) : ''
+      setLines((prev) =>
+        applyMusicRangeState(prev, rangeStart, rangeEnd, checked, {
+          musicCueId,
+          musicText,
+        }),
+      )
       socketRef.current.emit('setLineMusicRange', {
         sessionId,
         startIndex: rangeStart,
@@ -3150,6 +3269,8 @@ const ControlPage = () => {
         startLineId: lines[rangeStart]?.id,
         endLineId: lines[rangeEnd]?.id,
         music: checked,
+        musicCueId,
+        musicText,
       })
       setStatus({
         kind: 'info',
@@ -3158,18 +3279,84 @@ const ControlPage = () => {
       return
     }
 
-    setLines((prev) => applyLineMusicState(prev, index, checked))
+    const musicCueId = checked ? createMusicCueId() : ''
+    const musicText = checked ? DEFAULT_MUSIC_TEXT : ''
+    setLines((prev) =>
+      applyLineMusicState(prev, index, checked, { musicCueId, musicText }),
+    )
     setMusicRangeAnchorLineId(lineId || null)
     socketRef.current.emit('setLineMusic', {
       sessionId,
       index,
       lineId,
       music: checked,
+      musicCueId,
+      musicText,
     })
     setStatus({
       kind: 'info',
       message: `第 ${index + 1} 行已${checked ? '標記' : '取消'}音樂；按住 Shift 點擊其他行可設定整段`,
     })
+  }
+
+  const handleMusicCueTextChange = (event, musicCueId) => {
+    event.stopPropagation()
+    if (!musicCueId) return
+    const nextText = event.target.value.slice(0, MAX_MUSIC_TEXT_CHARS)
+    musicCueTextDraftsRef.current[musicCueId] = nextText
+    setLines((previousLines) =>
+      previousLines.map((line) =>
+        getMusicCueId(line) === musicCueId
+          ? { ...line, musicText: nextText }
+          : line,
+      ),
+    )
+  }
+
+  const persistMusicCueText = (musicCueId) => {
+    if (!socketRef.current || !sessionId || !musicCueId) return
+    const currentText = Object.prototype.hasOwnProperty.call(
+      musicCueTextDraftsRef.current,
+      musicCueId,
+    )
+      ? musicCueTextDraftsRef.current[musicCueId]
+      : getMusicText(lines.find((line) => getMusicCueId(line) === musicCueId))
+
+    socketRef.current.timeout(5000).emit(
+      'setMusicCueText',
+      { sessionId, musicCueId, musicText: currentText },
+      (error, response) => {
+        if (error || response?.ok !== true) {
+          setStatus({
+            kind: 'error',
+            message: '音樂提示文字尚未保存，輸入內容已保留',
+          })
+          return
+        }
+
+        const savedText = response.musicText || DEFAULT_MUSIC_TEXT
+        if (musicCueTextDraftsRef.current[musicCueId] === currentText) {
+          delete musicCueTextDraftsRef.current[musicCueId]
+        }
+        const hasNewerDraft = Object.prototype.hasOwnProperty.call(
+          musicCueTextDraftsRef.current,
+          musicCueId,
+        )
+        setLines((previousLines) =>
+          previousLines.map((line) =>
+            getMusicCueId(line) === musicCueId
+              ? {
+                  ...line,
+                  musicText: hasNewerDraft
+                    ? musicCueTextDraftsRef.current[musicCueId]
+                    : savedText,
+                }
+              : line,
+          ),
+        )
+        setStatus({ kind: 'success', message: '音樂提示文字已保存' })
+      },
+    )
   }
 
   const handleLineKeyDown = (event, index, languageId) => {
@@ -3270,6 +3457,8 @@ const ControlPage = () => {
           createBlankLineRecord(languages, {
             type: currentType,
             music: currentMusic,
+            musicCueId: getMusicCueId(currentLine),
+            musicText: getMusicText(currentLine),
             role: currentLine?.role || null,
             languageId,
             text: '',
@@ -3338,6 +3527,8 @@ const ControlPage = () => {
         createBlankLineRecord(languages, {
           type: currentType,
           music: currentMusic,
+          musicCueId: getMusicCueId(currentLine),
+          musicText: getMusicText(currentLine),
           role: currentLine?.role || null,
           languageId,
           text: afterText,
@@ -3382,6 +3573,8 @@ const ControlPage = () => {
     const draftLine = createBlankLineRecord(languages, {
       type: currentType,
       music: isLineMarkedMusic(currentLine),
+      musicCueId: getMusicCueId(currentLine),
+      musicText: getMusicText(currentLine),
       role: currentLine?.role || null,
       languageId,
       text: '',
@@ -3495,6 +3688,8 @@ const ControlPage = () => {
         ? 'direction'
         : 'dialogue',
     music: isLineMarkedMusic(baseLine),
+    musicCueId: getMusicCueId(baseLine) || null,
+    musicText: getMusicText(baseLine),
     role:
       baseLine && typeof baseLine === 'object' && baseLine.role
         ? baseLine.role
@@ -5548,17 +5743,30 @@ const ControlPage = () => {
                 ? 'direction'
                 : 'dialogue'
             const musicActive = isLineMarkedMusic(line)
-            const previousMusicActive = isLineMarkedMusic(lines[index - 1])
-            const nextMusicActive = isLineMarkedMusic(lines[index + 1])
+            const musicCueId = getMusicCueId(line)
+            const previousSameMusicCue =
+              musicActive &&
+              musicCueId &&
+              getMusicCueId(lines[index - 1]) === musicCueId
+            const nextSameMusicCue =
+              musicActive &&
+              musicCueId &&
+              getMusicCueId(lines[index + 1]) === musicCueId
+            const musicCueTextValue = Object.prototype.hasOwnProperty.call(
+              musicCueTextDraftsRef.current,
+              musicCueId,
+            )
+              ? musicCueTextDraftsRef.current[musicCueId]
+              : getMusicText(line)
             const translatedCount = extraLanguages.filter(
               (language) => line?.translations?.[language.id]?.trim(),
             ).length
             const musicBoundaryLabel = musicActive
-              ? !previousMusicActive && !nextMusicActive
+              ? !previousSameMusicCue && !nextSameMusicCue
                 ? '音樂'
-                : !previousMusicActive
+                : !previousSameMusicCue
                   ? '音樂起'
-                  : !nextMusicActive
+                  : !nextSameMusicCue
                     ? '音樂迄'
                     : '音樂中'
               : ''
@@ -5575,8 +5783,8 @@ const ControlPage = () => {
                   lineType === 'direction' ? 'direction' : ''
                 } ${
                   musicActive ? 'music' : ''
-                } ${musicActive && !previousMusicActive ? 'music-start' : ''} ${
-                  musicActive && !nextMusicActive ? 'music-end' : ''
+                } ${musicActive && !previousSameMusicCue ? 'music-start' : ''} ${
+                  musicActive && !nextSameMusicCue ? 'music-end' : ''
                 }`}
                 onClick={() => handleJumpToLine(index)}
               >
@@ -5654,6 +5862,33 @@ const ControlPage = () => {
                     </button>
                   </div>
                 </div>
+
+                {musicActive && !previousSameMusicCue && (
+                  <label
+                    className="music-cue-text-editor"
+                    onClick={(lineEvent) => lineEvent.stopPropagation()}
+                  >
+                    <span>這段顯示文字</span>
+                    <input
+                      type="text"
+                      value={musicCueTextValue}
+                      maxLength={MAX_MUSIC_TEXT_CHARS}
+                      placeholder={DEFAULT_MUSIC_TEXT}
+                      onChange={(lineEvent) =>
+                        handleMusicCueTextChange(lineEvent, musicCueId)
+                      }
+                      onBlur={() => persistMusicCueText(musicCueId)}
+                      onKeyDown={(lineEvent) => {
+                        lineEvent.stopPropagation()
+                        if (lineEvent.key === 'Enter') {
+                          lineEvent.preventDefault()
+                          lineEvent.currentTarget.blur()
+                        }
+                      }}
+                    />
+                    <small>{musicCueTextValue.length}/{MAX_MUSIC_TEXT_CHARS}</small>
+                  </label>
+                )}
 
                 <div
                   className={`script-line-columns ${
@@ -5881,7 +6116,9 @@ const ControlPage = () => {
               </div>
             )}
             {currentLineMusicVisible && (
-              <div className="viewer-preview-music">此處有音樂</div>
+              <div className="viewer-preview-music">
+                {getMusicText(currentLine)}
+              </div>
             )}
             {!musicEffectEnabled && (
               <div className="viewer-preview-note">

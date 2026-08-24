@@ -115,6 +115,8 @@ const PASSWORD_RESET_TTL_MS = 1000 * 60 * 15;
 const PROJECTOR_PRESENCE_TTL_MS = 1000 * 35;
 const PROJECTOR_PRESENCE_SWEEP_INTERVAL_MS = 5000;
 const SESSION_HISTORY_LIMIT = 80;
+const DEFAULT_MUSIC_TEXT = '此處有音樂';
+const MAX_MUSIC_TEXT_CHARS = 80;
 // Playback position is hot state during a show. Persist only after navigation
 // settles so one-second cue changes do not rewrite the complete application
 // store every second.
@@ -2415,6 +2417,67 @@ function normalizeTranslationsMap(
   return translations;
 }
 
+function normalizeMusicCueId(rawCueId) {
+  return sanitizeLineText(rawCueId || '').slice(0, 80);
+}
+
+function normalizeMusicText(rawText) {
+  const normalized = sanitizeLineText(rawText || '').slice(
+    0,
+    MAX_MUSIC_TEXT_CHARS,
+  );
+  return normalized || DEFAULT_MUSIC_TEXT;
+}
+
+function normalizeMusicCueTimeline(lines) {
+  let previousCueId = '';
+  const normalizedLines = lines.map((line) => {
+    if (!line || line.music !== true) {
+      previousCueId = '';
+      return line && typeof line === 'object'
+        ? { ...line, music: false, musicCueId: null, musicText: '' }
+        : line;
+    }
+
+    const cueId =
+      normalizeMusicCueId(line.musicCueId) ||
+      previousCueId ||
+      generateId('music');
+    previousCueId = cueId;
+    return {
+      ...line,
+      music: true,
+      musicCueId: cueId,
+      musicText: normalizeMusicText(line.musicText),
+    };
+  });
+
+  // A cue may be split when a line in its middle is unchecked or deleted.
+  // Give every disconnected run its own id so later text edits cannot leak
+  // into a separate music segment that happens to have inherited the old id.
+  const seenCueIds = new Set();
+  let previousOriginalCueId = '';
+  let assignedCueId = '';
+  return normalizedLines.map((line) => {
+    if (!line || line.music !== true) {
+      previousOriginalCueId = '';
+      assignedCueId = '';
+      return line;
+    }
+
+    const originalCueId = normalizeMusicCueId(line.musicCueId);
+    if (originalCueId !== previousOriginalCueId) {
+      assignedCueId = seenCueIds.has(originalCueId)
+        ? generateId('music')
+        : originalCueId;
+      seenCueIds.add(originalCueId);
+      seenCueIds.add(assignedCueId);
+    }
+    previousOriginalCueId = originalCueId;
+    return { ...line, musicCueId: assignedCueId };
+  });
+}
+
 function createLineRecord(entry, primaryLanguageId = 'primary') {
   const rawType = clampLineType(entry?.type) || LINE_TYPES.DIALOGUE;
   const text = sanitizeLineText(entry?.text ?? '');
@@ -2425,6 +2488,7 @@ function createLineRecord(entry, primaryLanguageId = 'primary') {
     text,
   );
   translations[primaryLanguageId] = text;
+  const music = normalizeLineMusic(entry?.music);
 
   return {
     id:
@@ -2433,7 +2497,9 @@ function createLineRecord(entry, primaryLanguageId = 'primary') {
         : generateId('line'),
     text,
     type: rawType,
-    music: normalizeLineMusic(entry?.music),
+    music,
+    musicCueId: music ? normalizeMusicCueId(entry?.musicCueId) || null : null,
+    musicText: music ? normalizeMusicText(entry?.musicText) : '',
     role: rawType === LINE_TYPES.DIALOGUE ? role : null,
     translations,
   };
@@ -2517,6 +2583,8 @@ function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
         music: normalizeLineMusic(
           entry.music ?? entry.hasMusic ?? entry.isMusic,
         ),
+        musicCueId: entry.musicCueId,
+        musicText: entry.musicText,
         role: entry.role ?? entry.speaker ?? entry.character ?? null,
         translations: rawTranslations || { [primaryLanguageId]: text },
       },
@@ -2618,11 +2686,10 @@ function normalizeScriptLines(entries, options = {}) {
     });
   });
 
-  if (keepEmpty) {
-    return normalized;
-  }
-
-  return normalized.filter((entry) => entry.text.length > 0);
+  const result = keepEmpty
+    ? normalized
+    : normalized.filter((entry) => entry.text.length > 0);
+  return normalizeMusicCueTimeline(result);
 }
 
 function expandStageDirectionSegments(entry) {
@@ -2664,6 +2731,8 @@ function expandStageDirectionSegments(entry) {
         text: sanitized,
         type,
         music: entry.music === true,
+        musicCueId: entry.musicCueId,
+        musicText: entry.musicText,
         role: type === LINE_TYPES.DIALOGUE ? entry.role || null : null,
         translations:
           entry.translations && typeof entry.translations === 'object'
@@ -2743,6 +2812,8 @@ function enforceLineLengths(entries, limitOrOptions = MAX_LINE_WIDTH_UNITS) {
             text,
             type: LINE_TYPES.DIALOGUE,
             music: entry.music === true,
+            musicCueId: entry.musicCueId,
+            musicText: entry.musicText,
             role: entry.role || null,
             translations: { primary: text },
           },
@@ -3020,6 +3091,8 @@ function createBlankSessionLine(session, options = {}) {
           ? LINE_TYPES.DIRECTION
           : LINE_TYPES.DIALOGUE,
       music: normalizeLineMusic(options.music),
+      musicCueId: options.musicCueId,
+      musicText: options.musicText,
       role:
         options.type === LINE_TYPES.DIRECTION
           ? null
@@ -3058,6 +3131,8 @@ function createBlankSessionLineLike(session, sourceLine, languageId, text = '') 
         ? LINE_TYPES.DIRECTION
         : LINE_TYPES.DIALOGUE,
     music: isLineMarkedMusic(sourceLine),
+    musicCueId: sourceLine?.musicCueId,
+    musicText: sourceLine?.musicText,
     role: sourceLine?.role || null,
     languageId,
     text,
@@ -7736,6 +7811,9 @@ function toPublicLine(line) {
         ? LINE_TYPES.DIRECTION
         : LINE_TYPES.DIALOGUE,
     music: line.music === true,
+    musicCueId:
+      line.music === true ? normalizeMusicCueId(line.musicCueId) || null : null,
+    musicText: line.music === true ? normalizeMusicText(line.musicText) : '',
     role: normalizeRoleName(line.role) || null,
     translations: normalizeTranslationsMap(
       line.translations,
@@ -7911,7 +7989,9 @@ function getSessionDisplayState(session) {
   const musicActive =
     normalized.musicEffectEnabled !== false &&
     isLineMarkedMusic(activeScriptLine);
-  const musicText = musicActive ? '此處有音樂' : '';
+  const musicText = musicActive
+    ? normalizeMusicText(activeScriptLine?.musicText)
+    : '';
 
   return {
     normalized,
@@ -13204,56 +13284,75 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('setLineMusic', ({ sessionId, index, lineId, music }) => {
-    const session = getOwnedSocketSession(sessionId);
-    if (!session) return;
+  socket.on(
+    'setLineMusic',
+    ({ sessionId, index, lineId, music, musicCueId, musicText }) => {
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) return;
 
-    const targetIndex =
-      typeof lineId === 'string' && lineId.trim()
-        ? session.lines.findIndex((line) => line?.id === lineId.trim())
-        : index;
+      const targetIndex =
+        typeof lineId === 'string' && lineId.trim()
+          ? session.lines.findIndex((line) => line?.id === lineId.trim())
+          : index;
 
-    if (
-      !Number.isInteger(targetIndex) ||
-      targetIndex < 0 ||
-      targetIndex >= session.lines.length ||
-      typeof music !== 'boolean'
-    ) {
-      return;
-    }
+      if (
+        !Number.isInteger(targetIndex) ||
+        targetIndex < 0 ||
+        targetIndex >= session.lines.length ||
+        typeof music !== 'boolean'
+      ) {
+        return;
+      }
 
-    const existing = session.lines[targetIndex];
-    if (!existing) return;
-    pushSessionHistory(session);
+      const existing = session.lines[targetIndex];
+      if (!existing) return;
+      pushSessionHistory(session);
 
-    const text = sanitizeLineText(
-      typeof existing === 'string' ? existing : existing.text,
-    );
-    const type =
-      existing && typeof existing === 'object'
-        ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
-        : LINE_TYPES.DIALOGUE;
+      const text = sanitizeLineText(
+        typeof existing === 'string' ? existing : existing.text,
+      );
+      const type =
+        existing && typeof existing === 'object'
+          ? clampLineType(existing.type) || LINE_TYPES.DIALOGUE
+          : LINE_TYPES.DIALOGUE;
+      const nextMusic = normalizeLineMusic(music);
+      const nextMusicCueId = nextMusic
+        ? normalizeMusicCueId(musicCueId) || generateId('music')
+        : null;
 
-    session.lines[targetIndex] = createLineRecord(
-      {
-        ...existing,
-        text,
-        type,
-        music: normalizeLineMusic(music),
-        translations: existing.translations,
-        role: existing.role,
-      },
-      'primary',
-    );
+      session.lines[targetIndex] = createLineRecord(
+        {
+          ...existing,
+          text,
+          type,
+          music: nextMusic,
+          musicCueId: nextMusicCueId,
+          musicText: nextMusic ? normalizeMusicText(musicText) : '',
+          translations: existing.translations,
+          role: existing.role,
+        },
+        'primary',
+      );
+      session.lines = normalizeMusicCueTimeline(session.lines);
 
-    persistSession(session);
-    broadcastControlState(sessionId);
-    broadcastViewerState(sessionId);
-  });
+      persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+    },
+  );
 
   socket.on(
     'setLineMusicRange',
-    ({ sessionId, startIndex, endIndex, startLineId, endLineId, music }) => {
+    ({
+      sessionId,
+      startIndex,
+      endIndex,
+      startLineId,
+      endLineId,
+      music,
+      musicCueId,
+      musicText,
+    }) => {
       const session = getOwnedSocketSession(sessionId);
       if (!session) return;
 
@@ -13281,6 +13380,10 @@ io.on('connection', (socket) => {
       const rangeStart = Math.min(resolvedStartIndex, resolvedEndIndex);
       const rangeEnd = Math.max(resolvedStartIndex, resolvedEndIndex);
       const nextMusic = normalizeLineMusic(music);
+      const nextMusicCueId = nextMusic
+        ? normalizeMusicCueId(musicCueId) || generateId('music')
+        : null;
+      const nextMusicText = nextMusic ? normalizeMusicText(musicText) : '';
       pushSessionHistory(session);
 
       for (let index = rangeStart; index <= rangeEnd; index += 1) {
@@ -13301,14 +13404,60 @@ io.on('connection', (socket) => {
             text,
             type,
             music: nextMusic,
+            musicCueId: nextMusicCueId,
+            musicText: nextMusicText,
             translations: existing.translations,
             role: existing.role,
           },
           'primary',
         );
       }
+      session.lines = normalizeMusicCueTimeline(session.lines);
 
       persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastViewerState(sessionId);
+    },
+  );
+
+  socket.on(
+    'setMusicCueText',
+    ({ sessionId, musicCueId, musicText } = {}, ack) => {
+      const acknowledge = typeof ack === 'function' ? ack : () => {};
+      const session = getOwnedSocketSession(sessionId);
+      if (!session) {
+        acknowledge({ ok: false, reason: 'session_not_allowed' });
+        return;
+      }
+
+      const cueId = normalizeMusicCueId(musicCueId);
+      const targetIndexes = session.lines
+        .map((line, index) =>
+          line?.music === true && normalizeMusicCueId(line.musicCueId) === cueId
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      if (!cueId || targetIndexes.length === 0) {
+        acknowledge({ ok: false, reason: 'music_cue_not_found' });
+        return;
+      }
+
+      const nextMusicText = normalizeMusicText(musicText);
+      pushSessionHistory(session);
+      targetIndexes.forEach((index) => {
+        session.lines[index] = createLineRecord(
+          {
+            ...session.lines[index],
+            music: true,
+            musicCueId: cueId,
+            musicText: nextMusicText,
+          },
+          'primary',
+        );
+      });
+      persistSession(session);
+      acknowledge({ ok: true, musicCueId: cueId, musicText: nextMusicText });
       broadcastControlState(sessionId);
       broadcastViewerState(sessionId);
     },
@@ -13477,6 +13626,8 @@ io.on('connection', (socket) => {
               ? LINE_TYPES.DIRECTION
               : LINE_TYPES.DIALOGUE,
           music: isLineMarkedMusic(existing),
+          musicCueId: existing?.musicCueId,
+          musicText: existing?.musicText,
           role: existing?.role || null,
           languageId: targetLanguageId,
           text: after,
@@ -13503,6 +13654,8 @@ io.on('connection', (socket) => {
       text: before,
       type,
       music: isLineMarkedMusic(existing),
+      musicCueId: existing?.musicCueId,
+      musicText: existing?.musicText,
       role: existing?.role || null,
       translations: {
         ...buildBlankTranslationsForSession(session),
@@ -13518,6 +13671,8 @@ io.on('connection', (socket) => {
       text: after,
       type,
       music: isLineMarkedMusic(existing),
+      musicCueId: existing?.musicCueId,
+      musicText: existing?.musicText,
       role: existing?.role || null,
       translations: {
         ...buildBlankTranslationsForSession(session),
@@ -13579,6 +13734,8 @@ io.on('connection', (socket) => {
       const insertedLine = createBlankSessionLine(session, {
         type: baseType,
         music: isLineMarkedMusic(existing),
+        musicCueId: existing?.musicCueId,
+        musicText: existing?.musicText,
         role: existing?.role || null,
         languageId: targetLanguageId,
         text: '',
@@ -13705,6 +13862,7 @@ io.on('connection', (socket) => {
 
     const mergedText = joinTranscriptionTexts(previousText, nextCurrentText);
     mergedTranslations.primary = mergedText;
+    const mergedMusicSource = isLineMarkedMusic(previous) ? previous : current;
 
     session.lines.splice(
       index - 1,
@@ -13715,6 +13873,8 @@ io.on('connection', (socket) => {
           text: mergedText,
           type: previousType,
           music: isLineMarkedMusic(previous) || isLineMarkedMusic(current),
+          musicCueId: mergedMusicSource?.musicCueId,
+          musicText: mergedMusicSource?.musicText,
           role: previous?.role || current?.role || null,
           translations: mergedTranslations,
         },

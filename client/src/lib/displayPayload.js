@@ -94,6 +94,18 @@ export const normalizeDisplayPayload = (payload) => {
           text: typeof line.text === 'string' ? line.text : '',
           type: line.type === 'direction' ? 'direction' : 'dialogue',
           music: line.music === true,
+          musicCueId:
+            line.music === true &&
+            typeof line.musicCueId === 'string' &&
+            line.musicCueId.trim()
+              ? line.musicCueId.trim()
+              : null,
+          musicText:
+            line.music === true &&
+            typeof line.musicText === 'string' &&
+            line.musicText.trim()
+              ? line.musicText.trim()
+              : '',
           role:
             typeof line.role === 'string' && line.role.trim()
               ? line.role.trim()
