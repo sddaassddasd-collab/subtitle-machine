@@ -20,8 +20,8 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, createTracker, followTranscript, followAudio,
-    AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced' },
+    Date, createTracker, followTranscript, followAudio, console: { error() {} },
+    AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
     AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS: 250, DEFAULT_SESSION_ID: 'test',
     SUBTITLE_CONTROL_MODES: { AUTO: 'auto', MANUAL: 'manual' },
@@ -37,7 +37,8 @@ function fixture(mode = 'auto') {
     persistSessionCurrentIndexSoon: () => {}, persistSession: () => {},
     broadcastViewerState: () => emissions.push('viewer'),
     broadcastControlState: () => emissions.push('control'),
-    broadcastTranscriptionState: () => emissions.push('diagnostics'),
+    broadcastTranscriptionState: () => emissions.push('transcription'),
+    broadcastAutoFollowState: () => emissions.push('diagnostics'),
     getLiveTranscriptionPatchPayload: () => ({ active: true }),
     hasSocketRoomConnections: () => true,
     emitLatestRoomState: (room, event) => emissions.push(event),
@@ -120,6 +121,20 @@ test('both provider adapters preserve audio timing and segment identity', () => 
   assert.equal(realtime.itemId, 'openai-item'); assert.equal(realtime.isFinal, true);
   assert.equal(deepgram.startMs, 500); assert.equal(deepgram.endMs, 1700);
   assert.equal(deepgram.streamId, 'stream');
+});
+
+test('an alignment exception is contained and the next transcript can recover', () => {
+  const { context, session, emissions } = fixture();
+  context.followTranscript = () => { throw new Error('test alignment failure'); };
+  assert.doesNotThrow(() => context.handleAutoFollowTranscript('test', '測試'));
+  assert.equal(session.currentIndex, 0);
+  assert.equal(context.getPublicAutoFollowState(session).status, 'searching');
+  assert.deepEqual(emissions, ['diagnostics']);
+  context.followTranscript = followTranscript;
+  context.handleAutoFollowTranscript('test', session.lines[0].text, {
+    streamId: 's', itemId: 'after-error', startMs: 1000, endMs: 2000,
+  });
+  assert.equal(context.getPublicAutoFollowState(session).armedIndex, 1);
 });
 
 test('capture worklet emits 20 ms mono PCM frames with no missing samples', () => {

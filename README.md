@@ -80,6 +80,16 @@ npm run build --prefix client
 
 測試涵蓋連續跨格、句中停頓、單字、跳段、回跳、延遲 final、片段修訂、音樂／舞台指示、手動定位、顯示來源及音訊打包；不會呼叫付費辨識服務。實際聲學準確度與演出延遲需另以現場素材驗收。
 
+收音封包的權限檢查直接讀取已整理的節目資料，避免每秒 50 次收音觸發整份劇本與所有場次重建。跟戲音量與定位診斷使用獨立的 `control:auto-follow` 事件，不附帶整份辨識歷史；只有字幕位置改變才廣播完整畫面狀態。辨識連線的待傳資料設有上限，超過時停止該收音串流並回報錯誤；控制端可再次按「自動」重啟收音。
+
+執行一分鐘本機持續負載測試（需允許監聽本機暫時連接埠）：
+
+```bash
+npm run test:audio-load --prefix server
+```
+
+此測試以 1,000 格字幕、3 個場次，每秒 50 個 PCM 封包及 10 次模擬辨識事件，經過實際伺服器處理函式，並每秒請求 `/healthz`。輸出健康檢查耗時、事件迴圈延遲、CPU 使用率與字幕重建次數；不讀寫正式資料，不連接雲端辨識服務。另有兩種辨識服務的音訊傳送、權限、重複封包及連線積壓回歸測試。
+
 辨識時間定義參考 [Deepgram 分段與 final 說明](https://developers.deepgram.com/docs/understand-endpointing-interim-results) 與 [OpenAI Realtime 伺服器事件](https://developers.openai.com/api/reference/resources/realtime/server-events)。
 
 ## 即時語音辨識（Realtime）接法

@@ -1984,6 +1984,10 @@ const ControlPage = () => {
       setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
     }
 
+    const handleAutoFollowUpdate = (payload) => {
+      setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
+    }
+
     const handleTranscriptionError = (payload) => {
       const message =
         payload && typeof payload.message === 'string'
@@ -2012,6 +2016,7 @@ const ControlPage = () => {
     socket.on('disconnect', markSocketDisconnected)
     socket.on('control:update', applySessionPayload)
     socket.on('control:transcription', handleTranscriptionUpdate)
+    socket.on('control:auto-follow', handleAutoFollowUpdate)
     socket.on('transcription:error', handleTranscriptionError)
 
     if (socket.connected) {

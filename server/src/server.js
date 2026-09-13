@@ -7727,6 +7727,11 @@ function sendDeepgramAudioChunk(stream, audio, durationMs = 0, level = 0) {
 }
 
 function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
+  const transport = stream.provider === 'deepgram' ? stream.socket : stream.rt?.socket;
+  // Stop an unhealthy stream rather than accumulating unbounded audio in ws.
+  if ((transport?.bufferedAmount || 0) > AUDIO_PCM_SAMPLE_RATE * AUDIO_PCM_BYTES_PER_SAMPLE * 2) {
+    throw new Error('辨識連線傳送過慢，請重新啟動收音。');
+  }
   stream.autoFollowAudioMs = (stream.autoFollowAudioMs || 0) + durationMs;
   if (stream?.provider === 'deepgram') {
     sendDeepgramAudioChunk(stream, audio, durationMs, level);
@@ -8394,8 +8399,8 @@ function getViewerEntryRedirectPath(session) {
   return `/viewer/${encodeURIComponent(normalized.viewerToken)}`;
 }
 
-function getOwnedSession(sessionId, userId) {
-  const session = getSession(sessionId);
+function getOwnedSession(sessionId, userId, options = {}) {
+  const session = getSessionRecord(sessionId);
   if (!session) return null;
   if (!userId) return null;
   const user = users.get(userId) || null;
@@ -8406,7 +8411,7 @@ function getOwnedSession(sessionId, userId) {
   ) {
     return null;
   }
-  return session;
+  return options.normalize === false ? session : ensureSessionStructure(session);
 }
 
 function getVisibleSessionsForUser(user) {
@@ -8484,6 +8489,14 @@ function broadcastTranscriptionState(sessionId) {
 
   io.to(`control:${sessionId}`).emit('control:transcription', {
     transcription: getPublicTranscriptionState(session),
+    autoFollow: getPublicAutoFollowState(session),
+  });
+}
+
+function broadcastAutoFollowState(sessionId) {
+  const session = getSessionRecord(sessionId);
+  if (!session) return;
+  io.to(`control:${sessionId}`).emit('control:auto-follow', {
     autoFollow: getPublicAutoFollowState(session),
   });
 }
@@ -8607,8 +8620,9 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
 
 function broadcastLiveTranscriptionState(sessionId, stream) {
   const session = getSessionRecord(sessionId);
+  if (!session || session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) return;
   const payload = getLiveTranscriptionPatchPayload(sessionId, stream);
-  if (!session || !payload || session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) return;
+  if (!payload) return;
 
   const selectedCell = getSelectedCell(session);
   if (selectedCell?.id) {
@@ -8886,7 +8900,7 @@ function maybeBroadcastAutoFollowDiagnostics(sessionId, now = Date.now()) {
   }
 
   state.lastAudioDiagnosticBroadcastAt = now;
-  broadcastTranscriptionState(sessionId);
+  broadcastAutoFollowState(sessionId);
 }
 
 function resetAutoFollowPosition(session, message = '') {
@@ -8900,11 +8914,11 @@ function resetAutoFollowPosition(session, message = '') {
 }
 
 function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
-  const session = getSession(sessionId);
+  const session = getSessionRecord(sessionId);
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const state = getAutoFollowState(sessionId);
   const now = Date.now();
-  const result = followAudio(state.tracker, ensureSessionLines(session), session.currentIndex, {
+  const result = followAudio(state.tracker, session.lines, session.currentIndex, {
     level, durationMs, endMs,
   });
   updateAutoFollowState(sessionId, {
@@ -8926,11 +8940,22 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
 }
 
 function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
-  const session = getSession(sessionId);
+  const session = getSessionRecord(sessionId);
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const state = getAutoFollowState(sessionId);
-  const result = followTranscript(state.tracker, ensureSessionLines(session),
-    session.currentIndex, { ...options, text: transcript });
+  let result;
+  try {
+    result = followTranscript(state.tracker, session.lines,
+      session.currentIndex, { ...options, text: transcript });
+  } catch (error) {
+    console.error('Auto-follow alignment failed:', { sessionId, message: error?.message });
+    updateAutoFollowState(sessionId, {
+      tracker: createTracker(), status: AUTO_FOLLOW_STATUS.SEARCHING,
+      message: '字幕定位暫時失敗，等待下一段語音重新定位。',
+    });
+    broadcastAutoFollowState(sessionId);
+    return;
+  }
   if (result.ignored) return;
   const now = Date.now();
   updateAutoFollowState(sessionId, {
@@ -8946,7 +8971,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     applyCurrentIndexChange(session, result.index);
   } else {
     // Do not resend the entire script for each interim hypothesis.
-    broadcastTranscriptionState(sessionId);
+    broadcastAutoFollowState(sessionId);
   }
 }
 
@@ -12178,9 +12203,9 @@ io.on('connection', (socket) => {
   const socketAuth = resolveAuthFromCookieHeader(socket.handshake.headers.cookie);
   const socketUser = socketAuth.user;
 
-  const getOwnedSocketSession = (sessionId) => {
+  const getOwnedSocketSession = (sessionId, options = {}) => {
     if (!socketUser || !canManageSessions(socketUser)) return null;
-    return getOwnedSession(sessionId, socketUser.id);
+    return getOwnedSession(sessionId, socketUser.id, options);
   };
 
   socket.on('join', ({ sessionId, role, viewerToken, projectorToken } = {}) => {
@@ -12578,7 +12603,10 @@ io.on('connection', (socket) => {
     }
     const normalizedDurationMs = normalizeChunkDurationMs(durationMs);
     const normalizedLevel = normalizeAudioLevel(level);
-    const session = getOwnedSocketSession(sessionId);
+    // Sessions are normalized at load/edit boundaries. Audio must only authenticate
+    // and read the existing record; rebuilding all script cells here is O(script)
+    // work fifty times per second and can starve health checks.
+    const session = getOwnedSocketSession(sessionId, { normalize: false });
     if (!session) {
       acknowledge({ ok: false, reason: 'session_not_allowed' });
       return;
@@ -12596,10 +12624,6 @@ io.on('connection', (socket) => {
         return;
       }
       stream.lastCaptureSequence = sequence;
-    }
-    if (stream.ready && stale !== true) {
-      handleAutoFollowAudioLevel(session.id, normalizedLevel, normalizedDurationMs,
-        (stream.autoFollowAudioMs || 0) + normalizedDurationMs);
     }
 
     if (!stream.ready) {
@@ -12649,6 +12673,10 @@ io.on('connection', (socket) => {
     }
 
     try {
+      if (stale !== true) {
+        handleAutoFollowAudioLevel(session.id, normalizedLevel, normalizedDurationMs,
+          (stream.autoFollowAudioMs || 0) + normalizedDurationMs);
+      }
       sendTranscriptionAudioChunk(
         stream,
         audio,
