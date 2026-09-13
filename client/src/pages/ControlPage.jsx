@@ -1249,7 +1249,8 @@ const ControlPage = () => {
     subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? '自動模式' : '手動模式'
   const autoFollowStatusLabelMap = {
     idle: '待命',
-    listening: '等聲音',
+    listening: '定位中',
+    searching: '重新定位',
     advanced: '已先推',
     verified: '已核對',
     corrected: '已校正',
@@ -1258,7 +1259,7 @@ const ControlPage = () => {
     autoFollowStatusLabelMap[autoFollow.status] || autoFollow.status || '待命'
   const autoFollowConfidenceLabel =
     typeof autoFollow.confidence === 'number'
-      ? ` ${(autoFollow.confidence * 100).toFixed(0)}%`
+      ? ` 比對 ${(autoFollow.confidence * 100).toFixed(0)}%`
       : ''
   const autoFollowTriggerThreshold = safeFiniteNumber(
     autoFollow.triggerThreshold,
@@ -2156,7 +2157,8 @@ const ControlPage = () => {
       mode === SUBTITLE_CONTROL_MODES.AUTO
         ? SUBTITLE_CONTROL_MODES.AUTO
         : SUBTITLE_CONTROL_MODES.MANUAL
-    if (nextMode === subtitleControlMode) return
+    if (nextMode === subtitleControlMode &&
+      (nextMode !== SUBTITLE_CONTROL_MODES.AUTO || transcriptionBusy)) return
 
     if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) {
       const started = await handleStartLiveTranscription({ autoFollow: true })
@@ -2525,12 +2527,17 @@ const ControlPage = () => {
       const pendingAudioPackets = []
       let transcriptionReady = false
       let nextAudioSequence = 1
+      let lastAckDiagnosticAt = 0
 
       const sendAudioPacket = (packet) => {
         const socket = socketRef.current
-        if (!socket || !sessionId) return
-        socket.emit('transcription:audio', packet, (ack) => {
+        if (!socket?.connected || !sessionId) return
+        socket.emit('transcription:audio', {
+          ...packet, stale: Date.now() - packet.capturedAt > 250,
+        }, (ack) => {
           const acknowledgedAt = Date.now()
+          if (ack?.ok === true && acknowledgedAt - lastAckDiagnosticAt < 120) return
+          lastAckDiagnosticAt = acknowledgedAt
           setMicDiagnostics((prev) => ({
             ...prev,
             socketConnected: socket.connected === true,
@@ -2712,6 +2719,7 @@ const ControlPage = () => {
             {
               sessionId,
               apiKey,
+              autoFollow,
               provider: transcription.provider || DEFAULT_TRANSCRIPTION_PROVIDER,
               model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
               language: selectedSourceLanguage,
@@ -5595,6 +5603,10 @@ const ControlPage = () => {
                   <span>{autoFollowConfidenceLabel}</span>
                 )}
                 <span>{audioBriefLabel}</span>
+                {Number.isInteger(autoFollow.armedIndex) && (
+                  <span>準備第 {autoFollow.armedIndex + 1} 格</span>
+                )}
+                <span>{autoFollow.message}</span>
                 {autoFollow.lastCandidateText && (
                   <span className="auto-follow-candidate">
                     {autoFollow.lastCandidateText}

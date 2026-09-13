@@ -3,7 +3,7 @@ class MicCaptureProcessor extends AudioWorkletProcessor {
     super();
     this.pendingSamples = [];
     this.pendingSampleCount = 0;
-    this.targetSampleCount = Math.max(1, Math.round(sampleRate * 0.1));
+    this.targetSampleCount = Math.max(1, Math.round(sampleRate * 0.02));
   }
 
   process(inputs) {
