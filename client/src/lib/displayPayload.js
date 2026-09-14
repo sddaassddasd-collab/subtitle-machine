@@ -22,7 +22,6 @@ export const PROJECTOR_DISPLAY_MODES = Object.freeze({
 export const PROJECTOR_LANGUAGE_MODES = Object.freeze({
   SINGLE: 'single',
   BILINGUAL: 'bilingual',
-  ALL: 'all',
 })
 
 export const normalizeProjectorLayout = (rawLayout) => {
@@ -65,8 +64,8 @@ export const normalizeProjectorLanguageMode = (rawMode) => {
   if (rawMode === PROJECTOR_LANGUAGE_MODES.BILINGUAL) {
     return PROJECTOR_LANGUAGE_MODES.BILINGUAL
   }
-  if (rawMode === PROJECTOR_LANGUAGE_MODES.ALL) {
-    return PROJECTOR_LANGUAGE_MODES.ALL
+  if (rawMode === 'all') {
+    return PROJECTOR_LANGUAGE_MODES.BILINGUAL
   }
   return PROJECTOR_LANGUAGE_MODES.SINGLE
 }
@@ -187,6 +186,7 @@ export const normalizeDisplayPayload = (payload) => {
     source,
     languages: Array.isArray(payload?.languages) ? payload.languages : [],
     defaultLanguageId,
+    secondaryLanguageId: payload?.secondaryLanguageId,
     transcriptionIsFinal,
     liveTranslationLanguages: liveTranslationLanguages.filter((language) =>
       allowedLiveTranslationLanguageCodes.has(language?.code),
@@ -287,6 +287,7 @@ export const resolveLanguageDisplayList = (
   languages,
   preferredLanguageId,
   languageMode = PROJECTOR_LANGUAGE_MODES.SINGLE,
+  secondaryLanguageId,
 ) => {
   const list = Array.isArray(languages) ? languages : []
   if (!list.length) return []
@@ -296,21 +297,12 @@ export const resolveLanguageDisplayList = (
   const selectedLanguage =
     list.find((language) => language.id === selectedLanguageId) || primaryLanguage
 
-  if (mode === PROJECTOR_LANGUAGE_MODES.ALL) {
-    return list
-  }
-
   if (mode === PROJECTOR_LANGUAGE_MODES.BILINGUAL) {
-    const pair = [primaryLanguage]
-    if (selectedLanguage && selectedLanguage.id !== primaryLanguage.id) {
-      pair.push(selectedLanguage)
-    } else {
-      const firstExtraLanguage = list.find(
-        (language) => language.id !== primaryLanguage.id,
-      )
-      if (firstExtraLanguage) pair.push(firstExtraLanguage)
-    }
-    return pair
+    const top = secondaryLanguageId === undefined ? primaryLanguage : selectedLanguage
+    const bottomId = secondaryLanguageId === undefined ? selectedLanguage.id : secondaryLanguageId
+    const bottom = list.find(language => language.id === bottomId && language.id !== top.id)
+      || list.find(language => language.id !== top.id)
+    return bottom ? [top, bottom] : [top]
   }
 
   return selectedLanguage ? [selectedLanguage] : [primaryLanguage]

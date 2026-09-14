@@ -1,4 +1,5 @@
 const express = require('express');
+const { resolveProjectorLanguages } = require('./projector-languages');
 const cors = require('cors');
 const http = require('http');
 const path = require('path');
@@ -325,7 +326,6 @@ const PROJECTOR_DISPLAY_MODES = Object.freeze({
 const PROJECTOR_LANGUAGE_MODES = Object.freeze({
   SINGLE: 'single',
   BILINGUAL: 'bilingual',
-  ALL: 'all',
 });
 const SUBTITLE_CONTROL_MODES = Object.freeze({
   MANUAL: 'manual',
@@ -988,10 +988,22 @@ function normalizeProjectorLanguageMode(rawMode) {
   if (rawMode === PROJECTOR_LANGUAGE_MODES.BILINGUAL) {
     return PROJECTOR_LANGUAGE_MODES.BILINGUAL;
   }
-  if (rawMode === PROJECTOR_LANGUAGE_MODES.ALL) {
-    return PROJECTOR_LANGUAGE_MODES.ALL;
+  if (rawMode === 'all') {
+    return PROJECTOR_LANGUAGE_MODES.BILINGUAL;
   }
   return PROJECTOR_LANGUAGE_MODES.SINGLE;
+}
+
+function normalizeSessionProjectorLanguages(session) {
+  const selection = resolveProjectorLanguages({
+    languages: session.languages,
+    defaultLanguageId: session.projectorDefaultLanguageId,
+    secondaryLanguageId: session.projectorSecondaryLanguageId,
+    languageMode: session.projectorLanguageMode,
+  });
+  session.projectorDefaultLanguageId = selection.defaultLanguageId;
+  session.projectorSecondaryLanguageId = selection.secondaryLanguageId;
+  session.projectorLanguageMode = selection.languageMode;
 }
 
 function normalizeSubtitleControlMode(rawMode) {
@@ -3743,6 +3755,7 @@ function captureSessionSnapshot(session) {
       musicEffectEnabled: session.musicEffectEnabled,
       viewerDefaultLanguageId: session.viewerDefaultLanguageId,
       projectorDefaultLanguageId: session.projectorDefaultLanguageId,
+      projectorSecondaryLanguageId: session.projectorSecondaryLanguageId,
       projectorDisplayMode: session.projectorDisplayMode,
       projectorLanguageMode: session.projectorLanguageMode,
       status: session.status,
@@ -3788,6 +3801,7 @@ function restoreSessionSnapshot(session, snapshot) {
     typeof snapshot.projectorDefaultLanguageId === 'string'
       ? snapshot.projectorDefaultLanguageId
       : session.projectorDefaultLanguageId;
+  session.projectorSecondaryLanguageId = snapshot.projectorSecondaryLanguageId;
   session.projectorDisplayMode = normalizeProjectorDisplayMode(
     snapshot.projectorDisplayMode || session.projectorDisplayMode,
   );
@@ -3892,10 +3906,7 @@ function ensureSessionStructure(session) {
     session,
     session.viewerDefaultLanguageId,
   );
-  session.projectorDefaultLanguageId = resolveSessionLanguageId(
-    session,
-    session.projectorDefaultLanguageId,
-  );
+  normalizeSessionProjectorLanguages(session);
   const primaryLanguageId = getPrimaryLanguageId(session);
 
   const rawCells =
@@ -3967,6 +3978,7 @@ function createSessionRecord(ownerUserId) {
       normalizeAllowedLiveTranslationLanguageCodes(),
     viewerDefaultLanguageId: 'primary',
     projectorDefaultLanguageId: 'primary',
+    projectorSecondaryLanguageId: null,
     projectorLayout: DEFAULT_PROJECTOR_LAYOUT,
     projectorDisplayMode: PROJECTOR_DISPLAY_MODES.SCRIPT,
     projectorLanguageMode: PROJECTOR_LANGUAGE_MODES.SINGLE,
@@ -4053,6 +4065,7 @@ function serializeSessionForStorage(session) {
       normalized.allowedLiveTranslationLanguageCodes,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
+    projectorSecondaryLanguageId: normalized.projectorSecondaryLanguageId,
     projectorLayout: normalized.projectorLayout,
     projectorDisplayMode: normalized.projectorDisplayMode,
     projectorLanguageMode: normalized.projectorLanguageMode,
@@ -7860,6 +7873,7 @@ function getSessionSummary(session) {
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
+    projectorSecondaryLanguageId: normalized.projectorSecondaryLanguageId,
     projectorDisplayMode: normalized.projectorDisplayMode,
     projectorLanguageMode: normalized.projectorLanguageMode,
     projectorRevision: normalized.projectorRevision,
@@ -7895,6 +7909,7 @@ function getControlPayload(session) {
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
+    projectorSecondaryLanguageId: normalized.projectorSecondaryLanguageId,
     projector: {
       token: normalized.projectorToken,
       layout: normalized.projectorLayout,
@@ -8206,6 +8221,7 @@ function getProjectorPayload(session) {
       status: normalized.status,
       languages: normalized.languages,
       defaultLanguageId: normalized.projectorDefaultLanguageId,
+      secondaryLanguageId: normalized.projectorSecondaryLanguageId,
       line: null,
       text: '',
       liveEntries: [],
@@ -8232,6 +8248,7 @@ function getProjectorPayload(session) {
         status: normalized.status,
         languages: normalized.languages,
         defaultLanguageId: normalized.projectorDefaultLanguageId,
+        secondaryLanguageId: normalized.projectorSecondaryLanguageId,
         line: {
           text: liveLines[liveLines.length - 1] || liveText,
           type: LINE_TYPES.DIALOGUE,
@@ -8258,6 +8275,7 @@ function getProjectorPayload(session) {
         status: normalized.status,
         languages: normalized.languages,
         defaultLanguageId: normalized.projectorDefaultLanguageId,
+        secondaryLanguageId: normalized.projectorSecondaryLanguageId,
         line: null,
         text: '',
         liveEntries: [],
@@ -8282,6 +8300,7 @@ function getProjectorPayload(session) {
     status: normalized.status,
     languages: normalized.languages,
     defaultLanguageId: normalized.projectorDefaultLanguageId,
+    secondaryLanguageId: normalized.projectorSecondaryLanguageId,
     line: toPublicLine(activeScriptLine),
     text:
       activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
@@ -12997,9 +13016,34 @@ io.on('connection', (socket) => {
 
     pushSessionHistory(session);
     session.projectorDefaultLanguageId = nextLanguageId;
+    normalizeSessionProjectorLanguages(session);
+    session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
+  });
+
+  socket.on('setProjectorLanguages', ({ sessionId, languageId, secondaryLanguageId } = {}, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return reply({ ok: false, reason: '無法修改此節目的投影語言' });
+    const available = new Set(session.languages.map(language => language.id));
+    if (!available.has(languageId) ||
+        (available.size > 1 && (!available.has(secondaryLanguageId) || languageId === secondaryLanguageId)) ||
+        (available.size === 1 && secondaryLanguageId !== null)) {
+      return reply({ ok: false, reason: '請選擇有效且不重複的投影語言' });
+    }
+    if (session.projectorDefaultLanguageId !== languageId ||
+        session.projectorSecondaryLanguageId !== secondaryLanguageId) {
+      pushSessionHistory(session);
+      session.projectorDefaultLanguageId = languageId;
+      session.projectorSecondaryLanguageId = secondaryLanguageId;
+      session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
+      persistSession(session);
+      broadcastControlState(sessionId);
+      broadcastProjectorState(sessionId);
+    }
+    reply({ ok: true });
   });
 
   socket.on('setProjectorLanguageMode', ({ sessionId, languageMode }) => {

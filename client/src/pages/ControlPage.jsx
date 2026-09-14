@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
+import ProjectorLanguageSettings from '../components/ProjectorLanguageSettings'
 import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import {
@@ -1055,6 +1056,7 @@ const ControlPage = () => {
   const [projectorDisplayMode, setProjectorDisplayMode] = useState(
     PROJECTOR_DISPLAY_MODES.SCRIPT,
   )
+  const [projectorLanguagesSaving, setProjectorLanguagesSaving] = useState(false)
   const [projectorLanguageMode, setProjectorLanguageMode] = useState(
     PROJECTOR_LANGUAGE_MODES.SINGLE,
   )
@@ -1244,6 +1246,10 @@ const ControlPage = () => {
     sessionMeta?.viewerDefaultLanguageId || languages[0]?.id || 'primary'
   const projectorDefaultLanguageId =
     sessionMeta?.projectorDefaultLanguageId || languages[0]?.id || 'primary'
+  const projectorSecondaryLanguageId = languages.some(language =>
+    language.id === sessionMeta?.projectorSecondaryLanguageId && language.id !== projectorDefaultLanguageId)
+    ? sessionMeta.projectorSecondaryLanguageId
+    : languages.find(language => language.id !== projectorDefaultLanguageId)?.id || null
   const selectedProjectorLanguageMode = normalizeProjectorLanguageMode(
     sessionMeta?.projectorLanguageMode || projectorLanguageMode,
   )
@@ -2244,24 +2250,21 @@ const ControlPage = () => {
     })
   }
 
-  const handleProjectorDefaultLanguageChange = (event) => {
-    if (!socketRef.current || !sessionId) return
-    const nextLanguageId = event.target.value
-    socketRef.current.emit('setProjectorDefaultLanguage', {
-      sessionId,
-      languageId: nextLanguageId,
-    })
-    setSessionMeta((prev) =>
-      prev
-        ? {
-            ...prev,
-            projectorDefaultLanguageId: nextLanguageId,
-          }
-        : prev,
-    )
-    setStatus({
-      kind: 'info',
-      message: '投影端播放語言已更新',
+  const handleProjectorLanguagesChange = (languageId, secondaryLanguageId) => {
+    if (!socketRef.current?.connected || !sessionId || projectorLanguagesSaving) return
+    setProjectorLanguagesSaving(true)
+    socketRef.current.timeout(5000).emit('setProjectorLanguages', {
+      sessionId, languageId, secondaryLanguageId,
+    }, (error, response) => {
+      setProjectorLanguagesSaving(false)
+      if (error || response?.ok !== true) {
+        setStatus({ kind: 'error', message: response?.reason || '未收到語言設定確認，請確認連線後重試' })
+        return
+      }
+      setSessionMeta(prev => prev ? {
+        ...prev, projectorDefaultLanguageId: languageId, projectorSecondaryLanguageId: secondaryLanguageId,
+      } : prev)
+      setStatus({ kind: 'info', message: '投影端語言已更新' })
     })
   }
 
@@ -4710,6 +4713,7 @@ const ControlPage = () => {
     languages,
     projectorDefaultLanguageId,
     selectedProjectorLanguageMode,
+    projectorSecondaryLanguageId,
   )
   const projectorPreviewTexts =
     !displayEnabled
@@ -5111,35 +5115,18 @@ const ControlPage = () => {
                     ))}
                   </select>
                 </label>
-                <label className="input-group" htmlFor="projector-default-language">
-                  <span>投影端播放</span>
-                  <select
-                    id="projector-default-language"
-                    value={projectorDefaultLanguageId}
-                    onChange={handleProjectorDefaultLanguageChange}
-                  >
-                    {languages.map((language) => (
-                      <option key={language.id} value={language.id}>
-                        {language.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="input-group" htmlFor="projector-language-mode">
-                  <span>投影端模式</span>
-                  <select
-                    id="projector-language-mode"
-                    value={selectedProjectorLanguageMode}
-                    onChange={handleProjectorLanguageModeChange}
-                  >
-                    <option value={PROJECTOR_LANGUAGE_MODES.SINGLE}>單語</option>
-                    <option value={PROJECTOR_LANGUAGE_MODES.BILINGUAL}>雙語並置</option>
-                    <option value={PROJECTOR_LANGUAGE_MODES.ALL}>全部語言並置</option>
-                  </select>
-                </label>
+                <ProjectorLanguageSettings
+                  languages={languages}
+                  mode={selectedProjectorLanguageMode}
+                  languageId={projectorDefaultLanguageId}
+                  secondaryLanguageId={projectorSecondaryLanguageId}
+                  busy={projectorLanguagesSaving}
+                  onLanguagesChange={handleProjectorLanguagesChange}
+                  onModeChange={handleProjectorLanguageModeChange}
+                />
               </div>
               <span className="input-note">
-                檢視端初次進入會先套用預設語言，但觀眾之後仍可自行切換；投影端會持續跟著這裡的語言與模式設定。
+                檢視端一次顯示一種語言，觀眾可自行切換；投影端最多兩種，可任選上、下排語言，並同步套用到預覽與投影。
               </span>
             </div>
             </ControlSection>

@@ -35,6 +35,7 @@ const ProjectorPage = () => {
   const [lineSource, setLineSource] = useState('script')
   const [languages, setLanguages] = useState([])
   const [projectorLanguageId, setProjectorLanguageId] = useState('primary')
+  const [projectorSecondaryLanguageId, setProjectorSecondaryLanguageId] = useState(undefined)
   const [projectorLanguageMode, setProjectorLanguageMode] = useState('single')
   const [layout, setLayout] = useState(DEFAULT_PROJECTOR_LAYOUT)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
@@ -145,6 +146,7 @@ const ProjectorPage = () => {
         resolveAvailableLanguageId(next.languages, next.defaultLanguageId),
       )
       setProjectorLanguageMode(next.languageMode)
+      setProjectorSecondaryLanguageId(next.secondaryLanguageId)
       applyProjectorLayoutPayload(next.layout, next.revision)
       setRoleColorEnabled(next.roleColorEnabled)
       hasLoadedStateRef.current = true
@@ -559,6 +561,7 @@ const ProjectorPage = () => {
         languages,
         resolveAvailableLanguageId(languages, projectorLanguageId),
         projectorLanguageMode,
+        projectorSecondaryLanguageId,
       )
         .map((language) => ({
           id: language.id,

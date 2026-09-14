@@ -6,7 +6,6 @@ import {
   normalizeDisplayPayload,
   normalizeLiveTranslationPatch,
   resolveAvailableLanguageId,
-  resolveLanguageDisplayList,
   resolveLineText,
   roleToColor,
 } from '../lib/displayPayload'
@@ -19,7 +18,6 @@ const MAX_VIEWER_FONT_PERCENT = 180
 const VIEWER_FONT_STEP = 10
 const PUBLIC_RECOVERY_RETRY_DELAY_MS = 1200
 const PUBLIC_RECOVERY_JITTER_MS = 600
-const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 
 const getInitialViewerFontPercent = () => {
   if (typeof window === 'undefined') return DEFAULT_VIEWER_FONT_PERCENT
@@ -365,7 +363,6 @@ const ViewerPage = () => {
       viewerDefaultLanguageId,
     )
     const selectedLanguageStillAvailable =
-      selectedLanguageId === ALL_LANGUAGES_OPTION_ID ||
       languages.some((language) => language.id === selectedLanguageId)
 
     if (!hasLanguageOverride) {
@@ -460,15 +457,11 @@ const ViewerPage = () => {
   const displayText = displayEnabled
     ? isStageDirection
       ? '\u00a0'
-      : selectedLanguageId === ALL_LANGUAGES_OPTION_ID
-        ? resolveLanguageDisplayList(languages, viewerDefaultLanguageId, 'all')
-            .map((language) => ({
-              id: language.id,
-              name: language.name,
-              text: resolveLineText(line, language.id),
-            }))
-            .filter((entry) => entry.text.trim())
-        : resolveLineText(line, selectedLanguageId)
+      : resolveLineText(line, resolveAvailableLanguageId(
+          languages,
+          languages.some(language => language.id === selectedLanguageId)
+            ? selectedLanguageId : viewerDefaultLanguageId,
+        ))
     : '\u00a0'
 
   const textClass = `viewer-text${
@@ -484,9 +477,7 @@ const ViewerPage = () => {
   }`
   const viewerFontScale = viewerFontPercent / 100
   const selectedLanguageName =
-    selectedLanguageId === ALL_LANGUAGES_OPTION_ID
-      ? '全部語言'
-      : languages.find((language) => language.id === selectedLanguageId)?.name || '語言'
+    languages.find((language) => language.id === selectedLanguageId)?.name || '語言'
   const selectedLiveLanguageDefinition = liveTranslationLanguages.find(
     (language) => language?.code === selectedLiveLanguage,
   )
@@ -591,7 +582,6 @@ const ViewerPage = () => {
                 </>
               ) : (
                 <>
-                  <option value={ALL_LANGUAGES_OPTION_ID}>全部語言</option>
                   {languages.map((language) => (
                     <option key={language.id} value={language.id}>
                       {language.name}
@@ -663,14 +653,7 @@ const ViewerPage = () => {
         </div>
       ) : (
         <div className={textClass} style={roleColor ? { color: roleColor } : undefined}>
-          {Array.isArray(displayText)
-            ? displayText.map((entry) => (
-                <div key={entry.id} className="viewer-language-line">
-                  <span>{entry.name}</span>
-                  <strong>{entry.text}</strong>
-                </div>
-              ))
-            : displayText}
+          {displayText}
         </div>
       )}
     </div>
