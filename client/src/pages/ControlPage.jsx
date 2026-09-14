@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { io } from 'socket.io-client'
+import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import {
   areProjectorLayoutsEqual,
   normalizeProjectorDisplayMode,
@@ -2389,6 +2390,7 @@ const ControlPage = () => {
       const editingField =
         activeElement &&
         (activeElement.isContentEditable ||
+          activeElement.closest('dialog[open]') ||
           ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName))
 
       if (!editingField && (event.metaKey || event.ctrlKey) && key === 'm') {
@@ -5607,42 +5609,14 @@ const ControlPage = () => {
                 自動
               </button>
             </div>
-            {subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && (
-              <div className="auto-follow-status" aria-live="polite">
-                <span>{autoFollowStatusLabel}</span>
-                {autoFollowConfidenceLabel && (
-                  <span>{autoFollowConfidenceLabel}</span>
-                )}
-                <span>{audioBriefLabel}</span>
-                {Number.isInteger(autoFollow.predictedIndex) && (
-                  <span>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</span>
-                )}
-                {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && (
-                  <span>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</span>
-                )}
-                {Number.isInteger(autoFollow.preparedIndex) && (
-                  <span>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</span>
-                )}
-                {autoFollow.status === 'searching' && autoFollow.candidates?.length > 1 && (
-                  <span>核對位置：{autoFollow.candidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}</span>
-                )}
-                <span>{autoFollow.message}</span>
-                {autoFollow.lastCandidateText && (
-                  <span className="auto-follow-candidate">
-                    {autoFollow.lastCandidateText}
-                  </span>
-                )}
-              </div>
-            )}
-            {audioDiagnosticsVisible && (
-              <button
-                type="button"
-                className="subtle-button audio-diagnostics-toggle"
-                onClick={() => setAudioDiagnosticsOpen((prev) => !prev)}
-              >
-                {audioDiagnosticsOpen ? '收合診斷' : '收音診斷'}
-              </button>
-            )}
+            <button
+              type="button"
+              className="subtle-button audio-diagnostics-toggle"
+              aria-haspopup="dialog"
+              onClick={() => setAudioDiagnosticsOpen(true)}
+            >
+              狀態詳情
+            </button>
             <button
               type="button"
               className={`toggle-button ${displayEnabled ? 'active' : ''}`}
@@ -5691,6 +5665,25 @@ const ControlPage = () => {
               停止外部字幕
             </button>
           </div>
+          <ControlStatusSummary
+            automatic={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO}
+            status={`${autoFollowStatusLabel} · ${transcriptionStatusLabel}`}
+            audio={audioBriefLabel}
+            progress={autoFollow.located && Number.isInteger(autoFollow.progressIndex)
+              ? `第 ${autoFollow.progressIndex + 1} 格 · ${Math.round(autoFollow.progress * 100)}%`
+              : ''}
+            confidence={autoFollowConfidenceLabel}
+            hint={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+              ? transcription.error || (
+                Number.isInteger(autoFollow.predictedIndex)
+                  ? `已預推第 ${autoFollow.predictedIndex + 1} 格，等待核對`
+                  : Number.isInteger(autoFollow.preparedIndex)
+                    ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
+                    : autoFollow.message
+              )
+              : ''}
+            error={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && Boolean(transcription.error)}
+          />
           <div
             className={`status-bar ${
               status.kind === 'success'
@@ -5700,81 +5693,98 @@ const ControlPage = () => {
                   : ''
             }`}
           >
-            {status.message}
+            <span title={status.message}>{status.message}</span>
           </div>
-          {audioDiagnosticsVisible && audioDiagnosticsOpen && (
-            <div className="audio-diagnostics-panel">
-              <div>
-                <span>前端麥克風</span>
-                <strong>{micDiagnostics.active ? '已啟動' : '未啟動'}</strong>
-              </div>
-              <div>
-                <span>前端音量</span>
-                <strong>{micLevelLabel}</strong>
-              </div>
-              <div>
-                <span>前端送出</span>
-                <strong>{formatRelativeSeconds(micDiagnostics.lastSentAt)}</strong>
-              </div>
-              <div>
-                <span>Socket 連線</span>
-                <strong>{micDiagnostics.socketConnected ? '已連線' : '未連線'}</strong>
-              </div>
-              <div>
-                <span>後端 ack</span>
-                <strong>{formatRelativeSeconds(micDiagnostics.lastAckAt)}</strong>
-              </div>
-              <div>
-                <span>ack 音量</span>
-                <strong>{backendAckLevelLabel}</strong>
-              </div>
-              <div>
-                <span>拒收原因</span>
-                <strong>{micDiagnostics.lastRejectReason || '無'}</strong>
-              </div>
-              <div>
-                <span>後端音訊</span>
-                <strong>{formatRelativeSeconds(autoFollow.lastAudioAt)}</strong>
-              </div>
-              <div>
-                <span>後端音量</span>
-                <strong>{backendLevelLabel}</strong>
-              </div>
-              <div>
-                <span>觸發門檻</span>
-                <strong>{autoFollowTriggerThreshold.toFixed(3)}</strong>
-              </div>
-              <div>
-                <span>最近觸發</span>
-                <strong>{formatRelativeSeconds(autoFollow.lastOnsetAt)}</strong>
-              </div>
-              <div>
-                <span>辨識狀態</span>
-                <strong>{transcriptionStatusLabel}</strong>
-              </div>
-              <div>
-                <span>最近換格依據</span>
-                <strong>{{ onset: '起音預推', transcript: '文字確認', correction: '跳詞校正' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
-              </div>
-              <div>
-                <span>辨識結果抵達</span>
-                <strong>{formatRelativeSeconds(autoFollow.lastTranscriptReceivedAt)}</strong>
-              </div>
-              {[
-                ['辨識落後音訊約', autoFollow.lastTranscriptAudioLagMs],
-                ['文字定位耗時', autoFollow.lastAlignmentMs],
-                ['起音偵測耗時', autoFollow.lastDecision?.onsetDetectionMs],
-                ['觀眾顯示回報往返', autoFollow.lastDecision?.displayAckMs?.viewer],
-                ['投影顯示回報往返', autoFollow.lastDecision?.displayAckMs?.projector],
-                ['提詞顯示回報往返', autoFollow.lastDecision?.displayAckMs?.prompter],
-              ].map(([label, value]) => (
-                <div key={label}>
-                  <span>{label}</span>
-                  <strong>{Number.isFinite(value) ? `${Math.round(value)} ms` : '尚無資料'}</strong>
-                </div>
-              ))}
+          <ControlStatusDetails open={audioDiagnosticsOpen} onClose={() => setAudioDiagnosticsOpen(false)}>
+            <div className="control-status-messages">
+              <p className={status.kind === 'error' ? 'control-status-error' : ''}>{status.message || '尚無操作訊息'}</p>
+              {transcription.error && <p className="control-status-error">{transcription.error}</p>}
+              {subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && (
+                <>
+                  <p>{autoFollowStatusLabel} · {transcriptionStatusLabel}{autoFollowConfidenceLabel}</p>
+                  {autoFollow.message && <p>{autoFollow.message}</p>}
+                  {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</p>}
+                  {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && <p>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</p>}
+                  {Number.isInteger(autoFollow.preparedIndex) && <p>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</p>}
+                  {autoFollow.status === 'searching' && autoFollow.candidates?.length > 1 && <p>核對位置：{autoFollow.candidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}</p>}
+                  {autoFollow.lastCandidateText && <p>候選字幕：{autoFollow.lastCandidateText}</p>}
+                </>
+              )}
             </div>
-          )}
+            {audioDiagnosticsVisible && (
+              <div className="audio-diagnostics-panel">
+                <div>
+                  <span>前端麥克風</span>
+                  <strong>{micDiagnostics.active ? '已啟動' : '未啟動'}</strong>
+                </div>
+                <div>
+                  <span>前端音量</span>
+                  <strong>{micLevelLabel}</strong>
+                </div>
+                <div>
+                  <span>前端送出</span>
+                  <strong>{formatRelativeSeconds(micDiagnostics.lastSentAt)}</strong>
+                </div>
+                <div>
+                  <span>Socket 連線</span>
+                  <strong>{micDiagnostics.socketConnected ? '已連線' : '未連線'}</strong>
+                </div>
+                <div>
+                  <span>後端 ack</span>
+                  <strong>{formatRelativeSeconds(micDiagnostics.lastAckAt)}</strong>
+                </div>
+                <div>
+                  <span>ack 音量</span>
+                  <strong>{backendAckLevelLabel}</strong>
+                </div>
+                <div>
+                  <span>拒收原因</span>
+                  <strong>{micDiagnostics.lastRejectReason || '無'}</strong>
+                </div>
+                <div>
+                  <span>後端音訊</span>
+                  <strong>{formatRelativeSeconds(autoFollow.lastAudioAt)}</strong>
+                </div>
+                <div>
+                  <span>後端音量</span>
+                  <strong>{backendLevelLabel}</strong>
+                </div>
+                <div>
+                  <span>觸發門檻</span>
+                  <strong>{autoFollowTriggerThreshold.toFixed(3)}</strong>
+                </div>
+                <div>
+                  <span>最近觸發</span>
+                  <strong>{formatRelativeSeconds(autoFollow.lastOnsetAt)}</strong>
+                </div>
+                <div>
+                  <span>辨識狀態</span>
+                  <strong>{transcriptionStatusLabel}</strong>
+                </div>
+                <div>
+                  <span>最近換格依據</span>
+                  <strong>{{ onset: '起音預推', transcript: '文字確認', correction: '跳詞校正' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
+                </div>
+                <div>
+                  <span>辨識結果抵達</span>
+                  <strong>{formatRelativeSeconds(autoFollow.lastTranscriptReceivedAt)}</strong>
+                </div>
+                {[
+                  ['辨識落後音訊約', autoFollow.lastTranscriptAudioLagMs],
+                  ['文字定位耗時', autoFollow.lastAlignmentMs],
+                  ['起音偵測耗時', autoFollow.lastDecision?.onsetDetectionMs],
+                  ['觀眾顯示回報往返', autoFollow.lastDecision?.displayAckMs?.viewer],
+                  ['投影顯示回報往返', autoFollow.lastDecision?.displayAckMs?.projector],
+                  ['提詞顯示回報往返', autoFollow.lastDecision?.displayAckMs?.prompter],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <span>{label}</span>
+                    <strong>{Number.isFinite(value) ? `${Math.round(value)} ms` : '尚無資料'}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </ControlStatusDetails>
         </div>
 
         <div className="script-list">
