@@ -78,7 +78,7 @@ test('recognition diagnostics do not rebuild the script', t => {
   assert.equal(fixture.session.lines, originalLines);
 });
 
-test('actual server waits through noise, moves on a short opening, then corrects a skip', t => {
+test('actual server predicts at onset, verifies a short opening, then corrects a skip', t => {
   const fixture = createFixture({ allowCueChanges: true, texts: [
     '我一直以為你不會再回來', '可是我答應過你',
     '我們曾經一起走過這條街道', '請大家立刻離開這個危險的地方',
@@ -89,15 +89,19 @@ test('actual server waits through noise, moves on a short opening, then corrects
   });
   assert.equal(fixture.state().preparedIndex, 1);
   assert.ok(fixture.state().openingHint.startsWith('可是'));
-  for (let sequence = 1; sequence <= 70; sequence++) {
+  for (let sequence = 1; sequence <= 61; sequence++) {
     const input = packet(fixture, sequence);
     input.level = sequence <= 60 ? 0.001 : 0.1;
     assert.equal(fixture.send(input).ok, true);
   }
   assert.equal(fixture.session.currentIndex, 0);
   assert.deepEqual(fixture.counts(), { structures: 0, lines: 0 });
+  fixture.send({ ...packet(fixture, 62), level: 0.1 });
+  assert.equal(fixture.session.currentIndex, 1);
+  assert.equal(fixture.state().lastDecision.source, 'onset');
+  assert.equal(fixture.state().lastDecision.onsetDetectionMs, 40);
   fixture.transcript('可', { streamId: 'replay', itemId: 'b', startMs: 1200, endMs: 1300 });
-  assert.equal(fixture.session.currentIndex, 0);
+  assert.equal(fixture.session.currentIndex, 1);
   fixture.transcript('可是', { streamId: 'replay', itemId: 'b', startMs: 1200, endMs: 1400 });
   assert.equal(fixture.session.currentIndex, 1);
   assert.equal(fixture.state().progressIndex, 1);

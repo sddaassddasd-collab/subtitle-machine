@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
+import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
 import {
   normalizeDisplayPayload,
   resolveAvailableLanguageId,
@@ -57,6 +58,8 @@ const PrompterPage = () => {
   const [connectionIssue, setConnectionIssue] = useState('')
   const [hasLoadedState, setHasLoadedState] = useState(false)
   const lineRefs = useRef({})
+  const socketRef = useRef(null)
+  const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef)
   const scrollRef = useRef(null)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
@@ -117,7 +120,8 @@ const PrompterPage = () => {
     setHasLoadedState(true)
     setConnectionIssue('')
     setFatalError('')
-  }, [])
+    observeAutoFollowDisplay(payload)
+  }, [observeAutoFollowDisplay])
 
   const classifyPublicFailure = useCallback((response, data, fallbackMessage) => {
     const reason =
@@ -187,6 +191,7 @@ const PrompterPage = () => {
     if (!resolvedViewerToken) return
 
     const socket = io()
+    socketRef.current = socket
     const joinViewerSession = () => {
       socket.emit('join', { viewerToken: resolvedViewerToken, role: 'prompter' })
     }
@@ -285,6 +290,7 @@ const PrompterPage = () => {
     return () => {
       clearRecoveryTimer()
       socket.disconnect()
+      if (socketRef.current === socket) socketRef.current = null
     }
   }, [
     applyViewerPayload,

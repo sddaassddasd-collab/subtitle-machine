@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
+import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
 import {
   DEFAULT_PROJECTOR_LAYOUT,
   normalizeDisplayPayload,
@@ -43,6 +44,7 @@ const ProjectorPage = () => {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const socketRef = useRef(null)
+  const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef)
   const layoutRevisionRef = useRef(0)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
@@ -149,8 +151,9 @@ const ProjectorPage = () => {
       setHasLoadedState(true)
       setConnectionIssue('')
       setFatalError('')
+      observeAutoFollowDisplay(payload)
     },
-    [applyProjectorLayoutPayload],
+    [applyProjectorLayoutPayload, observeAutoFollowDisplay],
   )
 
   const classifyPublicFailure = useCallback((response, data, fallbackMessage) => {

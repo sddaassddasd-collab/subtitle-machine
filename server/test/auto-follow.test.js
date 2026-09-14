@@ -57,7 +57,7 @@ test('noise without a confirmed line ending never advances', () => {
   assert.equal(s.index(), 0);
 });
 
-test('confirmed ending and sustained noise wait for a distinctive opening', () => {
+test('confirmed ending advances at onset before recognition and only predicts once', () => {
   const s = show(['我一直以為你不會再回來', '可是我答應過你', '我們走吧']);
   s.transcript('我一直以為你不會再回來', { isFinal: true });
   assert.equal(s.tracker.armedIndex, 1);
@@ -65,9 +65,14 @@ test('confirmed ending and sustained noise wait for a distinctive opening', () =
   s.audio(0.08, 1200, 1);
   assert.equal(s.index(), 0);
   s.audio(0.08, 1220, 2);
-  assert.equal(s.index(), 0);
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.prediction.index, 1);
+  s.audio(0.001, 1400, 10);
+  s.audio(0.08, 1600, 5);
+  assert.equal(s.index(), 1);
   s.transcript('可是', { itemId: 'b', startMs: 1200, endMs: 1350 });
   assert.equal(s.index(), 1);
+  assert.equal(s.tracker.prediction, null);
   assert.ok(s.tracker.progress > 0 && s.tracker.progress < 1);
   s.audio(0.001, 1400, 10);
   s.audio(0.08, 1600, 5);
@@ -287,14 +292,12 @@ test('uninterrupted same-item speech confirms an opening without waiting for a p
   assert.equal(s.index(), 1);
 });
 
-test('shared openings retain multiple candidates until distinctive words arrive', () => {
+test('verified sequence can use a shared opening without waiting for unique words', () => {
   const s = show(['所有的人都已經離開了', '你怎麼會在這裡', '你怎麼會知道這件事']);
   s.transcript(s.lines[0].text, { isFinal: true });
-  const ambiguous = s.transcript('你怎麼會', { itemId: 'b', startMs: 1000, endMs: 1500 });
-  assert.equal(ambiguous.status, 'searching');
-  assert.equal(s.index(), 0);
-  assert.ok(s.tracker.candidates.some(candidate => candidate.index === 1));
-  assert.ok(s.tracker.candidates.some(candidate => candidate.index === 2));
+  const result = s.transcript('你怎麼會', { itemId: 'b', startMs: 1000, endMs: 1500 });
+  assert.equal(result.status, 'advanced');
+  assert.equal(s.index(), 1);
   s.transcript('你怎麼會在', { itemId: 'b', startMs: 1000, endMs: 1650 });
   assert.equal(s.index(), 1);
 });
@@ -340,12 +343,106 @@ test('editing subtitles invalidates preparation before interpreting the next tra
   assert.notEqual(s.tracker.script, script);
 });
 
-test('audio packets never read or rebuild script contents, even after a confirmed ending', () => {
+test('onset checks only the two relevant records without rebuilding a large script', () => {
+  const s = show(['我一直以為你不會再回來', '可是我答應過你', ...Array(1000).fill('其他無關內容')]);
+  s.transcript(s.lines[0].text, { isFinal: true });
+  const cached = s.tracker.script;
+  let reads = 0;
+  const firstText = s.lines[0].text, secondText = s.lines[1].text;
+  Object.defineProperty(s.lines[0], 'text', { get() { reads++; return firstText; } });
+  Object.defineProperty(s.lines[1], 'text', { get() { reads++; return secondText; } });
+  for (const line of s.lines.slice(2)) {
+    Object.defineProperty(line, 'text', { get() { throw new Error('audio scanned unrelated script'); } });
+  }
+  assert.doesNotThrow(() => { s.audio(0.001, 1000, 10); s.audio(0.1, 1200, 10); });
+  assert.equal(reads, 2);
+  assert.equal(s.tracker.script, cached);
+  assert.equal(s.index(), 1);
+});
+
+test('startup still waits when an opening has multiple possible locations', () => {
+  const s = show(['所有的人都已經離開了', '你怎麼會在這裡', '你怎麼會知道這件事']);
+  assert.equal(s.transcript('你怎麼會').status, 'searching');
+  assert.equal(s.index(), 0);
+  assert.ok(s.tracker.candidates.length > 1);
+});
+
+test('delaying ASR by two seconds does not delay the armed onset decision', () => {
   const s = show(['我一直以為你不會再回來', '可是我答應過你']);
   s.transcript(s.lines[0].text, { isFinal: true });
-  Object.defineProperty(s.lines[0], 'text', { get() { throw new Error('audio read script'); } });
-  assert.doesNotThrow(() => { s.audio(0.001, 1000, 10); s.audio(0.1, 1200, 10); });
+  s.audio(0.001, 1000, 10);
+  const decision = s.audio(0.08, 1200, 2);
+  assert.equal(decision.index, 1);
+  assert.equal(decision.onsetMs, 1200);
+  assert.equal(s.tracker.prediction.decidedAudioMs, 1240);
+  s.audio(0.08, 1240, 98);
+  assert.equal(s.index(), 1);
+  s.transcript(s.lines[1].text, { itemId: 'b', startMs: 1200, endMs: 3100, isFinal: true });
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.prediction, null);
+});
+
+test('late previous final cannot undo a prediction or enable another prediction', () => {
+  const s = show(['我一直以為你不會再回來', '可是我答應過你', '我們現在一起回家']);
+  s.transcript(s.lines[0].text);
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  assert.equal(s.transcript(s.lines[0].text, { endMs: 1400, isFinal: true }).ignored, true);
+  assert.equal(s.tracker.items.get('a').final, true);
+  s.audio(0.001, 1400, 10); s.audio(0.08, 1600, 2);
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.armedIndex, null);
+});
+
+test('newer speech can correct a prediction back to an actually repeated line', () => {
+  const s = show(['我一直以為你不會再回來', '可是我答應過你']);
+  s.transcript(s.lines[0].text, { isFinal: true });
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  const result = s.transcript(s.lines[0].text, { itemId: 'repeat', startMs: 1200, endMs: 2300, isFinal: true });
+  assert.equal(result.status, 'corrected');
   assert.equal(s.index(), 0);
+  assert.equal(s.tracker.prediction, null);
+});
+
+test('a partial verification cannot arm another onset until its ending is heard', () => {
+  const s = show(['我一直以為你不會再回來', '可是我答應過你', '我們現在一起回家']);
+  s.transcript(s.lines[0].text, { isFinal: true });
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  s.transcript('可是', { itemId: 'b', startMs: 1200, endMs: 1450 });
+  s.audio(0.001, 1450, 10); s.audio(0.08, 1650, 2);
+  assert.equal(s.index(), 1);
+  s.transcript(s.lines[1].text, { itemId: 'b', startMs: 1200, endMs: 2200, isFinal: true });
+  s.audio(0.001, 2200, 10); s.audio(0.08, 2400, 2);
+  assert.equal(s.index(), 2);
+});
+
+test('weak interim revision does not discard a recently verified ending', () => {
+  const s = show(['我一直以為你不會再回來', '可是我答應過你']);
+  s.transcript(s.lines[0].text, { isFinal: true });
+  s.transcript('科', { itemId: 'b', startMs: 1100, endMs: 1150 });
+  assert.equal(s.tracker.armedIndex, 1);
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  assert.equal(s.index(), 1);
+});
+
+test('expired and pre-ending onsets never predict', () => {
+  const s = show(['我一直以為你不會再回來', '可是我答應過你']);
+  s.transcript(s.lines[0].text, { isFinal: true });
+  s.audio(0.001, 100, 10); s.audio(0.08, 300, 2);
+  assert.equal(s.index(), 0);
+  s.audio(0.001, 15000, 10); s.audio(0.08, 15200, 2);
+  assert.equal(s.index(), 0);
+});
+
+test('a long repeated cue can verify a known prediction without global uniqueness', () => {
+  const repeated = '請你記得我們曾經一起許下永不分離的約定';
+  const s = show(['所有的人都已經離開這個地方了', repeated, '今晚的星空非常美麗', repeated]);
+  s.transcript(s.lines[0].text, { isFinal: true });
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  assert.equal(s.index(), 1);
+  const result = s.transcript(repeated, { itemId: 'b', startMs: 1200, endMs: 3000, isFinal: true });
+  assert.equal(result.status, 'verified');
+  assert.equal(s.tracker.prediction, null);
+  assert.equal(s.tracker.armedIndex, 2);
 });
 
 test('a distant exact line can beat a highly similar local line after tracking starts', () => {

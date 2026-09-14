@@ -5614,6 +5614,9 @@ const ControlPage = () => {
                   <span>{autoFollowConfidenceLabel}</span>
                 )}
                 <span>{audioBriefLabel}</span>
+                {Number.isInteger(autoFollow.predictedIndex) && (
+                  <span>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</span>
+                )}
                 {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && (
                   <span>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</span>
                 )}
@@ -5749,6 +5752,27 @@ const ControlPage = () => {
                 <span>辨識狀態</span>
                 <strong>{transcriptionStatusLabel}</strong>
               </div>
+              <div>
+                <span>最近換格依據</span>
+                <strong>{{ onset: '起音預推', transcript: '文字確認', correction: '跳詞校正' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
+              </div>
+              <div>
+                <span>辨識結果抵達</span>
+                <strong>{formatRelativeSeconds(autoFollow.lastTranscriptReceivedAt)}</strong>
+              </div>
+              {[
+                ['辨識落後音訊約', autoFollow.lastTranscriptAudioLagMs],
+                ['文字定位耗時', autoFollow.lastAlignmentMs],
+                ['起音偵測耗時', autoFollow.lastDecision?.onsetDetectionMs],
+                ['觀眾顯示回報往返', autoFollow.lastDecision?.displayAckMs?.viewer],
+                ['投影顯示回報往返', autoFollow.lastDecision?.displayAckMs?.projector],
+                ['提詞顯示回報往返', autoFollow.lastDecision?.displayAckMs?.prompter],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <span>{label}</span>
+                  <strong>{Number.isFinite(value) ? `${Math.round(value)} ms` : '尚無資料'}</strong>
+                </div>
+              ))}
             </div>
           )}
         </div>

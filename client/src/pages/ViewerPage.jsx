@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
+import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
 import {
   normalizeDisplayPayload,
   normalizeLiveTranslationPatch,
@@ -69,6 +70,7 @@ const ViewerPage = () => {
   const [hasLoadedState, setHasLoadedState] = useState(false)
   const liveFeedRef = useRef(null)
   const socketRef = useRef(null)
+  const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
   const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
@@ -139,7 +141,8 @@ const ViewerPage = () => {
     setHasLoadedState(true)
     setConnectionIssue('')
     setFatalError('')
-  }, [])
+    observeAutoFollowDisplay(payload)
+  }, [observeAutoFollowDisplay])
 
   const classifyPublicFailure = useCallback((response, data, fallbackMessage) => {
     const reason =

@@ -8175,6 +8175,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     displayEnabled: true,
     roleColorEnabled: normalized.roleColorEnabled,
     source: 'script',
+    autoFollowDecision: getAutoFollowDisplayTiming(normalized),
     transcription,
   };
 }
@@ -8293,6 +8294,7 @@ function getProjectorPayload(session) {
     displayEnabled: true,
     roleColorEnabled: normalized.roleColorEnabled,
     source: 'script',
+    autoFollowDecision: getAutoFollowDisplayTiming(normalized),
     layout: normalized.projectorLayout,
     displayMode: projectorDisplayMode,
     languageMode: projectorLanguageMode,
@@ -8817,9 +8819,44 @@ function createAutoFollowState() {
     lastCandidateIndex: null,
     lastCandidateText: '',
     confidence: null,
+    lastDecision: null,
+    lastTranscriptReceivedAt: null,
+    lastTranscriptAudioLagMs: null,
+    lastAlignmentMs: null,
     message: '',
     updatedAt: null,
   };
+}
+
+function recordAutoFollowDecision(sessionId, index, source, timing = {}) {
+  const state = getAutoFollowState(sessionId);
+  state.lastDecision = {
+    id: crypto.randomUUID(), index, source, decidedAt: Date.now(),
+    cellId: getSessionRecord(sessionId)?.selectedCellId,
+    ...timing, displayAckMs: {},
+  };
+}
+
+function getAutoFollowDisplayTiming(session) {
+  const decision = autoFollowStates.get(session.id)?.lastDecision;
+  return session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && decision &&
+    decision.index === session.currentIndex && decision.cellId === session.selectedCellId
+    ? { id: decision.id } : null;
+}
+
+function handleAutoFollowDisplayAck(sessionId, role, decisionId, cellId) {
+  if (!['viewer', 'prompter', 'projector'].includes(role)) return;
+  const session = getSessionRecord(sessionId);
+  const state = autoFollowStates.get(sessionId);
+  const decision = state?.lastDecision;
+  if (!session || !decision || typeof decisionId !== 'string' || decision.id !== decisionId ||
+    getAutoFollowDisplayTiming(session)?.id !== decisionId ||
+    (role !== 'projector' && cellId !== session.selectedCellId) ||
+    decision.displayAckMs[role] !== undefined || Date.now() - decision.decidedAt > 30000) return;
+  // Both timestamps use the server clock. This includes outbound delivery,
+  // browser render opportunity and the acknowledgement return trip, not ASR.
+  decision.displayAckMs[role] = Math.max(0, Date.now() - decision.decidedAt);
+  broadcastAutoFollowState(sessionId);
 }
 
 function getAutoFollowState(sessionId) {
@@ -8877,6 +8914,11 @@ function getPublicAutoFollowState(session) {
     preparedIndex: state.tracker.preparedIndex,
     openingHint: state.tracker.openingHint,
     candidates: state.tracker.candidates,
+    predictedIndex: state.tracker.prediction?.index ?? null,
+    lastDecision: state.lastDecision,
+    lastTranscriptReceivedAt: state.lastTranscriptReceivedAt,
+    lastTranscriptAudioLagMs: state.lastTranscriptAudioLagMs,
+    lastAlignmentMs: state.lastAlignmentMs,
     armedIndex: state.tracker.armedIndex,
     lastOnsetAt: state.lastOnsetAt,
     lastAdvancedAt: state.lastAdvancedAt,
@@ -8935,6 +8977,17 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
     triggerThreshold: result.threshold, releaseThreshold: result.releaseThreshold,
   });
   if (Number.isFinite(result.onsetMs)) updateAutoFollowState(sessionId, { lastOnsetAt: now });
+  if (Number.isInteger(result.index)) {
+    recordAutoFollowDecision(sessionId, result.index, 'onset', {
+      onsetAudioMs: result.onsetMs, onsetDetectionMs: Math.max(0, endMs - result.onsetMs),
+    });
+    updateAutoFollowState(sessionId, {
+      started: true, status: AUTO_FOLLOW_STATUS.ADVANCED, lastAdvancedAt: now,
+      lastCandidateIndex: result.index, lastCandidateText: session.lines[result.index]?.text || '',
+      confidence: null, message: '已依起音預推一格，等待文字核對；核對前不再預推。',
+    });
+    applyCurrentIndexChange(session, result.index);
+  }
   maybeBroadcastAutoFollowDiagnostics(sessionId, now);
 }
 
@@ -8942,6 +8995,13 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const session = getSessionRecord(sessionId);
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const state = getAutoFollowState(sessionId);
+  const receivedAt = Date.now();
+  const audioMs = transcriptionStreams.get(sessionId)?.autoFollowAudioMs;
+  updateAutoFollowState(sessionId, {
+    lastTranscriptReceivedAt: receivedAt,
+    lastTranscriptAudioLagMs: Number.isFinite(audioMs) && Number.isFinite(options.endMs)
+      ? Math.max(0, audioMs - options.endMs) : null,
+  });
   let result;
   try {
     result = followTranscript(state.tracker, session.lines,
@@ -8955,6 +9015,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     broadcastAutoFollowState(sessionId);
     return;
   }
+  state.lastAlignmentMs = Math.max(0, Date.now() - receivedAt);
   if (result.ignored) return;
   const now = Date.now();
   updateAutoFollowState(sessionId, {
@@ -8966,6 +9027,9 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     ...(Number.isInteger(result.index) ? { lastVerifiedAt: now } : {}),
   });
   if (Number.isInteger(result.index) && result.index !== session.currentIndex) {
+    recordAutoFollowDecision(sessionId, result.index, result.status === 'corrected' ? 'correction' : 'transcript', {
+      transcriptReceivedAt: receivedAt, transcriptAudioLagMs: state.lastTranscriptAudioLagMs,
+    });
     updateAutoFollowState(sessionId, { lastAdvancedAt: now });
     applyCurrentIndexChange(session, result.index);
   } else {
@@ -12324,6 +12388,12 @@ io.on('connection', (socket) => {
     socket.data.publicRole = 'control';
     socket.data.controlSessionId = session.id;
     broadcastControlState(session.id);
+  });
+
+  socket.on('auto-follow:displayed', ({ decisionId } = {}) => {
+    const role = socket.data.publicRole;
+    const sessionId = role === 'projector' ? socket.data.projectorSessionId : socket.data.viewerSessionId;
+    handleAutoFollowDisplayAck(sessionId, role, decisionId, socket.data.viewerCellId);
   });
 
   socket.on('viewer:live-language', ({ languageCode } = {}) => {

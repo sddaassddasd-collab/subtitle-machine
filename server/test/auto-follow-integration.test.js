@@ -20,7 +20,7 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, createTracker, prepareScript, followTranscript, followAudio, console: { error() {} },
+    Date, crypto: require('node:crypto'), createTracker, prepareScript, followTranscript, followAudio, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
     AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS: 250, DEFAULT_SESSION_ID: 'test',
@@ -164,4 +164,37 @@ test('changing a performance cell clears the previous tracking anchor', () => {
   assert.equal(context.getPublicAutoFollowState(session).armedIndex, 1);
   session.selectedCellId = 'different-cell';
   assert.equal(context.getPublicAutoFollowState(session).armedIndex, null);
+});
+
+test('display acknowledgements are scoped to the current decision, role and cell', () => {
+  const { context, session, emissions } = fixture();
+  context.recordAutoFollowDecision('test', 0, 'onset', { onsetDetectionMs: 40 });
+  const decision = context.getPublicAutoFollowState(session).lastDecision;
+  assert.equal(context.getViewerPayload(session).autoFollowDecision.id, decision.id);
+  assert.equal(context.getProjectorPayload(session).autoFollowDecision.id, decision.id);
+  context.handleAutoFollowDisplayAck('other-session', 'viewer', decision.id, session.selectedCellId);
+  context.handleAutoFollowDisplayAck('test', 'control', decision.id, session.selectedCellId);
+  context.handleAutoFollowDisplayAck('test', 'viewer', decision.id, 'another-cell');
+  context.handleAutoFollowDisplayAck('test', 'viewer', 'stale-id', session.selectedCellId);
+  context.handleAutoFollowDisplayAck('test', 'viewer', undefined, session.selectedCellId);
+  assert.equal(emissions.length, 0);
+  context.handleAutoFollowDisplayAck('test', 'viewer', decision.id, session.selectedCellId);
+  assert.ok(Number.isFinite(decision.displayAckMs.viewer));
+  context.handleAutoFollowDisplayAck('test', 'viewer', decision.id, session.selectedCellId);
+  assert.equal(emissions.length, 1);
+  session.currentIndex = 1;
+  context.handleAutoFollowDisplayAck('test', 'projector', decision.id);
+  assert.equal(decision.displayAckMs.projector, undefined);
+});
+
+test('recognition timing exposes audio lag separately from alignment processing time', () => {
+  const { context, session } = fixture();
+  context.transcriptionStreams.set('test', { autoFollowAudioMs: 3200 });
+  context.handleAutoFollowTranscript('test', session.lines[0].text, {
+    streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true,
+  });
+  const state = context.getPublicAutoFollowState(session);
+  assert.equal(state.lastTranscriptAudioLagMs, 2200);
+  assert.ok(Number.isFinite(state.lastTranscriptReceivedAt));
+  assert.ok(Number.isFinite(state.lastAlignmentMs));
 });

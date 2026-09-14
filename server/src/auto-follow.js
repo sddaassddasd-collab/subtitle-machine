@@ -55,7 +55,7 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     pending: null, quietMs: 0, loudMs: 0, released: false,
     noiseFloor: 0.004, lastOnsetMs: -1, lastGlobalAtMs: -Infinity,
     script: null, located: false, candidates: [], preparedIndex: null,
-    anchor: null, openingHint: '',
+    anchor: null, openingHint: '', prediction: null,
   };
 }
 
@@ -130,16 +130,34 @@ function matchPreparedOpening(tracker, script, currentIndex, text, event) {
   // A near-ending preparation needs an intervening onset; a confirmed ending
   // can also transition through uninterrupted speech in the same ASR item.
   if ((!anchor.completed && tracker.lastOnsetMs < anchor.endMs) || evidence < 2 ||
-    evidence > 12 || !entry.text.startsWith(opening)) return null;
-  // Short openings must distinguish nearby alternatives, including words still
-  // ahead in the current cue. Sequence alone cannot resolve a shared opening.
-  for (let i = Math.max(0, currentIndex - 3); i <= Math.min(script.entries.length - 1, currentIndex + 18); i++) {
-    if (i !== index && script.entries[i].text.includes(opening)) return null;
+    evidence > MAX_HEARD || (!anchor.completed && evidence > 12) || !entry.text.startsWith(opening)) return null;
+  // Once the previous ending is verified, sequence supplies the missing context.
+  // Reacquisition and near-ending guesses still need a distinctive opening.
+  if (!anchor.completed) {
+    const remaining = Array.from(script.entries[currentIndex].text)
+      .slice(Math.floor(tracker.progress * script.entries[currentIndex].length)).join('');
+    if (remaining.includes(opening)) return null;
+    for (let i = Math.max(0, currentIndex - 3); i <= Math.min(script.entries.length - 1, currentIndex + 18); i++) {
+      if (i !== index && script.entries[i].text.startsWith(opening)) return null;
+    }
   }
   return {
     index, offset: evidence, length: entry.length, confidence: 1, rank: 1,
     evidence, heard: opening, openingConfirmed: true,
   };
+}
+
+function matchPredictedOpening(tracker, script, text, event) {
+  const prediction = tracker.prediction;
+  if (!prediction || event.endMs < prediction.onsetMs ||
+    event.endMs - prediction.onsetMs > 10000) return null;
+  const opening = event.itemId === prediction.anchor.itemId && text.startsWith(prediction.anchor.text)
+    ? text.slice(prediction.anchor.text.length) : text;
+  const entry = script.entries[prediction.index];
+  const evidence = Array.from(opening).length;
+  if (evidence < 2 || evidence > MAX_HEARD || !entry?.text.startsWith(opening)) return null;
+  return { index: prediction.index, offset: evidence, length: entry.length,
+    confidence: 1, rank: 1, evidence, heard: opening, openingConfirmed: true };
 }
 
 function rankCandidates(variants, lines, currentIndex, from, to, expectedIndex) {
@@ -181,6 +199,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.progressIndex = null;
     tracker.progress = 0;
     tracker.pending = null;
+    tracker.prediction = null;
     tracker.lastGlobalAtMs = -Infinity;
   }
   tracker.script = script;
@@ -202,6 +221,14 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.items.set(event.itemId, item);
   while (tracker.items.size > 8) tracker.items.delete(tracker.items.keys().next().value);
 
+  // Keep late finals as history, but they cannot undo an onset decision or arm
+  // another cue. A new item with newer audio can still correct a genuine repeat.
+  const prediction = tracker.prediction;
+  if (prediction && (event.endMs <= prediction.onsetMs ||
+    (prediction.priorItems.has(event.itemId) && text === old?.text))) {
+    return { ignored: true };
+  }
+
   const history = [...tracker.items.values()]
     .filter(entry => entry.itemId !== event.itemId && entry.final &&
       entry.endMs <= event.startMs && event.startMs - entry.endMs < 4000)
@@ -209,7 +236,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const variants = [{ text: text.slice(-MAX_HEARD), context: false }];
   if (history) variants.unshift({ text: (history + text).slice(-MAX_HEARD), context: true });
   const expectedIndex = tracker.armedIndex ?? currentIndex;
-  const opening = matchPreparedOpening(tracker, script, currentIndex, text, event);
+  const opening = matchPredictedOpening(tracker, script, text, event) ||
+    matchPreparedOpening(tracker, script, currentIndex, text, event);
   const partialOpening = preparedOpeningText(tracker, currentIndex, text, event);
   const waitingForOpening = partialOpening &&
     script.entries[tracker.preparedIndex].text.startsWith(partialOpening);
@@ -232,7 +260,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
   const uncertain = (reason) => {
-    if (!waitingForOpening) {
+    if (!waitingForOpening && !(text.length <= 2 && tracker.located && tracker.anchor &&
+      event.endMs - tracker.anchor.endMs <= 10000)) {
       clearPreparation(tracker);
       tracker.located = false;
     }
@@ -250,6 +279,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
     (best.index === currentIndex || tracker.progress === 1);
   const exactUnique = best.confidence === 1 && text === script.entries[best.index].text &&
     !candidates.some(candidate => candidate.index !== best.index && candidate.confidence === 1);
+  if (prediction && best.index < prediction.index &&
+    (prediction.priorItems.has(event.itemId) || event.startMs < prediction.onsetMs)) {
+    return { ignored: true };
+  }
   if (best.index !== currentIndex && best.offset < Math.min(2, best.length)) {
     return uncertain('已聽到可能的開頭，等待更多內容確認。');
   }
@@ -280,6 +313,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.progressIndex = best.index;
   tracker.progress = progress;
   tracker.located = true;
+  tracker.prediction = null;
   const entry = script.entries[best.index];
   const tail = entry.tail;
   // Only arm from the actual end of a line, never merely from ASR is_final.
@@ -298,7 +332,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.armedAtMs = completed ? event.endMs : null;
   return {
     index: best.index, candidate: best, progress, armedIndex: tracker.armedIndex,
-    status: best.index === currentIndex ? 'verified' : relocation ? 'corrected' : 'advanced',
+    status: best.index === currentIndex ? 'verified' : relocation || prediction ? 'corrected' : 'advanced',
     message: best.openingConfirmed ? '已確認下一格開頭，持續核對後續台詞。' :
       canPrepare ? (completed ? '已核對句尾，等待下一格開頭。' : '接近句尾，正在準備下一格。') :
       best.index === currentIndex ? '正在跟隨目前台詞。' : '已依語音定位字幕。',
@@ -327,7 +361,32 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
   const onsetMs = endMs - tracker.loudMs;
   tracker.lastOnsetMs = onsetMs;
   result.onsetMs = onsetMs;
-  // Onset is supporting evidence only. Applause or an effect cannot change cues.
+  if (tracker.prediction || !tracker.located || tracker.progressIndex !== currentIndex ||
+    tracker.progress !== 1 || tracker.armedIndex !== currentIndex + 1 ||
+    !tracker.anchor?.completed || onsetMs < tracker.armedAtMs ||
+    onsetMs - tracker.armedAtMs > 10000) return result;
+  // Only inspect the two relevant raw records at an onset. No full-script scan,
+  // Unicode normalization or rebuilding is permitted on the 50 Hz audio path.
+  for (const index of [currentIndex, tracker.armedIndex]) {
+    const line = lines[index], source = tracker.script?.entries[index]?.source;
+    if (!line || !source || line.music || line.type === 'direction' ||
+      line.text !== source.text || line.type !== source.type ||
+      line.music !== source.music || line.role !== source.role) {
+      clearPreparation(tracker);
+      return result;
+    }
+  }
+  result.index = tracker.armedIndex;
+  tracker.prediction = {
+    index: result.index, fromIndex: currentIndex, onsetMs, decidedAudioMs: endMs,
+    anchor: tracker.anchor,
+    priorItems: new Set([...tracker.items.values()].filter(item => item.endMs <= onsetMs)
+      .map(item => item.itemId)),
+  };
+  clearPreparation(tracker);
+  tracker.progressIndex = result.index;
+  tracker.progress = 0;
+  tracker.candidates = [];
   return result;
 }
 
