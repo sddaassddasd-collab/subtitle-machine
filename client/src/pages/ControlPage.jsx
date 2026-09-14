@@ -109,6 +109,12 @@ const DEFAULT_AUTO_FOLLOW_STATE = {
   status: 'idle',
   listening: false,
   started: false,
+  located: false,
+  progress: 0,
+  progressIndex: null,
+  preparedIndex: null,
+  openingHint: '',
+  candidates: [],
   lastAudioLevel: 0,
   lastAudioAt: null,
   triggerThreshold: 0.04,
@@ -5608,8 +5614,14 @@ const ControlPage = () => {
                   <span>{autoFollowConfidenceLabel}</span>
                 )}
                 <span>{audioBriefLabel}</span>
-                {Number.isInteger(autoFollow.armedIndex) && (
-                  <span>準備第 {autoFollow.armedIndex + 1} 格</span>
+                {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && (
+                  <span>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</span>
+                )}
+                {Number.isInteger(autoFollow.preparedIndex) && (
+                  <span>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</span>
+                )}
+                {autoFollow.status === 'searching' && autoFollow.candidates?.length > 1 && (
+                  <span>核對位置：{autoFollow.candidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}</span>
                 )}
                 <span>{autoFollow.message}</span>
                 {autoFollow.lastCandidateText && (

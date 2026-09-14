@@ -10,7 +10,7 @@ const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
-const { createTracker, followTranscript, followAudio } = require('./auto-follow');
+const { createTracker, prepareScript, followTranscript, followAudio } = require('./auto-follow');
 const {
   createOpaqueToken,
   createPasswordHash,
@@ -8849,6 +8849,10 @@ function resetAutoFollowState(sessionId, patch = {}) {
     ...patch,
     updatedAt: Date.now(),
   };
+  const session = getSessionRecord(sessionId);
+  if (session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+    nextState.tracker.script = prepareScript(session.lines, autoFollowStates.get(sessionId)?.tracker.script);
+  }
   autoFollowStates.set(sessionId, nextState);
   return nextState;
 }
@@ -8868,6 +8872,11 @@ function getPublicAutoFollowState(session) {
     triggerThreshold: state.triggerThreshold || AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD,
     releaseThreshold: state.releaseThreshold || AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD,
     progress: state.tracker.progress,
+    progressIndex: state.tracker.progressIndex,
+    located: state.tracker.located,
+    preparedIndex: state.tracker.preparedIndex,
+    openingHint: state.tracker.openingHint,
+    candidates: state.tracker.candidates,
     armedIndex: state.tracker.armedIndex,
     lastOnsetAt: state.lastOnsetAt,
     lastAdvancedAt: state.lastAdvancedAt,
@@ -8925,17 +8934,7 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
     listening: true, lastAudioLevel: level, lastAudioAt: now,
     triggerThreshold: result.threshold, releaseThreshold: result.releaseThreshold,
   });
-  if (Number.isInteger(result.index)) {
-    updateAutoFollowState(sessionId, {
-      started: true, status: AUTO_FOLLOW_STATUS.ADVANCED,
-      lastOnsetAt: now, lastAdvancedAt: now,
-      lastCandidateIndex: result.index,
-      lastCandidateText: session.lines[result.index]?.text || '',
-      confidence: null,
-      message: '已核對上一格句尾，依起音預推下一格，持續核對中。',
-    });
-    applyCurrentIndexChange(session, result.index);
-  }
+  if (Number.isFinite(result.onsetMs)) updateAutoFollowState(sessionId, { lastOnsetAt: now });
   maybeBroadcastAutoFollowDiagnostics(sessionId, now);
 }
 
@@ -8950,7 +8949,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   } catch (error) {
     console.error('Auto-follow alignment failed:', { sessionId, message: error?.message });
     updateAutoFollowState(sessionId, {
-      tracker: createTracker(), status: AUTO_FOLLOW_STATUS.SEARCHING,
+      tracker: createTracker({ ignoreBeforeMs: state.tracker.ignoreBeforeMs }), status: AUTO_FOLLOW_STATUS.SEARCHING,
       message: '字幕定位暫時失敗，等待下一段語音重新定位。',
     });
     broadcastAutoFollowState(sessionId);
