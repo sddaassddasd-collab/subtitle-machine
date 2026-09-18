@@ -3,6 +3,11 @@
 const OpenCC = require('opencc-js');
 const traditionalize = OpenCC.Converter({ from: 'cn', to: 'twp' });
 const MAX_HEARD = 120;
+const SEQUENCE_TTL_MS = 10000;
+
+function createCorrection() {
+  return { pending: null, candidates: [], lastScanMs: -Infinity, status: 'searching' };
+}
 
 // Reuse immutable analysis even when the server recreates its public line array.
 // Checking source fields is cheap; Unicode conversion and indexing only run for
@@ -52,8 +57,8 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
   return {
     streamId: null, ignoreBeforeMs, latestStartMs: -1, latestOrder: -1, items: new Map(),
     progressIndex: null, progress: 0, armedIndex: null, armedAtMs: null,
-    pending: null, quietMs: 0, loudMs: 0, released: false,
-    noiseFloor: 0.004, lastOnsetMs: -1, lastGlobalAtMs: -Infinity,
+    sequence: null, correction: createCorrection(), quietMs: 0, loudMs: 0, released: false,
+    noiseFloor: 0.004, lastOnsetMs: -1,
     script: null, located: false, candidates: [], preparedIndex: null,
     anchor: null, openingHint: '', prediction: null,
   };
@@ -177,6 +182,66 @@ function rankCandidates(variants, lines, currentIndex, from, to, expectedIndex) 
     Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex));
 }
 
+// This anchor survives uncertain recognition, but uncertainty never renews its
+// lifetime or authorizes an audio-only advance. Only a verified match/onset does.
+function matchSequenceOpening(tracker, script, currentIndex, text, event) {
+  const sequence = tracker.sequence;
+  if (!sequence || sequence.index !== currentIndex ||
+    event.endMs < sequence.atMs || event.endMs - sequence.atMs > SEQUENCE_TTL_MS) return null;
+  const index = currentIndex + 1;
+  const current = script.entries[currentIndex];
+  const entry = script.entries[index];
+  if (current?.next !== index || current.source.music || entry.source.music) return null;
+  const observed = sequence.observed;
+  let opening = text;
+  if (event.itemId === observed.itemId) {
+    if (!text.startsWith(observed.text)) return null;
+    opening = text.slice(observed.text.length);
+  } else if (event.startMs < observed.endMs) return null;
+  const evidence = Array.from(opening).length;
+  if (evidence < 3 || evidence > MAX_HEARD || !entry.text.startsWith(opening) ||
+    current.text.includes(opening)) return null;
+  // Without a confirmed ending, a shared opening cannot resolve the position.
+  for (let i = Math.max(0, currentIndex - 3); i <= Math.min(script.entries.length - 1, currentIndex + 18); i++) {
+    if (i !== index && script.entries[i].text.startsWith(opening)) return null;
+  }
+  return { index, offset: evidence, length: entry.length, confidence: 1, rank: 1,
+    evidence, heard: opening, openingConfirmed: true };
+}
+
+// Full-script correction has its own candidates and pending evidence. It runs
+// even when the sequence lane has a usable opening; waiting here never vetoes
+// that lane. Scans are throttled on the provider audio clock.
+function evaluateCorrection(tracker, script, currentIndex, text, event) {
+  const lane = tracker.correction;
+  const growingPending = lane.pending && text.length > lane.pending.text.length &&
+    text.startsWith(lane.pending.text);
+  if (text.length < 6 || (!event.isFinal && !growingPending &&
+    event.endMs - lane.lastScanMs < 400)) return null;
+  lane.lastScanMs = event.endMs;
+  const candidates = rankCandidates([{ text: text.slice(-MAX_HEARD), context: false }],
+    script, currentIndex, 0, script.entries.length - 1, currentIndex);
+  lane.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
+    ({ index, confidence, progress: offset / length }));
+  const best = candidates[0];
+  const exactUnique = best?.confidence === 1 && text === script.entries[best.index].text &&
+    !candidates.some(candidate => candidate.index !== best.index && candidate.confidence === 1);
+  if (!best || best.confidence < 0.88 || best.offset < Math.min(2, best.length) ||
+    (candidates[1] && best.rank - candidates[1].rank < 0.07 && !exactUnique)) {
+    lane.pending = null;
+    lane.status = 'searching';
+    return { candidates, accepted: false };
+  }
+  const prior = lane.pending;
+  const supported = prior?.index === best.index && text !== prior.text &&
+    event.endMs > prior.endMs && event.endMs - prior.endMs <= SEQUENCE_TTL_MS;
+  const sequential = best.index === currentIndex || best.index === script.entries[currentIndex]?.next;
+  lane.pending = sequential ? null : { index: best.index, text, endMs: event.endMs };
+  const accepted = sequential || supported || event.isFinal === true;
+  lane.status = accepted ? 'verified' : 'pending';
+  return { candidates, accepted, exactUnique };
+}
+
 function followTranscript(tracker, lines, currentIndex, event) {
   const text = normalizeText(event.text);
   if (!text || !event.itemId || !Number.isFinite(event.startMs) ||
@@ -198,9 +263,9 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.located = false;
     tracker.progressIndex = null;
     tracker.progress = 0;
-    tracker.pending = null;
+    tracker.sequence = null;
+    tracker.correction = createCorrection();
     tracker.prediction = null;
-    tracker.lastGlobalAtMs = -Infinity;
   }
   tracker.script = script;
   if (event.startMs < tracker.latestStartMs ||
@@ -229,6 +294,9 @@ function followTranscript(tracker, lines, currentIndex, event) {
     return { ignored: true };
   }
 
+  if (tracker.sequence && (tracker.sequence.index !== currentIndex ||
+    event.endMs - tracker.sequence.atMs > SEQUENCE_TTL_MS)) tracker.sequence = null;
+
   const history = [...tracker.items.values()]
     .filter(entry => entry.itemId !== event.itemId && entry.final &&
       entry.endMs <= event.startMs && event.startMs - entry.endMs < 4000)
@@ -237,25 +305,29 @@ function followTranscript(tracker, lines, currentIndex, event) {
   if (history) variants.unshift({ text: (history + text).slice(-MAX_HEARD), context: true });
   const expectedIndex = tracker.armedIndex ?? currentIndex;
   const opening = matchPredictedOpening(tracker, script, text, event) ||
-    matchPreparedOpening(tracker, script, currentIndex, text, event);
+    matchPreparedOpening(tracker, script, currentIndex, text, event) ||
+    matchSequenceOpening(tracker, script, currentIndex, text, event);
   const partialOpening = preparedOpeningText(tracker, currentIndex, text, event);
   const waitingForOpening = partialOpening &&
     script.entries[tracker.preparedIndex].text.startsWith(partialOpening);
   let candidates = opening ? [opening] : rankCandidates(variants, script, currentIndex,
     Math.max(0, currentIndex - 3), Math.min(lines.length - 1, currentIndex + 18), expectedIndex);
   let best = candidates[0];
-  let global = false;
-  const remoteExact = script.exactLines.get(text)?.some(index =>
-    index < currentIndex - 3 || index > currentIndex + 18);
-  // A long, unique line can reacquire anywhere, including genuine backward jumps.
-  if (!opening && text.length >= 6 && (remoteExact || !tracker.located || !best || best.confidence < 0.88 ||
-    (candidates[1] && best.rank - candidates[1].rank < 0.07)) &&
-    (event.isFinal || event.endMs - tracker.lastGlobalAtMs >= 400)) {
-    tracker.lastGlobalAtMs = event.endMs;
-    candidates = rankCandidates([{ text: text.slice(-MAX_HEARD), context: false }],
-      script, currentIndex, 0, lines.length - 1, expectedIndex);
+  const correction = evaluateCorrection(tracker, script, currentIndex, text, event);
+  const corrected = correction?.candidates[0];
+  const next = script.entries[currentIndex]?.next;
+  const localSequential = best && (best.index === currentIndex || best.index === next);
+  // One arbiter owns the display. A confirmed correction can override a local
+  // guess, while an ambiguous/pending search cannot block a usable sequence.
+  const useCorrection = correction && (
+    (!tracker.sequence && !opening) ||
+    (correction.accepted && (!localSequential || !best ||
+      corrected.confidence > best.confidence ||
+      (correction.exactUnique && text !== script.entries[best.index].text)))
+  );
+  if (useCorrection) {
+    candidates = correction.candidates;
     best = candidates[0];
-    global = best && (best.index < currentIndex - 3 || best.index > currentIndex + 18);
   }
   tracker.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
@@ -265,10 +337,20 @@ function followTranscript(tracker, lines, currentIndex, event) {
       clearPreparation(tracker);
       tracker.located = false;
     }
-    return { status: 'searching', message: reason, candidate: best || null };
+    if (tracker.sequence) {
+      // Remember revisions for same-item suffix matching without extending TTL.
+      // Keep an existing prefix while a short opening is still growing.
+      const observed = tracker.sequence.observed;
+      const suffix = event.itemId === observed.itemId && text.startsWith(observed.text)
+        ? text.slice(observed.text.length) : text;
+      if (!suffix || !script.entries[currentIndex + 1]?.text.startsWith(suffix)) {
+        tracker.sequence.observed = { itemId: event.itemId, text, endMs: event.endMs };
+      }
+    }
+    return { status: 'searching', message: tracker.sequence
+      ? `${reason} 保留順序跟隨，等待下一格明確開頭。` : reason, candidate: best || null };
   };
   if (!best || best.confidence < 0.78) {
-    tracker.pending = null;
     return uncertain('正在重新定位台詞，暫時維持目前字幕。');
   }
   const runner = candidates[1];
@@ -288,25 +370,19 @@ function followTranscript(tracker, lines, currentIndex, event) {
   }
   if ((ambiguous && !exactUnique) ||
     (best.evidence < 3 && !expectedShort && !best.openingConfirmed)) {
-    tracker.pending = null;
     return uncertain('有多處相似台詞，等待更多內容確認。');
   }
   // Revisions/finalization of one ASR item must not rewind that item's progress.
   if (item.maxIndex !== null && best.index < item.maxIndex) return { ignored: true };
 
-  const next = script.entries[currentIndex]?.next;
   const relocation = best.index !== currentIndex && best.index !== next;
-  if (relocation || global) {
+  if (relocation) {
     if (best.confidence < 0.88 || text.length < 6 || (ambiguous && !exactUnique)) {
       return uncertain('疑似跳詞，正在核對新的位置。');
     }
-    const prior = tracker.pending;
-    const supported = prior?.index === best.index && prior.text !== text &&
-      event.endMs >= prior.endMs;
-    tracker.pending = { index: best.index, text, endMs: event.endMs };
-    if (!supported && !event.isFinal) return uncertain('疑似跳詞，等待後續語音確認。');
-  } else {
-    tracker.pending = null;
+    if (!correction?.accepted || corrected.index !== best.index) {
+      return uncertain('疑似跳詞，等待後續語音確認。');
+    }
   }
   item.maxIndex = Math.max(item.maxIndex ?? best.index, best.index);
   const progress = best.offset / best.length;
@@ -314,6 +390,9 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.progress = progress;
   tracker.located = true;
   tracker.prediction = null;
+  tracker.sequence = { index: best.index, atMs: event.endMs,
+    observed: { itemId: event.itemId, text, endMs: event.endMs } };
+  if (relocation) tracker.correction.pending = null;
   const entry = script.entries[best.index];
   const tail = entry.tail;
   // Only arm from the actual end of a line, never merely from ASR is_final.
@@ -383,6 +462,8 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
     priorItems: new Set([...tracker.items.values()].filter(item => item.endMs <= onsetMs)
       .map(item => item.itemId)),
   };
+  tracker.sequence = { index: result.index, atMs: onsetMs,
+    observed: { itemId: tracker.anchor.itemId, text: tracker.anchor.text, endMs: tracker.anchor.endMs } };
   clearPreparation(tracker);
   tracker.progressIndex = result.index;
   tracker.progress = 0;

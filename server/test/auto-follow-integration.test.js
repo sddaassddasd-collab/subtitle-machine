@@ -198,3 +198,40 @@ test('recognition timing exposes audio lag separately from alignment processing 
   assert.ok(Number.isFinite(state.lastTranscriptReceivedAt));
   assert.ok(Number.isFinite(state.lastAlignmentMs));
 });
+
+test('server advances after weak recognition while publishing both tracking lanes', () => {
+  const { context, session, emissions } = fixture();
+  session.lines = [{ text: '大家今天終於重新聚在一起了' },
+    { text: '可是我答應過你永遠不會離開' }, { text: '請你先坐下來喝杯茶' },
+    { text: '他想請你先一起討論事情' }];
+  context.handleAutoFollowTranscript('test', session.lines[0].text, {
+    streamId: 's', itemId: 'a', startMs: 0, endMs: 1000,
+  });
+  for (let time = 1020; time <= 1200; time += 20) context.handleAutoFollowAudioLevel('test', 0.001, 20, time);
+  for (let time = 1220; time <= 1240; time += 20) context.handleAutoFollowAudioLevel('test', 0.08, 20, time);
+  assert.equal(session.currentIndex, 1);
+  context.handleAutoFollowTranscript('test', '科是他打應過你', {
+    streamId: 's', itemId: 'b', startMs: 1200, endMs: 1800,
+  });
+  const waiting = context.getPublicAutoFollowState(session);
+  assert.equal(waiting.sequenceIndex, 1);
+  assert.equal(waiting.correctionStatus, 'searching');
+  assert.equal(waiting.armedIndex, null);
+  emissions.length = 0;
+  context.handleAutoFollowTranscript('test', '請你先', {
+    streamId: 's', itemId: 'c', startMs: 2000, endMs: 2300,
+  });
+  assert.equal(session.currentIndex, 2);
+  assert.ok(emissions.includes('viewer'));
+  assert.equal(context.getViewerPayload(session).text, session.lines[2].text);
+  assert.equal(context.getProjectorPayload(session).text, session.lines[2].text);
+  context.transcriptionStreams.set('test', { autoFollowAudioMs: 2400 });
+  context.applyCurrentIndexChange(session, 0, { manualOverride: true });
+  const reset = context.getPublicAutoFollowState(session);
+  assert.equal(reset.sequenceIndex, null);
+  assert.equal(reset.correctionCandidates.length, 0);
+  context.handleAutoFollowTranscript('test', session.lines[2].text, {
+    streamId: 's', itemId: 'stale', startMs: 2000, endMs: 3000, isFinal: true,
+  });
+  assert.equal(session.currentIndex, 0);
+});

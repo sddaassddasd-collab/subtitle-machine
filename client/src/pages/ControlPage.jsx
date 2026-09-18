@@ -117,6 +117,9 @@ const DEFAULT_AUTO_FOLLOW_STATE = {
   preparedIndex: null,
   openingHint: '',
   candidates: [],
+  sequenceIndex: null,
+  correctionStatus: 'searching',
+  correctionCandidates: [],
   lastAudioLevel: 0,
   lastAudioAt: null,
   triggerThreshold: 0.04,
@@ -5690,6 +5693,8 @@ const ControlPage = () => {
                 <>
                   <p>{autoFollowStatusLabel} · {transcriptionStatusLabel}{autoFollowConfidenceLabel}</p>
                   {autoFollow.message && <p>{autoFollow.message}</p>}
+                  {Number.isInteger(autoFollow.sequenceIndex) && <p>順序跟隨：保留第 {autoFollow.sequenceIndex + 1} 格位置，持續核對後續台詞。</p>}
+                  <p>全文校正：{autoFollow.correctionStatus === 'verified' ? '已核對位置' : autoFollow.correctionStatus === 'pending' ? '候選位置待確認' : '等待明確文字'}{autoFollow.correctionCandidates?.length > 0 && `（${autoFollow.correctionCandidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}）`}</p>
                   {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</p>}
                   {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && <p>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</p>}
                   {Number.isInteger(autoFollow.preparedIndex) && <p>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</p>}

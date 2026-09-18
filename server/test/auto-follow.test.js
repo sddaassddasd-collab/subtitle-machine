@@ -464,3 +464,108 @@ test('changing the next cue to music disables early opening confirmation', () =>
   assert.equal(s.index(), 0);
   assert.equal(s.tracker.preparedIndex, null);
 });
+
+function noisySequence() {
+  const s = show(['大家今天終於重新聚在一起了', '可是我答應過你永遠不會離開',
+    '請你先坐下來喝杯茶', '他想請你先一起討論事情']);
+  s.transcript(s.lines[0].text);
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  assert.equal(s.index(), 1);
+  const weak = s.transcript('科是他打應過你', { itemId: 'b', startMs: 1200, endMs: 1800 });
+  assert.equal(weak.status, 'searching');
+  assert.ok(weak.candidate.confidence < 0.78);
+  assert.equal(s.tracker.armedIndex, null);
+  return s;
+}
+
+test('a low-score predicted cue does not block the next distinctive opening', () => {
+  const s = noisySequence();
+  s.audio(0.001, 1800, 10); s.audio(0.08, 2000, 2);
+  assert.equal(s.index(), 1, 'low confidence cannot authorize another audio-only advance');
+  const result = s.transcript('請你先', { itemId: 'c', startMs: 2000, endMs: 2250 });
+  assert.equal(result.candidate.openingConfirmed, true);
+  assert.equal(s.index(), 2, 'the next opening does not wait for the previous ending or final');
+  assert.equal(s.tracker.prediction, null);
+  assert.equal(s.tracker.armedIndex, null);
+});
+
+test('the next opening can grow after a noisy prefix in the same ASR item', () => {
+  const s = noisySequence();
+  s.transcript('科是他打應過你請', { itemId: 'b', startMs: 1200, endMs: 1900 });
+  assert.equal(s.index(), 1);
+  s.transcript('科是他打應過你請你', { itemId: 'b', startMs: 1200, endMs: 2000 });
+  assert.equal(s.index(), 1);
+  const result = s.transcript('科是他打應過你請你先', { itemId: 'b', startMs: 1200, endMs: 2100 });
+  assert.equal(result.candidate.openingConfirmed, true);
+  assert.equal(s.index(), 2);
+});
+
+test('pending full-script correction cannot veto a sequence opening', () => {
+  const s = noisySequence();
+  s.lines.push(...Array(30).fill({ text: '其他完全不同的台詞' }));
+  s.lines[30] = { text: '今天外面忽然下起一場大雨' };
+  // Establish the position again after editing, then give the correction lane
+  // one plausible distant interim before returning to the actual next opening.
+  s.transcript(s.lines[1].text, { itemId: 'verified', startMs: 2000, endMs: 3000, isFinal: true });
+  s.transcript('今天外面忽然下起', { itemId: 'remote', startMs: 3100, endMs: 3800 });
+  assert.equal(s.tracker.correction.status, 'pending');
+  assert.equal(s.index(), 1);
+  s.transcript('請你先', { itemId: 'next', startMs: 3900, endMs: 4200 });
+  assert.equal(s.index(), 2);
+});
+
+test('full-script correction continues while sequence matching succeeds', () => {
+  const s = show(['大家今天終於重新聚在一起了', '請你先坐下來喝杯茶',
+    ...Array(30).fill('其他完全不相關的內容')]);
+  s.lines[30].text = '請你先坐下來喝杯茶再告訴我真相';
+  s.transcript(s.lines[0].text, { isFinal: true });
+  s.transcript('請你先坐下來', { itemId: 'b', startMs: 1200, endMs: 2000 });
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.correction.lastScanMs, 2000);
+  assert.ok(s.tracker.correction.candidates.some(candidate => candidate.index === 30));
+  s.transcript(s.lines[30].text, { itemId: 'b', startMs: 1200, endMs: 3000, isFinal: true });
+  assert.equal(s.index(), 30);
+  assert.equal(s.tracker.sequence.index, 30);
+});
+
+test('low-score updates do not keep an expired sequence alive', () => {
+  const s = noisySequence();
+  s.transcript('完全無關的臨時發言', { itemId: 'noise', startMs: 9000, endMs: 10000 });
+  s.transcript('請你先', { itemId: 'late', startMs: 12000, endMs: 12500 });
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.sequence, null);
+});
+
+test('an unverified boundary cannot use an opening shared by nearby cues', () => {
+  const s = show(['所有的人都已經離開了', '你怎麼會在這裡', '你怎麼會知道這件事']);
+  s.transcript('所有的人');
+  s.transcript('你怎麼會', { itemId: 'b', startMs: 1200, endMs: 1500 });
+  assert.equal(s.index(), 0);
+});
+
+test('sequence recovery does not treat a phrase inside the current cue as the next opening', () => {
+  const s = show(['她說請你先不要離開這裡', '請你先坐下來喝杯茶']);
+  s.transcript('她說請你');
+  const result = s.transcript('請你先', { itemId: 'b', startMs: 1200, endMs: 1500 });
+  assert.equal(result.status, 'searching');
+  assert.equal(s.index(), 0);
+});
+
+test('editing or reconnecting clears a retained sequence before a short opening', () => {
+  for (const reset of ['edit', 'reconnect']) {
+    const s = noisySequence();
+    if (reset === 'edit') s.lines[1].role = 'new role';
+    s.transcript('請你先', { itemId: 'c', startMs: 2000, endMs: 2300,
+      ...(reset === 'reconnect' ? { streamId: 's2' } : {}) });
+    assert.equal(s.index(), 1);
+    assert.equal(s.tracker.sequence, null);
+  }
+});
+
+test('late previous results cannot reverse sequence recovery after a weak cue', () => {
+  const s = noisySequence();
+  s.transcript('請你先', { itemId: 'c', startMs: 2000, endMs: 2300 });
+  const late = s.transcript(s.lines[1].text, { itemId: 'b', startMs: 1200, endMs: 1800, isFinal: true });
+  assert.equal(late.ignored, true);
+  assert.equal(s.index(), 2);
+});
