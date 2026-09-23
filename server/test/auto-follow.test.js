@@ -569,3 +569,62 @@ test('late previous results cannot reverse sequence recovery after a weak cue', 
   assert.equal(late.ignored, true);
   assert.equal(s.index(), 2);
 });
+
+const recoveryLines = ['你怎麼現在才來這裡', '路上出了點事情', '到底發生什麼事情', '我的車子壞了', '我們明天搭火車回家'];
+
+test('recent verified position catches up three cues from a complete interim', () => {
+  const s = show(recoveryLines);
+  s.transcript(recoveryLines[0], { isFinal: true });
+  const result = s.transcript(recoveryLines[3], { itemId: 'b', startMs: 1100, endMs: 2400 });
+  assert.equal(result.index, 3);
+  assert.match(result.message, /追上附近字幕/);
+});
+
+test('catch-up does not authorize reverse jumps from a single interim', () => {
+  const s = show(recoveryLines, 3);
+  s.transcript(recoveryLines[3], { isFinal: true });
+  s.transcript(recoveryLines[0], { itemId: 'b', startMs: 1100, endMs: 2400 });
+  assert.equal(s.index(), 3);
+});
+
+test('a short noisy suffix cannot trigger catch-up', () => {
+  const s = show(recoveryLines);
+  s.transcript(recoveryLines[0], { isFinal: true });
+  s.transcript('完全聽不清楚的雜訊車子壞了', { itemId: 'b', startMs: 1100, endMs: 2400 });
+  assert.equal(s.index(), 0);
+});
+
+test('noisy prefix does not prevent nearby recovery using clear recent speech', () => {
+  const s = show(recoveryLines);
+  s.transcript(recoveryLines[0], { isFinal: true });
+  s.transcript('亂碼噪聲完全聽不清楚我的車子壞了', { itemId: 'b', startMs: 1100, endMs: 2400 });
+  assert.equal(s.index(), 3);
+});
+
+test('startup and expired positions still require confirmation for nearby jumps', () => {
+  for (const expired of [false, true]) {
+    const s = show(recoveryLines);
+    if (expired) s.transcript(recoveryLines[0], { isFinal: true });
+    s.transcript(recoveryLines[3], { itemId: 'b', startMs: 12000, endMs: 13000 });
+    assert.equal(s.index(), 0);
+  }
+});
+
+test('shared recent suffix cannot choose between repeated cues', () => {
+  const s = show([...recoveryLines, recoveryLines[3]]);
+  s.transcript(recoveryLines[0], { isFinal: true });
+  s.transcript('亂碼噪聲完全聽不清楚我的車子壞了', { itemId: 'b', startMs: 1100, endMs: 2400, isFinal: true });
+  assert.equal(s.index(), 0);
+});
+
+test('remote suffix recovery needs new matching evidence, not a revised noisy prefix', () => {
+  const lines = [...recoveryLines, ...Array(25).fill('完全無關的其他內容'), '請大家立刻離開這個危險的地方'];
+  const s = show(lines);
+  s.transcript(lines[0], { isFinal: true });
+  s.transcript('噪聲亂碼無法理解請大家立刻離開', { itemId: 'b', startMs: 1100, endMs: 2400 });
+  assert.equal(s.index(), 0);
+  s.transcript('更多噪聲亂碼無法理解請大家立刻離開', { itemId: 'b', startMs: 1100, endMs: 2900 });
+  assert.equal(s.index(), 0);
+  s.transcript('更多噪聲亂碼無法理解請大家立刻離開這個危險的地方', { itemId: 'b', startMs: 1100, endMs: 3500 });
+  assert.equal(s.index(), lines.length - 1);
+});

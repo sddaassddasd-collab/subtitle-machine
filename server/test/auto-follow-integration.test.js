@@ -55,6 +55,25 @@ function fixture(mode = 'auto') {
   return { session, context, emissions };
 }
 
+test('noisy interim catches up nearby and publishes edited script to displays', () => {
+  const { session, context, emissions } = fixture();
+  session.lines = ['你怎麼現在才來這裡', '路上出了點事情', '到底發生什麼事情', '我的車子壞了']
+    .map(text => ({ text }));
+  context.handleAutoFollowTranscript('test', session.lines[0].text, {
+    streamId: 's1', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true,
+  });
+  emissions.length = 0;
+  context.handleAutoFollowTranscript('test', '亂碼噪聲完全聽不清楚我的車子壞了', {
+    streamId: 's1', itemId: 'b', startMs: 1100, endMs: 2400, isFinal: false,
+  });
+  assert.equal(session.currentIndex, 3);
+  assert.ok(emissions.includes('viewer'));
+  for (const payload of [context.getViewerPayload(session), context.getProjectorPayload(session)]) {
+    assert.equal(payload.source, 'script');
+    assert.equal(payload.text, '我的車子壞了');
+  }
+});
+
 test('automatic viewers and projectors both show the edited script while ASR runs', () => {
   const { context, session } = fixture();
   for (const payload of [context.getViewerPayload(session), context.getProjectorPayload(session)]) {

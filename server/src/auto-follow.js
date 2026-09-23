@@ -182,6 +182,38 @@ function rankCandidates(variants, lines, currentIndex, from, to, expectedIndex) 
     Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex));
 }
 
+// Retry only weak matches with recent suffixes; strong full-context matches win.
+// Six characters is the minimum recovery evidence, never a one-word blind jump.
+function rankRecentCandidates(variants, script, currentIndex, from, to, expectedIndex) {
+  const full = rankCandidates(variants, script, currentIndex, from, to, expectedIndex);
+  if (full[0]?.confidence >= 0.88) return full;
+  const text = Array.from(variants.find(variant => !variant.context).text);
+  const suffixes = [24, 16, 10, 6].filter(length => length < text.length)
+    .map(length => ({ text: text.slice(-length).join(''), context: false }));
+  if (!suffixes.length) return full;
+  const recovered = rankCandidates(suffixes, script, currentIndex, from, to, expectedIndex)
+    .filter(candidate => candidate.confidence >= 0.9)
+    .map(candidate => ({ ...candidate, rank: candidate.rank - 0.04, recovered: true }));
+  const byIndex = new Map(full.map(candidate => [candidate.index, candidate]));
+  for (const candidate of recovered) {
+    if (!byIndex.has(candidate.index) || candidate.rank > byIndex.get(candidate.index).rank) {
+      byIndex.set(candidate.index, candidate);
+    }
+  }
+  return [...byIndex.values()].sort((a, b) => b.rank - a.rank || b.evidence - a.evidence);
+}
+
+function canCatchUp(tracker, script, currentIndex, best, event) {
+  const sequence = tracker.sequence;
+  if (!sequence || tracker.prediction || sequence.index !== currentIndex ||
+    event.endMs <= sequence.atMs || event.endMs - sequence.atMs > SEQUENCE_TTL_MS ||
+    best.index <= currentIndex + 1 || best.index > currentIndex + 4 ||
+    best.confidence < 0.92 || best.evidence < 6) return false;
+  // Partial phrases need more evidence than a complete cue. All candidates still
+  // pass ambiguity checks; distant/reverse jumps retain the correction handshake.
+  return best.evidence >= 8 || best.heard === script.entries[best.index].text;
+}
+
 // This anchor survives uncertain recognition, but uncertainty never renews its
 // lifetime or authorizes an audio-only advance. Only a verified match/onset does.
 function matchSequenceOpening(tracker, script, currentIndex, text, event) {
@@ -219,7 +251,7 @@ function evaluateCorrection(tracker, script, currentIndex, text, event) {
   if (text.length < 6 || (!event.isFinal && !growingPending &&
     event.endMs - lane.lastScanMs < 400)) return null;
   lane.lastScanMs = event.endMs;
-  const candidates = rankCandidates([{ text: text.slice(-MAX_HEARD), context: false }],
+  const candidates = rankRecentCandidates([{ text: text.slice(-MAX_HEARD), context: false }],
     script, currentIndex, 0, script.entries.length - 1, currentIndex);
   lane.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
@@ -233,11 +265,12 @@ function evaluateCorrection(tracker, script, currentIndex, text, event) {
     return { candidates, accepted: false };
   }
   const prior = lane.pending;
-  const supported = prior?.index === best.index && text !== prior.text &&
+  const supported = prior?.index === best.index && best.heard !== prior.heard &&
     event.endMs > prior.endMs && event.endMs - prior.endMs <= SEQUENCE_TTL_MS;
   const sequential = best.index === currentIndex || best.index === script.entries[currentIndex]?.next;
-  lane.pending = sequential ? null : { index: best.index, text, endMs: event.endMs };
-  const accepted = sequential || supported || event.isFinal === true;
+  lane.pending = sequential ? null : { index: best.index, text, heard: best.heard, endMs: event.endMs };
+  const accepted = sequential || supported || event.isFinal === true ||
+    canCatchUp(tracker, script, currentIndex, best, event);
   lane.status = accepted ? 'verified' : 'pending';
   return { candidates, accepted, exactUnique };
 }
@@ -310,7 +343,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const partialOpening = preparedOpeningText(tracker, currentIndex, text, event);
   const waitingForOpening = partialOpening &&
     script.entries[tracker.preparedIndex].text.startsWith(partialOpening);
-  let candidates = opening ? [opening] : rankCandidates(variants, script, currentIndex,
+  let candidates = opening ? [opening] : rankRecentCandidates(variants, script, currentIndex,
     Math.max(0, currentIndex - 3), Math.min(lines.length - 1, currentIndex + 18), expectedIndex);
   let best = candidates[0];
   const correction = evaluateCorrection(tracker, script, currentIndex, text, event);
@@ -376,6 +409,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   if (item.maxIndex !== null && best.index < item.maxIndex) return { ignored: true };
 
   const relocation = best.index !== currentIndex && best.index !== next;
+  const caughtUp = relocation && canCatchUp(tracker, script, currentIndex, best, event);
   if (relocation) {
     if (best.confidence < 0.88 || text.length < 6 || (ambiguous && !exactUnique)) {
       return uncertain('疑似跳詞，正在核對新的位置。');
@@ -412,7 +446,9 @@ function followTranscript(tracker, lines, currentIndex, event) {
   return {
     index: best.index, candidate: best, progress, armedIndex: tracker.armedIndex,
     status: best.index === currentIndex ? 'verified' : relocation || prediction ? 'corrected' : 'advanced',
-    message: best.openingConfirmed ? '已確認下一格開頭，持續核對後續台詞。' :
+    message: caughtUp ? '已依最新清楚台詞追上附近字幕。' :
+      best.recovered ? '已依最新文字尾段重新定位字幕。' :
+      best.openingConfirmed ? '已確認下一格開頭，持續核對後續台詞。' :
       canPrepare ? (completed ? '已核對句尾，等待下一格開頭。' : '接近句尾，正在準備下一格。') :
       best.index === currentIndex ? '正在跟隨目前台詞。' : '已依語音定位字幕。',
   };
