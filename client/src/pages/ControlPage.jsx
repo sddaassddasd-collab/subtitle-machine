@@ -4722,16 +4722,15 @@ const ControlPage = () => {
     !displayEnabled
       ? []
     : currentLine?.type === 'direction'
-        ? [{ id: 'direction', name: '', text: '舞台指示不投影' }]
+        ? [{ id: 'direction', text: '舞台指示不投影' }]
         : currentLine
           ? projectorPreviewLanguages
               .map((language) => ({
                 id: language.id,
-                name: language.name,
                 text: resolveLineText(currentLine, language.id),
               }))
               .filter((entry) => entry.text.trim())
-          : [{ id: 'empty', name: '', text: '尚未載入字幕' }]
+          : [{ id: 'empty', text: '尚未載入字幕' }]
   const projectorStatus = sessionMeta?.projectorStatus || null
   const projectorConnected = projectorStatus?.connected === true
   const projectorRealtimeConnected = projectorStatus?.realtimeConnected === true
@@ -6152,9 +6151,6 @@ const ControlPage = () => {
                   {projectorPreviewTexts.length > 0
                     ? projectorPreviewTexts.map((entry) => (
                         <div key={entry.id} className="viewer-preview-language-line">
-                          {projectorPreviewTexts.length > 1 && entry.name && (
-                            <span>{entry.name}</span>
-                          )}
                           <strong>{entry.text}</strong>
                         </div>
                       ))

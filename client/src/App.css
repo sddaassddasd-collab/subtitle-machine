@@ -466,8 +466,7 @@
 }
 
 .viewer-preview-language-line span,
-.viewer-language-line span,
-.projector-language-line span {
+.viewer-language-line span {
   color: rgba(226, 232, 240, 0.72);
   font-size: 0.34em;
   font-weight: 700;

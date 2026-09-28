@@ -565,7 +565,6 @@ const ProjectorPage = () => {
       )
         .map((language) => ({
           id: language.id,
-          name: language.name,
           text: resolveLineText(line, language.id),
         }))
         .filter((entry) => entry.text.trim())
@@ -618,9 +617,6 @@ const ProjectorPage = () => {
               {scriptText.length > 0
                 ? scriptText.map((entry) => (
                     <div key={entry.id} className="projector-language-line">
-                      {scriptText.length > 1 && (
-                        <span>{entry.name}</span>
-                      )}
                       <strong>{entry.text}</strong>
                     </div>
                   ))
