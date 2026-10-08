@@ -16,6 +16,7 @@ const HomePage = () => {
   const [creatingWorkspace, setCreatingWorkspace] = useState(false)
   const [unlockingSharedAccess, setUnlockingSharedAccess] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [deletingSessionId, setDeletingSessionId] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -147,6 +148,32 @@ const HomePage = () => {
       setSharedPassword('')
       setError('')
       setNotice('')
+    }
+  }
+
+  const handleDeleteSession = async (session) => {
+    if (deletingSessionId) return
+    const title = session.title || '未命名節目'
+    const activeWarning = session.status !== 'ended'
+      ? '\n此節目使用中，刪除後會停止收音及外部字幕服務。'
+      : ''
+    if (!window.confirm(`確定刪除節目「${title}」？\n劇本、字幕與設定會一併刪除，無法復原。${activeWarning}`)) return
+
+    setDeletingSessionId(session.id)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch(`/api/session/${encodeURIComponent(session.id)}`, {
+        method: 'DELETE',
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || '刪除節目失敗')
+      setSessions((previous) => previous.filter((entry) => entry.id !== session.id))
+      setNotice(`已刪除節目「${title}」`)
+    } catch (deleteError) {
+      setError(deleteError.message || '刪除節目失敗')
+    } finally {
+      setDeletingSessionId(null)
     }
   }
 
@@ -387,6 +414,14 @@ const HomePage = () => {
                     }
                   >
                     進入控制端
+                  </button>
+                  <button
+                    type="button"
+                    className="subtle-button danger-button"
+                    onClick={() => handleDeleteSession(session)}
+                    disabled={Boolean(deletingSessionId)}
+                  >
+                    {deletingSessionId === session.id ? '刪除中…' : '刪除節目'}
                   </button>
                 </div>
               </article>

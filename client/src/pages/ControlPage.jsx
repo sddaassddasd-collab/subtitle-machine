@@ -509,58 +509,27 @@ const normalizeEditableSegment = (text, { trim = true } = {}) => {
   const cleaned = (text ?? '')
     .replace(/\u00a0/g, ' ')
     .replace(/\u200b/g, '')
-    .replace(/\r?\n/g, ' ')
+    .replace(/\r\n?/g, '\n')
   return trim ? cleaned.trim() : cleaned
 }
 
 const normalizeRoleInput = (text) => {
   const normalized = normalizeEditableSegment(text)
+    .replace(/\n/g, ' ')
     .replace(/[：:]$/u, '')
     .trim()
   return normalized ? normalized.slice(0, 48) : ''
 }
 
 const getCollapsedLineSelectionContext = (node) => {
-  if (!node || !window.getSelection) return null
-  const selection = window.getSelection()
-  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
-    return null
-  }
-
-  const range = selection.getRangeAt(0)
-  if (!node.contains(range.endContainer)) return null
-
-  const beforeRange = range.cloneRange()
-  beforeRange.selectNodeContents(node)
-  beforeRange.setEnd(range.endContainer, range.endOffset)
-
-  const fullTextRaw = normalizeEditableSegment(node.textContent ?? '', {
-    trim: false,
-  })
-  const normalizedFull = normalizeEditableSegment(fullTextRaw)
-  const caretTextRaw = normalizeEditableSegment(beforeRange.toString(), {
-    trim: false,
-  })
-  const caretOffset = Math.min(caretTextRaw.length, fullTextRaw.length)
-
-  let beforeText = normalizeEditableSegment(fullTextRaw.slice(0, caretOffset))
-  const afterText = normalizeEditableSegment(fullTextRaw.slice(caretOffset))
-  const combinedText = normalizeEditableSegment(`${beforeText}${afterText}`)
-
-  if (normalizedFull && combinedText !== normalizedFull) {
-    if (afterText) {
-      const fallbackLength = Math.max(normalizedFull.length - afterText.length, 0)
-      beforeText = normalizeEditableSegment(normalizedFull.slice(0, fallbackLength))
-    } else {
-      beforeText = normalizedFull
-    }
-  }
-
+  if (!node || node.selectionStart !== node.selectionEnd) return null
+  const text = normalizeEditableSegment(node.value, { trim: false })
+  const caretOffset = node.selectionStart
   return {
     caretOffset,
-    normalizedFull,
-    beforeText,
-    afterText,
+    normalizedFull: normalizeEditableSegment(text),
+    beforeText: normalizeEditableSegment(text.slice(0, caretOffset)),
+    afterText: normalizeEditableSegment(text.slice(caretOffset)),
   }
 }
 
@@ -956,17 +925,34 @@ const EditableSubtitleText = ({
 
     if (wasEditingRef.current) return
     wasEditingRef.current = true
-    if (node.textContent !== text) node.textContent = text
+    node.value = text
     node.focus()
-    const range = document.createRange()
-    range.selectNodeContents(node)
-    range.collapse(false)
-    const selection = window.getSelection()
-    if (selection) {
-      selection.removeAllRanges()
-      selection.addRange(range)
-    }
+    node.setSelectionRange(text.length, text.length)
+    node.style.height = 'auto'
+    node.style.height = `${node.scrollHeight + 2}px`
   }, [isEditing, text])
+
+  if (isEditing) return (
+    <textarea
+      ref={nodeRef}
+      data-line-id={lineId}
+      aria-label="編輯字幕；Shift＋Enter 換行，Enter 拆格"
+      className={className}
+      defaultValue={text}
+      rows={1}
+      spellCheck={false}
+      onClick={onClick}
+      onBlur={onBlur}
+      onInput={(event) => {
+        event.currentTarget.style.height = 'auto'
+        event.currentTarget.style.height = `${event.currentTarget.scrollHeight + 2}px`
+        onInput(event)
+      }}
+      onCompositionStart={onCompositionStart}
+      onCompositionEnd={onCompositionEnd}
+      onKeyDown={onKeyDown}
+    />
+  )
 
   return (
     <div
@@ -1104,7 +1090,10 @@ const ControlPage = () => {
   const [clearingSubtitles, setClearingSubtitles] = useState(false)
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
+  const editingModeEnabledRef = useRef(editingModeEnabled)
+  editingModeEnabledRef.current = editingModeEnabled
   const [editingCell, setEditingCell] = useState(null)
+  const pendingLineSaveRef = useRef(Promise.resolve(true))
   const [roleEditor, setRoleEditor] = useState(null)
   const [musicRangeAnchorLineId, setMusicRangeAnchorLineId] = useState(null)
   const [liveCurrentIndex, setLiveCurrentIndex] = useState(0)
@@ -1560,7 +1549,7 @@ const ControlPage = () => {
       if (
         liveLineChanged &&
         !pendingCueRequestRef.current &&
-        !editingModeEnabled
+        !editingModeEnabledRef.current
       ) {
         requestCueScroll(nextLiveLineId)
       }
@@ -1568,7 +1557,7 @@ const ControlPage = () => {
       liveCurrentIndexRef.current = effectiveLiveIndex
       setLiveCurrentIndex(effectiveLiveIndex)
       setCurrentIndex((prev) =>
-        editingModeEnabled ? clampLineIndex(prev, nextLines.length) : effectiveLiveIndex,
+        editingModeEnabledRef.current ? clampLineIndex(prev, nextLines.length) : effectiveLiveIndex,
       )
       setDisplayEnabled(
         typeof payload?.displayEnabled === 'boolean'
@@ -1587,7 +1576,6 @@ const ControlPage = () => {
     [
       applyProjectorSettingsPayload,
       applyTranscriptionPayload,
-      editingModeEnabled,
       requestCueScroll,
       syncLanguageSourceDrafts,
     ],
@@ -1758,8 +1746,13 @@ const ControlPage = () => {
       clearPendingLineClick()
       pendingLineClickTimeoutRef.current = window.setTimeout(() => {
         pendingLineClickTimeoutRef.current = null
-        if (!socketRef.current || !sessionId) return
         setEditingCell(null)
+        if (editingModeEnabledRef.current) {
+          setCurrentIndex(index)
+          lineInsertionAnchorIdRef.current = linesRef.current[index]?.id || null
+          return
+        }
+        if (!socketRef.current || !sessionId) return
         socketRef.current.emit('setCurrentIndex', { sessionId, index })
         pendingCueRequestRef.current = { index, requestedAt: Date.now() }
         liveCurrentIndexRef.current = index
@@ -2026,6 +2019,11 @@ const ControlPage = () => {
       }))
     }
 
+    const handleSessionDeleted = () => {
+      releaseMicrophoneCapture()
+      navigate('/', { replace: true })
+    }
+
     socket.on('connect', rejoinAndRefresh)
     socket.on('connect', markSocketConnected)
     socket.on('reconnect', rejoinAndRefresh)
@@ -2033,6 +2031,7 @@ const ControlPage = () => {
     socket.on('control:update', applySessionPayload)
     socket.on('control:transcription', handleTranscriptionUpdate)
     socket.on('control:auto-follow', handleAutoFollowUpdate)
+    socket.on('control:deleted', handleSessionDeleted)
     socket.on('transcription:error', handleTranscriptionError)
 
     if (socket.connected) {
@@ -2055,6 +2054,7 @@ const ControlPage = () => {
   }, [
     authReady,
     user,
+    navigate,
     sessionId,
     applySessionPayload,
     applyTranscriptionPayload,
@@ -2295,6 +2295,7 @@ const ControlPage = () => {
 
   const handleUndo = async () => {
     if (!sessionId || !historyState.canUndo) return
+    if (!await pendingLineSaveRef.current) return
     await performSessionMutation(
       () =>
         fetch(`/api/session/${sessionId}/undo`, {
@@ -2306,12 +2307,13 @@ const ControlPage = () => {
 
   const handleRedo = async () => {
     if (!sessionId || !historyState.canRedo) return
+    if (!await pendingLineSaveRef.current) return
     await performSessionMutation(
       () =>
         fetch(`/api/session/${sessionId}/redo`, {
           method: 'POST',
         }),
-      { successMessage: '已還原操作' },
+      { successMessage: '已重做操作' },
     )
   }
 
@@ -2371,6 +2373,7 @@ const ControlPage = () => {
     if (!sessionId) return
 
     const runHistoryAction = async (action) => {
+      if (!await pendingLineSaveRef.current) return
       try {
         const response = await fetch(`/api/session/${sessionId}/${action}`, {
           method: 'POST',
@@ -2391,6 +2394,7 @@ const ControlPage = () => {
     }
 
     const handleKeyDown = (event) => {
+      if (event.isComposing || event.keyCode === 229) return
       const key = event.key.toLowerCase()
       const activeElement = document.activeElement
       const editingField =
@@ -2896,9 +2900,14 @@ const ControlPage = () => {
 
   const handleJumpToLine = (index) => {
     clearPendingLineClick()
-    if (!socketRef.current || !sessionId) return
     setEditingCell(null)
     setRoleEditor(null)
+    lineInsertionAnchorIdRef.current = lines[index]?.id || null
+    if (editingModeEnabledRef.current) {
+      setCurrentIndex(index)
+      return
+    }
+    if (!socketRef.current || !sessionId) return
     socketRef.current.emit('setCurrentIndex', { sessionId, index })
     pendingCueRequestRef.current = { index, requestedAt: Date.now() }
     liveCurrentIndexRef.current = index
@@ -2910,10 +2919,12 @@ const ControlPage = () => {
   }
 
   const handleEditingModeChange = (event) => {
+    clearPendingLineClick()
     const nextEnabled = event.target.checked
     setEditingModeEnabled(nextEnabled)
     if (!nextEnabled) {
       setEditingCell(null)
+      setCurrentIndex(liveCurrentIndexRef.current)
       requestCueScroll(linesRef.current[liveCurrentIndexRef.current]?.id)
     }
   }
@@ -3087,6 +3098,7 @@ const ControlPage = () => {
     setRoleEditor(null)
     const lineId = lines[index]?.id
     if (!lineId) return
+    if (editingModeEnabledRef.current) setCurrentIndex(index)
     lineInsertionAnchorIdRef.current = lineId
     setEditingCell({
       index,
@@ -3097,7 +3109,7 @@ const ControlPage = () => {
   }
 
   const handleLineInput = (event, lineId, languageId) => {
-    setLineDraft(lineId, languageId, event.currentTarget.textContent ?? '')
+    setLineDraft(lineId, languageId, event.currentTarget.value ?? '')
   }
 
   const handleLineCompositionStart = (lineId, languageId) => {
@@ -3106,7 +3118,7 @@ const ControlPage = () => {
 
   const handleLineCompositionEnd = (event, lineId, languageId) => {
     const draftKey = getLineDraftKey(lineId, languageId)
-    setLineDraft(lineId, languageId, event.currentTarget.textContent ?? '')
+    setLineDraft(lineId, languageId, event.currentTarget.value ?? '')
     composingLineDraftsRef.current.delete(draftKey)
   }
 
@@ -3147,7 +3159,7 @@ const ControlPage = () => {
       draftKey,
     )
       ? lineDraftsRef.current[draftKey]
-      : event.currentTarget.textContent ?? ''
+      : event.currentTarget.value ?? ''
     const newText = normalizeEditableSegment(draftText)
     const currentLine = latestLines[resolvedIndex]
     const currentText = getLineLanguageText(currentLine, languageId)
@@ -3174,6 +3186,8 @@ const ControlPage = () => {
       newText,
     )
 
+    let resolveSave
+    pendingLineSaveRef.current = new Promise((resolve) => { resolveSave = resolve })
     socketRef.current.timeout(5000).emit(
       'updateLine',
       {
@@ -3185,6 +3199,7 @@ const ControlPage = () => {
         expectedText: editingCell.baseText,
       },
       (ackError, result) => {
+        resolveSave(!ackError && result?.ok === true)
         if (ackError) {
           setEditingCell({
             index: resolvedIndex,
@@ -3387,7 +3402,11 @@ const ControlPage = () => {
   }
 
   const handleLineKeyDown = (event, index, languageId) => {
-    if (!socketRef.current || !sessionId || !window.getSelection) return
+    if (
+      event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229 ||
+      composingLineDraftsRef.current.has(getLineDraftKey(lines[index]?.id, languageId))
+    ) return
+    if (!socketRef.current || !sessionId) return
 
     const cellKey = getEditingCellKey(index, languageId)
     const node = event.currentTarget
@@ -3471,8 +3490,8 @@ const ControlPage = () => {
       }
       skipBlurRef.current.add(cellKey)
 
-      if (node.textContent !== beforeText) {
-        node.textContent = beforeText
+      if (node.value !== beforeText) {
+        node.value = beforeText
       }
 
       setLines((prev) => {
@@ -3507,8 +3526,8 @@ const ControlPage = () => {
 
     skipBlurRef.current.add(cellKey)
     clearLineDraft(currentLine?.id, languageId)
-    if (node.textContent !== beforeText) {
-      node.textContent = beforeText
+    if (node.value !== beforeText) {
+      node.value = beforeText
     }
 
     if (languageId !== 'primary') {
@@ -5545,6 +5564,29 @@ const ControlPage = () => {
               />
               <span>編輯模式</span>
             </label>
+            <div className="script-history-controls" role="group" aria-label="編輯紀錄">
+              <button
+                type="button"
+                className="subtle-button"
+                onClick={handleUndo}
+                disabled={!historyState.canUndo}
+                title="復原：⌘ Z（Mac）／Ctrl Z（Windows）"
+                aria-keyshortcuts="Meta+Z Control+Z"
+              >
+                ↶ 復原
+              </button>
+              <button
+                type="button"
+                className="subtle-button"
+                onClick={handleRedo}
+                disabled={!historyState.canRedo}
+                title="重做：⌘ Shift Z（Mac）／Ctrl Shift Z 或 Ctrl Y（Windows）"
+                aria-keyshortcuts="Meta+Shift+Z Control+Shift+Z Control+Y"
+              >
+                ↷ 重做
+              </button>
+            </div>
+            <small className="script-edit-shortcuts">Shift＋Enter 同格換行 · Enter 拆格</small>
             <button type="button" className="subtle-button" onClick={handleAddLine}>
               新增字幕格
             </button>
@@ -5628,22 +5670,6 @@ const ControlPage = () => {
               disabled={!canMoveToNextLine}
             >
               下一句
-            </button>
-            <button
-              type="button"
-              className="subtle-button"
-              onClick={handleUndo}
-              disabled={!historyState.canUndo}
-            >
-              復原
-            </button>
-            <button
-              type="button"
-              className="subtle-button"
-              onClick={handleRedo}
-              disabled={!historyState.canRedo}
-            >
-              還原
             </button>
             <button
               type="button"

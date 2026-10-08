@@ -2,17 +2,15 @@ import { useEffect, useId, useRef } from 'react'
 
 export function ControlStatusSummary({ automatic, status, audio, progress, confidence, hint, error }) {
   const fields = automatic
-    ? [status, audio, progress || '進度待定位', confidence || '比對待確認']
-    : ['手動控制', '自動跟戲未啟用', '—', '—']
+    ? [status, audio, progress || '進度待定位']
+    : ['手動控制', '自動跟戲未啟用']
 
   return (
-    <div className={`auto-follow-status${error ? ' auto-follow-status-error' : ''}`}>
+    <div className={`auto-follow-status${error ? ' auto-follow-status-error' : ''}`} title={[hint, confidence].filter(Boolean).join(' · ')}>
       <div className="auto-follow-status-fields">
         {fields.map((field, index) => <span key={index} title={field}>{field}</span>)}
       </div>
-      <div className="auto-follow-status-hint" title={hint}>
-        {hint || (automatic ? '等待辨識結果…' : '使用上一句、下一句或點選字幕格控制字幕。')}
-      </div>
+      {error && <div className="auto-follow-status-hint" role="alert">{hint}</div>}
     </div>
   )
 }

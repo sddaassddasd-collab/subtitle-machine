@@ -1738,46 +1738,51 @@ function clearPublicSessionTombstones(session) {
   }
 }
 
+function removeSession(session, reason = 'session deleted') {
+  stopTranscriptionStream(session.id, {
+    keepText: false,
+    reason,
+  });
+  const viewerPayload = getPublicSessionUnavailablePayload('viewer', {
+    reason: 'deleted',
+  });
+  const projectorPayload = getPublicSessionUnavailablePayload('projector', {
+    reason: 'deleted',
+  });
+  io.to(`viewer:${session.id}`).emit('viewer:expired', viewerPayload);
+  io.to(`prompter:${session.id}`).emit('viewer:expired', viewerPayload);
+  ensureSessionStructure(session).cells.forEach((cell) => {
+    io.to(`viewer:${session.id}:${cell.id}`).emit(
+      'viewer:expired',
+      viewerPayload,
+    );
+    io.to(`prompter:${session.id}:${cell.id}`).emit(
+      'viewer:expired',
+      viewerPayload,
+    );
+  });
+  io.to(`projector:${session.id}`).emit('projector:expired', projectorPayload);
+  rememberPublicSessionTombstones(session, 'deleted');
+  clearProjectorPresence(session.id);
+  projectorConnections.delete(session.id);
+  viewerStateRevisions.delete(session.id);
+  const demandTimer = viewerDemandBroadcastTimers.get(session.id);
+  if (demandTimer) clearTimeout(demandTimer);
+  viewerDemandBroadcastTimers.delete(session.id);
+  clearLatestRoomStateKeyframesForSession(session.id);
+  clearScheduledCurrentIndexPersist(session.id);
+  autoFollowStates.delete(session.id);
+  sessions.delete(session.id);
+  io.to(`control:${session.id}`).emit('control:deleted', {
+    sessionId: session.id, message: '本節目已被刪除',
+  });
+}
+
 function deleteOwnedSessionsForUser(userId, reason = 'owner removed') {
   const ownedSessions = Array.from(sessions.values()).filter(
     (session) => session.ownerUserId === userId,
   );
-
-  ownedSessions.forEach((session) => {
-    stopTranscriptionStream(session.id, {
-      keepText: false,
-      reason,
-    });
-    const viewerPayload = getPublicSessionUnavailablePayload('viewer', {
-      reason: 'deleted',
-    });
-    const projectorPayload = getPublicSessionUnavailablePayload('projector', {
-      reason: 'deleted',
-    });
-    io.to(`viewer:${session.id}`).emit('viewer:expired', viewerPayload);
-    io.to(`prompter:${session.id}`).emit('viewer:expired', viewerPayload);
-    ensureSessionStructure(session).cells.forEach((cell) => {
-      io.to(`viewer:${session.id}:${cell.id}`).emit(
-        'viewer:expired',
-        viewerPayload,
-      );
-      io.to(`prompter:${session.id}:${cell.id}`).emit(
-        'viewer:expired',
-        viewerPayload,
-      );
-    });
-    io.to(`projector:${session.id}`).emit('projector:expired', projectorPayload);
-    rememberPublicSessionTombstones(session, 'deleted');
-    clearProjectorPresence(session.id);
-    projectorConnections.delete(session.id);
-    viewerStateRevisions.delete(session.id);
-    const demandTimer = viewerDemandBroadcastTimers.get(session.id);
-    if (demandTimer) clearTimeout(demandTimer);
-    viewerDemandBroadcastTimers.delete(session.id);
-    clearLatestRoomStateKeyframesForSession(session.id);
-    sessions.delete(session.id);
-  });
-
+  ownedSessions.forEach((session) => removeSession(session, reason));
   return ownedSessions.length;
 }
 
@@ -1915,6 +1920,11 @@ function sanitizeLineText(text) {
     text = text == null ? '' : String(text);
   }
   return stripBom(text).replace(/\r?\n/g, ' ').trim();
+}
+
+function sanitizeSubtitleText(text) {
+  if (typeof text !== 'string') text = text == null ? '' : String(text);
+  return stripBom(text).replace(/\r\n?/g, '\n').trim();
 }
 
 function mergeWordSets(...sets) {
@@ -2344,7 +2354,7 @@ function normalizeRoleName(rawRole) {
 }
 
 function extractRoleFromDialogueText(text) {
-  const sanitized = sanitizeLineText(text);
+  const sanitized = sanitizeSubtitleText(text);
   if (!sanitized) {
     return { text: '', role: null };
   }
@@ -2412,13 +2422,13 @@ function normalizeTranslationsMap(
     Object.entries(rawTranslations).forEach(([languageId, value]) => {
       const normalizedLanguageId = sanitizeLineText(languageId);
       if (!normalizedLanguageId) return;
-      const text = sanitizeLineText(value);
+      const text = sanitizeSubtitleText(value);
       if (!text && text !== '') return;
       translations[normalizedLanguageId] = text;
     });
   }
 
-  const primaryText = sanitizeLineText(
+  const primaryText = sanitizeSubtitleText(
     translations[primaryLanguageId] ?? fallbackText,
   );
   translations[primaryLanguageId] = primaryText;
@@ -2488,7 +2498,7 @@ function normalizeMusicCueTimeline(lines) {
 
 function createLineRecord(entry, primaryLanguageId = 'primary') {
   const rawType = clampLineType(entry?.type) || LINE_TYPES.DIALOGUE;
-  const text = sanitizeLineText(entry?.text ?? '');
+  const text = sanitizeSubtitleText(entry?.text ?? '');
   const role = normalizeRoleName(entry?.role);
   const translations = normalizeTranslationsMap(
     entry?.translations,
@@ -2521,7 +2531,7 @@ function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
   if (entry == null) return null;
 
   if (typeof entry === 'string') {
-    const text = sanitizeLineText(entry);
+    const text = sanitizeSubtitleText(entry);
     if (!text) {
       if (keepEmpty) {
         return createLineRecord(
@@ -2558,15 +2568,15 @@ function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
         : null;
     const inferredText =
       (rawTranslations &&
-        sanitizeLineText(
+        sanitizeSubtitleText(
           rawTranslations[primaryLanguageId] ||
             Object.values(rawTranslations).find(
-              (value) => typeof value === 'string' && sanitizeLineText(value),
+              (value) => typeof value === 'string' && sanitizeSubtitleText(value),
             ) ||
             '',
         )) ||
       '';
-    const text = sanitizeLineText(
+    const text = sanitizeSubtitleText(
       entry.text ?? entry.line ?? entry.caption ?? inferredText,
     );
     if (!text && !keepEmpty) return null;
@@ -2647,7 +2657,7 @@ function normalizeScriptLines(entries, options = {}) {
 
     const expanded = expandStageDirectionSegments(base);
     expanded.forEach((item) => {
-      const text = sanitizeLineText(item.text);
+      const text = sanitizeSubtitleText(item.text);
       if (!text) {
         if (keepEmpty) {
           normalized.push(
@@ -2718,7 +2728,7 @@ function expandStageDirectionSegments(entry) {
   let match;
 
   const pushSegment = (rawText, type) => {
-    const sanitized = sanitizeLineText(rawText);
+    const sanitized = sanitizeSubtitleText(rawText);
     if (!sanitized) return;
 
     if (
@@ -3024,25 +3034,25 @@ function buildBlankTranslationsForSession(session) {
 function getLineLanguageText(line, languageId = 'primary') {
   if (!line || typeof line !== 'object') return '';
   if (languageId === 'primary') {
-    return sanitizeLineText(line.text || '');
+    return sanitizeSubtitleText(line.text || '');
   }
   if (
     line.translations &&
     typeof line.translations[languageId] === 'string'
   ) {
-    return sanitizeLineText(line.translations[languageId]);
+    return sanitizeSubtitleText(line.translations[languageId]);
   }
   return '';
 }
 
 function lineHasAnyLanguageText(line) {
   if (!line || typeof line !== 'object') return false;
-  if (sanitizeLineText(line.text || '')) {
+  if (sanitizeSubtitleText(line.text || '')) {
     return true;
   }
 
   return Object.values(line.translations || {}).some(
-    (value) => typeof value === 'string' && sanitizeLineText(value),
+    (value) => typeof value === 'string' && sanitizeSubtitleText(value),
   );
 }
 
@@ -3073,7 +3083,7 @@ function clearLineLanguageText(line, languageId) {
       text:
         languageId === 'primary'
           ? ''
-          : sanitizeLineText(line.text || ''),
+          : sanitizeSubtitleText(line.text || ''),
       translations,
     },
     'primary',
@@ -3082,7 +3092,7 @@ function clearLineLanguageText(line, languageId) {
 
 function createBlankSessionLine(session, options = {}) {
   const targetLanguageId = resolveSessionLanguageId(session, options.languageId);
-  const targetText = sanitizeLineText(options.text || '');
+  const targetText = sanitizeSubtitleText(options.text || '');
   const primaryText = targetLanguageId === 'primary' ? targetText : '';
   const translations = {
     ...buildBlankTranslationsForSession(session),
@@ -3113,13 +3123,13 @@ function createBlankSessionLine(session, options = {}) {
 
 function updateSessionLineLanguageText(line, languageId, text) {
   const targetLanguageId = sanitizeLineText(languageId) || 'primary';
-  const currentPrimaryText = sanitizeLineText(line?.text || '');
+  const currentPrimaryText = sanitizeSubtitleText(line?.text || '');
   const translations = normalizeTranslationsMap(
     line?.translations,
     'primary',
     currentPrimaryText,
   );
-  const nextText = sanitizeLineText(text);
+  const nextText = sanitizeSubtitleText(text);
   translations[targetLanguageId] = nextText;
 
   return createLineRecord(
@@ -3411,7 +3421,7 @@ function normalizeSecondaryLanguageSourceSegments(entries) {
     keepEmpty: false,
     primaryLanguageId: 'primary',
   }).map((line) => ({
-    text: sanitizeLineText(line?.text || ''),
+    text: sanitizeSubtitleText(line?.text || ''),
     type:
       line?.type === LINE_TYPES.DIRECTION
         ? LINE_TYPES.DIRECTION
@@ -3744,9 +3754,11 @@ function ensureSessionHistory(session) {
 function captureSessionSnapshot(session) {
   return JSON.parse(
     JSON.stringify({
+      title: session.title,
       languages: session.languages,
       roles: session.roles,
       cells: session.cells,
+      sharedLines: session.lines,
       selectedCellId: session.selectedCellId,
       currentIndex: session.currentIndex,
       subtitleControlMode: session.subtitleControlMode,
@@ -3775,11 +3787,17 @@ function pushSessionHistory(session) {
 
 function restoreSessionSnapshot(session, snapshot) {
   if (!session || !snapshot) return;
+  if (typeof snapshot.title === 'string') session.title = snapshot.title;
   session.languages = Array.isArray(snapshot.languages)
     ? snapshot.languages
     : session.languages;
   session.roles = Array.isArray(snapshot.roles) ? snapshot.roles : session.roles;
   session.cells = Array.isArray(snapshot.cells) ? snapshot.cells : session.cells;
+  // Older snapshots stored subtitles in cells; current sessions share one timeline.
+  const selectedSnapshotCell = session.cells.find((cell) => cell.id === snapshot.selectedCellId);
+  session.sharedLines = Array.isArray(snapshot.sharedLines)
+    ? snapshot.sharedLines
+    : selectedSnapshotCell?.lines || session.cells[0]?.lines || [];
   session.selectedCellId =
     typeof snapshot.selectedCellId === 'string'
       ? snapshot.selectedCellId
@@ -4555,8 +4573,8 @@ function normalizeAnnotationRole(rawRole) {
 }
 
 function joinAnnotatedUnitText(leftText, rightText) {
-  const left = sanitizeLineText(leftText);
-  const right = sanitizeLineText(rightText);
+  const left = sanitizeSubtitleText(leftText);
+  const right = sanitizeSubtitleText(rightText);
   if (!left) return right;
   if (!right) return left;
 
@@ -7816,7 +7834,7 @@ function flushQueuedRealtimeAudio(stream) {
 
 function toPublicLine(line) {
   if (!line || typeof line !== 'object') return null;
-  const text = sanitizeLineText(line.text || '');
+  const text = sanitizeSubtitleText(line.text || '');
   return {
     id:
       typeof line.id === 'string' && line.id.trim()
@@ -10613,6 +10631,22 @@ app.get('/api/session/:sessionId', requireAuth, (req, res) => {
   res.json(getControlPayload(session));
 });
 
+app.delete('/api/session/:sessionId', requireAuth, async (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  clearScheduledCurrentIndexPersist(session.id);
+  sessions.delete(session.id);
+  try {
+    await persistApplicationStore({ throwOnError: true });
+    removeSession(session);
+    res.json({ ok: true, sessionId: session.id });
+  } catch (error) {
+    sessions.set(session.id, session);
+    console.error('Failed to delete session:', error);
+    res.status(500).json({ error: '無法保存刪除結果，節目已保留；請重新進入控制端後再試' });
+  }
+});
+
 app.get('/api/session/:sessionId/backup', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
@@ -10831,7 +10865,7 @@ app.post('/api/session/:sessionId/redo', requireAuth, (req, res) => {
   const session = getOwnedSessionFromRequest(req, res);
   if (!session) return;
   if (!redoSessionHistory(session)) {
-    return res.status(400).json({ error: '目前沒有可還原的操作' });
+    return res.status(400).json({ error: '目前沒有可重做的操作' });
   }
   persistSession(session);
   broadcastControlState(session.id);
@@ -11069,7 +11103,7 @@ app.put(
         duplicate += 1;
         return;
       }
-      const text = sanitizeLineText(entry.text);
+      const text = sanitizeSubtitleText(entry.text);
       if (!text) {
         blank += 1;
         return;
@@ -13140,7 +13174,7 @@ io.on('connection', (socket) => {
       }
 
       const existingRaw = session.lines[targetIndex];
-      const sanitized = sanitizeLineText(text);
+      const sanitized = sanitizeSubtitleText(text);
       const explicitType = clampLineType(type);
       const targetLanguageId =
         typeof languageId === 'string' && languageId.trim()
@@ -13149,7 +13183,7 @@ io.on('connection', (socket) => {
       if (
         typeof expectedText === 'string' &&
         getLineLanguageText(existingRaw, targetLanguageId) !==
-          sanitizeLineText(expectedText)
+          sanitizeSubtitleText(expectedText)
       ) {
         acknowledge({
           ok: false,
@@ -13175,7 +13209,7 @@ io.on('connection', (socket) => {
       const primaryText =
         targetLanguageId === 'primary'
           ? sanitized
-          : sanitizeLineText(existingRaw?.text || '');
+          : sanitizeSubtitleText(existingRaw?.text || '');
 
       const nextLine = createLineRecord(
         existingRaw && typeof existingRaw === 'object'
@@ -13239,7 +13273,7 @@ io.on('connection', (socket) => {
     if (!existing) return;
     pushSessionHistory(session);
 
-    const text = sanitizeLineText(
+    const text = sanitizeSubtitleText(
       typeof existing === 'string' ? existing : existing.text,
     );
 
@@ -13287,7 +13321,7 @@ io.on('connection', (socket) => {
     session.lines[index] = createLineRecord(
       {
         ...existing,
-        text: sanitizeLineText(existing?.text || ''),
+        text: sanitizeSubtitleText(existing?.text || ''),
         type: normalizedType,
         music: isLineMarkedMusic(existing),
         translations: existing?.translations,
@@ -13326,7 +13360,7 @@ io.on('connection', (socket) => {
       if (!existing) return;
       pushSessionHistory(session);
 
-      const text = sanitizeLineText(
+      const text = sanitizeSubtitleText(
         typeof existing === 'string' ? existing : existing.text,
       );
       const type =
@@ -13408,7 +13442,7 @@ io.on('connection', (socket) => {
         const existing = session.lines[index];
         if (!existing) continue;
 
-        const text = sanitizeLineText(
+        const text = sanitizeSubtitleText(
           typeof existing === 'string' ? existing : existing.text,
         );
         const type =
@@ -13497,8 +13531,8 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const before = sanitizeLineText(beforeText);
-      const after = sanitizeLineText(afterText);
+      const before = sanitizeSubtitleText(beforeText);
+      const after = sanitizeSubtitleText(afterText);
       if (!before || !after) return;
 
       const targetLanguageId = resolveSessionLanguageId(session, languageId);
@@ -13519,7 +13553,7 @@ io.on('connection', (socket) => {
         session.lines[index + 1] = updateSessionLineLanguageText(
           nextLine,
           targetLanguageId,
-          joinTranscriptionTexts(
+          joinAnnotatedUnitText(
             after,
             getLineLanguageText(nextLine, targetLanguageId),
           ),
@@ -13612,8 +13646,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const before = sanitizeLineText(beforeText);
-    const after = sanitizeLineText(afterText);
+    const before = sanitizeSubtitleText(beforeText);
+    const after = sanitizeSubtitleText(afterText);
     if (!before || !after) return;
     const targetLanguageId = resolveSessionLanguageId(session, languageId);
 
@@ -13793,10 +13827,10 @@ io.on('connection', (socket) => {
     const targetLanguageId = resolveSessionLanguageId(session, languageId);
     pushSessionHistory(session);
 
-    const previousText = sanitizeLineText(
+    const previousText = sanitizeSubtitleText(
       typeof previous === 'string' ? previous : previous.text,
     );
-    const nextCurrentText = sanitizeLineText(
+    const nextCurrentText = sanitizeSubtitleText(
       typeof currentText === 'string'
         ? currentText
         : typeof current === 'string'
@@ -13824,7 +13858,7 @@ io.on('connection', (socket) => {
         typeof currentText === 'string'
           ? nextCurrentText
           : getLineLanguageText(current, targetLanguageId);
-      previousTranslations[targetLanguageId] = joinTranscriptionTexts(
+      previousTranslations[targetLanguageId] = joinAnnotatedUnitText(
         previousTranslations[targetLanguageId] || '',
         currentLanguageText,
       );
@@ -13872,13 +13906,13 @@ io.on('connection', (socket) => {
     const mergedTranslations = {};
 
     mergedTranslationIds.forEach((languageId) => {
-      mergedTranslations[languageId] = joinTranscriptionTexts(
+      mergedTranslations[languageId] = joinAnnotatedUnitText(
         previousTranslations[languageId] || '',
         currentTranslations[languageId] || '',
       );
     });
 
-    const mergedText = joinTranscriptionTexts(previousText, nextCurrentText);
+    const mergedText = joinAnnotatedUnitText(previousText, nextCurrentText);
     mergedTranslations.primary = mergedText;
     const mergedMusicSource = isLineMarkedMusic(previous) ? previous : current;
 
