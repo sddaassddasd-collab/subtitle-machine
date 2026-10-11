@@ -131,6 +131,15 @@ function initializeSqliteDatabase(db) {
       store_value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS recording_assets (
+      session_id TEXT NOT NULL,
+      recording_id TEXT NOT NULL,
+      audio BLOB NOT NULL,
+      pcm BLOB,
+      features BLOB,
+      analysis TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY (session_id, recording_id)
+    );
   `);
 }
 
@@ -154,6 +163,11 @@ async function initializePostgresDatabase(pool) {
       updated_at BIGINT NOT NULL
     )
   `);
+  await pool.query(`CREATE TABLE IF NOT EXISTS recording_assets (
+    session_id TEXT NOT NULL, recording_id TEXT NOT NULL, audio BYTEA NOT NULL,
+    pcm BYTEA, features BYTEA, analysis JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (session_id, recording_id)
+  )`);
 }
 
 async function getPostgresPool() {
@@ -291,7 +305,26 @@ function writeStoreToSqlite(db, store) {
   }
 }
 
-async function writeStoreToPostgres(pool, store) {
+async function writeRecordingAssetsToPostgres(client, filePath, sessions) {
+  const DatabaseSync = getSqliteDatabaseSync();
+  const db = new DatabaseSync(filePath, { readOnly: true });
+  try {
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='recording_assets'").get()) return;
+    const retained = new Set(sessions.flatMap(session => Array.isArray(session?.recordings)
+      ? session.recordings.filter(recording => recording?.id).map(recording => JSON.stringify([session.id, recording.id])) : []));
+    // Copy one asset at a time within the same transaction as its manifest.
+    // A failed migration leaves PostgreSQL empty and can safely be retried.
+    for (const asset of db.prepare('SELECT * FROM recording_assets').iterate()) {
+      if (!retained.has(JSON.stringify([asset.session_id, asset.recording_id]))) continue;
+      const bytes = value => value ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : null;
+      await client.query(`INSERT INTO recording_assets (session_id, recording_id, audio, pcm, features, analysis)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (session_id, recording_id) DO NOTHING`,
+      [asset.session_id, asset.recording_id, bytes(asset.audio), bytes(asset.pcm), bytes(asset.features), asset.analysis]);
+    }
+  } finally { db.close(); }
+}
+
+async function writeStoreToPostgres(pool, store, sqlitePath = null) {
   const normalized = normalizeStore(store);
   const now = Date.now();
   const client = await pool.connect();
@@ -310,6 +343,7 @@ async function writeStoreToPostgres(pool, store) {
         [storeKey, JSON.stringify(normalized[storeKey]), now],
       );
     }
+    if (sqlitePath) await writeRecordingAssetsToPostgres(client, sqlitePath, normalized.sessions);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -366,7 +400,7 @@ async function migrateToPostgresIfNeeded(pool) {
 
   const sqliteStore = readStoreFromSqliteFile(SQLITE_FILE_PATH);
   if (sqliteStore) {
-    await writeStoreToPostgres(pool, sqliteStore.store);
+    await writeStoreToPostgres(pool, sqliteStore.store, SQLITE_FILE_PATH);
   }
 }
 
@@ -455,6 +489,72 @@ function saveStore(store) {
   });
 }
 
+// Audio is stored separately from the small application snapshot: advancing a
+// cue must never rewrite a recording. Both supported backends retain the assets.
+async function putRecordingAsset(sessionId, recordingId, asset) {
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    const pool = await getPostgresPool();
+    await pool.query(`INSERT INTO recording_assets
+      (session_id, recording_id, audio, pcm, features, analysis) VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (session_id, recording_id) DO UPDATE SET
+      audio=EXCLUDED.audio, pcm=EXCLUDED.pcm, features=EXCLUDED.features, analysis=EXCLUDED.analysis`,
+    [sessionId, recordingId, asset.audio, asset.pcm || null, asset.features || null, JSON.stringify(asset.analysis || {})]);
+  } else {
+    getSqliteDatabase().prepare(`INSERT OR REPLACE INTO recording_assets
+      (session_id, recording_id, audio, pcm, features, analysis) VALUES (?,?,?,?,?,?)`)
+      .run(sessionId, recordingId, asset.audio, asset.pcm || null, asset.features || null, JSON.stringify(asset.analysis || {}));
+  }
+}
+
+async function getRecordingAsset(sessionId, recordingId, { audio = false, pcm = false } = {}) {
+  const columns = `features, analysis${audio ? ', audio' : ''}${pcm ? ', pcm' : ''}`;
+  let row;
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    row = (await (await getPostgresPool()).query(`SELECT ${columns} FROM recording_assets
+      WHERE session_id=$1 AND recording_id=$2`, [sessionId, recordingId])).rows[0];
+  } else {
+    row = getSqliteDatabase().prepare(`SELECT ${columns} FROM recording_assets
+      WHERE session_id=? AND recording_id=?`).get(sessionId, recordingId);
+  }
+  if (!row) return null;
+  const bytes = value => value ? (Buffer.isBuffer(value) ? value : Buffer.from(value.buffer, value.byteOffset, value.byteLength)) : null;
+  return { ...row, analysis: typeof row.analysis === 'string' ? JSON.parse(row.analysis) : row.analysis,
+    features: bytes(row.features), audio: bytes(row.audio), pcm: bytes(row.pcm) };
+}
+
+async function updateRecordingAnalysis(sessionId, recordingId, features, analysis) {
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    await (await getPostgresPool()).query(`UPDATE recording_assets SET
+      features=COALESCE($3,features), pcm=CASE WHEN $3 IS NULL THEN pcm ELSE NULL END, analysis=$4
+      WHERE session_id=$1 AND recording_id=$2`, [sessionId, recordingId, features, JSON.stringify(analysis)]);
+  } else {
+    getSqliteDatabase().prepare(`UPDATE recording_assets SET features=COALESCE(?,features),
+      pcm=CASE WHEN ? IS NULL THEN pcm ELSE NULL END, analysis=? WHERE session_id=? AND recording_id=?`)
+      .run(features, features, JSON.stringify(analysis), sessionId, recordingId);
+  }
+}
+
+async function getRecordingAudioRange(sessionId, recordingId, start, length) {
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    const row = (await (await getPostgresPool()).query(`SELECT SUBSTRING(audio FROM $3::int FOR $4::int) AS audio
+      FROM recording_assets WHERE session_id=$1 AND recording_id=$2`, [sessionId, recordingId, start + 1, length])).rows[0];
+    return row?.audio ? Buffer.from(row.audio) : null;
+  }
+  const row = getSqliteDatabase().prepare(`SELECT SUBSTR(audio,?,?) AS audio FROM recording_assets
+    WHERE session_id=? AND recording_id=?`).get(start + 1, length, sessionId, recordingId);
+  return row?.audio ? Buffer.from(row.audio) : null;
+}
+
+async function deleteRecordingAssets(sessionId, recordingId = null) {
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    await (await getPostgresPool()).query(`DELETE FROM recording_assets WHERE session_id=$1${recordingId ? ' AND recording_id=$2' : ''}`,
+      recordingId ? [sessionId, recordingId] : [sessionId]);
+  } else {
+    getSqliteDatabase().prepare(`DELETE FROM recording_assets WHERE session_id=?${recordingId ? ' AND recording_id=?' : ''}`)
+      .run(...(recordingId ? [sessionId, recordingId] : [sessionId]));
+  }
+}
+
 function createOpaqueToken(byteLength = 18) {
   return crypto.randomBytes(byteLength).toString('base64url');
 }
@@ -507,5 +607,10 @@ module.exports = {
   loadStore,
   parseCookieHeader,
   saveStore,
+  putRecordingAsset,
+  getRecordingAsset,
+  updateRecordingAnalysis,
+  getRecordingAudioRange,
+  deleteRecordingAssets,
   verifyPassword,
 };

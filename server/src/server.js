@@ -11,7 +11,10 @@ const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
-const { createTracker, prepareScript, followTranscript, followAudio } = require('./auto-follow');
+const { createTracker, prepareScript, followTranscript, followAudio, applyReferencePosition } = require('./auto-follow');
+const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
+const { RecordingRuntime } = require('./recording-runtime');
+const { registerRecordingRoutes } = require('./recording-routes');
 const {
   createOpaqueToken,
   createPasswordHash,
@@ -20,6 +23,7 @@ const {
   parseCookieHeader,
   PERSISTENCE_BACKEND,
   saveStore,
+  deleteRecordingAssets,
   verifyPassword,
 } = require('./persistence');
 
@@ -99,6 +103,25 @@ app.get('/healthz', (_req, res) => {
 
 const sessions = new Map();
 const transcriptionStreams = new Map();
+const referenceRuntime = new RecordingRuntime({
+  onResult: handleReferenceAudioResult,
+  onStatus: (sessionId, referenceAudio) => {
+    if (sessions.has(sessionId)) {
+      updateAutoFollowState(sessionId, {referenceAudio});
+      maybeBroadcastAutoFollowDiagnostics(sessionId);
+    }
+  },
+});
+const recordingRoutes = registerRecordingRoutes(app, {
+  requireAuth, ownedSession: getOwnedSessionFromRequest, sessions,
+  persist: async session => {
+    clearScheduledCurrentIndexPersist(session.id);
+    storeSessionInMemory(session);
+    await persistApplicationStore({throwOnError: true});
+  },
+  broadcast: broadcastControlState,
+  invalidate: sessionId => referenceRuntime.invalidate(sessionId),
+});
 const deepgramReconnectTimers = new Map();
 const users = new Map();
 const authSessions = new Map();
@@ -1739,6 +1762,9 @@ function clearPublicSessionTombstones(session) {
 }
 
 function removeSession(session, reason = 'session deleted') {
+  recordingRoutes.cancelSession(session.id);
+  referenceRuntime.stop(session.id);
+  if (session.recordings?.length) void deleteRecordingAssets(session.id).catch(error => console.error('Failed to remove recording assets:', error.message));
   stopTranscriptionStream(session.id, {
     keepText: false,
     reason,
@@ -3972,6 +3998,7 @@ function ensureSessionStructure(session) {
   session.transcription = ensureTranscriptionState(session);
   ensureSessionHistory(session);
   syncSelectedCellLines(session);
+  normalizeRecordings(session);
 
   return session;
 }
@@ -4092,6 +4119,8 @@ function serializeSessionForStorage(session) {
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
     subtitleControlMode: normalized.subtitleControlMode,
+    recordings: normalized.recordings,
+    activeRecordingId: normalized.activeRecordingId,
     languages: normalized.languages.map((language) => ({
       id: language.id,
       name: language.name,
@@ -4182,6 +4211,11 @@ function createImportedSessionFromBackup(payload, authUser) {
   );
 
   const session = ensureSessionStructure(rawSession);
+  session.activeRecordingId = null;
+  for (const recording of session.recordings) {
+    recording.status = 'missing';
+    recording.error = '字幕 JSON 備份不包含音檔，請重新匯入參考錄音。';
+  }
   session.history = { past: [], future: [] };
   session.transcription = defaultTranscriptionState();
   syncSelectedCellLines(session);
@@ -4267,6 +4301,12 @@ function hydrateApplicationStore(persistedStore) {
   persistedStore.sessions.forEach((rawSession) => {
     const normalized = ensureSessionStructure(rawSession);
     if (!normalized || !normalized.id) return;
+    for (const recording of normalized.recordings) {
+      if (['analysing', 'transcribing'].includes(recording.status)) {
+        recording.status = 'interrupted';
+        recording.error = '服務重啟，處理尚未完成；按「重新自動切段」可繼續。';
+      }
+    }
     sessions.set(normalized.id, normalized);
   });
 
@@ -7207,6 +7247,7 @@ function applyTranscriptionError(sessionId, message) {
 }
 
 function stopTranscriptionStream(sessionId, options = {}) {
+  referenceRuntime.stop(sessionId);
   clearLatestRoomStateKeyframesForSession(sessionId);
   const reconnectTimer = deepgramReconnectTimers.get(sessionId);
   if (reconnectTimer) {
@@ -7906,6 +7947,8 @@ function getSessionSummary(session) {
     })),
     languages: normalized.languages,
     roles: normalized.roles,
+    recordings: normalized.recordings.map(recording => publicRecording(recording)),
+    activeRecordingId: normalized.activeRecordingId,
   };
 }
 
@@ -8494,6 +8537,10 @@ function clearScheduledCurrentIndexPersist(sessionId) {
 
 function persistSession(session) {
   if (!session) return;
+  if (session.recordings?.length) {
+    refreshMappings(session);
+    referenceRuntime.sync(session);
+  }
   clearScheduledCurrentIndexPersist(session.id);
   storeSessionInMemory(session);
   persistApplicationStore();
@@ -8831,6 +8878,7 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   }
 
   session.currentIndex = nextIndex;
+  referenceRuntime.position(session, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0);
   const selectedCell = getSelectedCell(session);
   if (selectedCell) selectedCell.currentIndex = nextIndex;
   persistSessionCurrentIndexSoon(session);
@@ -8862,6 +8910,7 @@ function createAutoFollowState() {
     lastAlignmentMs: null,
     message: '',
     updatedAt: null,
+    referenceAudio: null,
   };
 }
 
@@ -8957,6 +9006,7 @@ function getPublicAutoFollowState(session) {
     predictedIndex: state.tracker.prediction?.source === 'silence'
       ? null : state.tracker.prediction?.index ?? null,
     lastDecision: state.lastDecision,
+    referenceAudio: autoEnabled ? state.referenceAudio : null,
     lastTranscriptReceivedAt: state.lastTranscriptReceivedAt,
     lastTranscriptAudioLagMs: state.lastTranscriptAudioLagMs,
     lastAlignmentMs: state.lastAlignmentMs,
@@ -9003,6 +9053,32 @@ function resetAutoFollowPosition(session, message = '') {
     status: AUTO_FOLLOW_STATUS.LISTENING,
     message,
   });
+  referenceRuntime.position(session, stream?.autoFollowAudioMs || 0);
+}
+
+function handleReferenceAudioResult(sessionId, result) {
+  const session = getSessionRecord(sessionId), stream = transcriptionStreams.get(sessionId);
+  if (!session || !stream?.ready || stream.closing || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO ||
+    !referenceRuntime.accepts(sessionId, result) || stream.autoFollowAudioMs - result.audioEndMs > 700) return;
+  const recording = session.recordings?.find(r => r.id === result.recordingId && r.id === session.activeRecordingId);
+  if (!recording || recording.status !== 'ready' || recording.revision !== result.revision || recording.cellId !== session.selectedCellId) return;
+  const state = getAutoFollowState(sessionId);
+  updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name }});
+  if (result.status !== 'verified') { maybeBroadcastAutoFollowDiagnostics(sessionId); return; }
+  const index = session.lines.findIndex(line => line.id === result.lineId);
+  const segment = recording.segments.find(segment => segment.lineId === result.lineId);
+  if (index < session.currentIndex || index > session.currentIndex + 4 || !segment || !isUsableSegment(segment, session.lines[index])) return;
+  const committed = state.lastDecision;
+  if (committed && ['transcript', 'correction'].includes(committed.source) &&
+    Number.isFinite(committed.transcriptAudioEndMs) && result.audioEndMs <= committed.transcriptAudioEndMs) return;
+  if (!applyReferencePosition(state.tracker, session.lines, index, result)) return;
+  updateAutoFollowState(sessionId, {listening: true, started: true, confidence: result.confidence,
+    status: index === session.currentIndex ? AUTO_FOLLOW_STATUS.VERIFIED : AUTO_FOLLOW_STATUS.ADVANCED,
+    message: result.completed ? '音訊已核對句尾，文字辨識持續校正。' : '音訊已定位字幕，文字辨識持續校正。'});
+  if (index !== session.currentIndex) {
+    recordAutoFollowDecision(sessionId, index, 'audio', {referenceSeconds: result.referenceSeconds, audioEndMs: result.audioEndMs});
+    applyCurrentIndexChange(session, index);
+  } else maybeBroadcastAutoFollowDiagnostics(sessionId);
 }
 
 function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
@@ -9083,6 +9159,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   if (Number.isInteger(result.index) && result.index !== session.currentIndex) {
     recordAutoFollowDecision(sessionId, result.index, result.status === 'corrected' ? 'correction' : 'transcript', {
       transcriptReceivedAt: receivedAt, transcriptAudioLagMs: state.lastTranscriptAudioLagMs,
+      transcriptAudioEndMs: options.endMs,
     });
     updateAutoFollowState(sessionId, { lastAdvancedAt: now });
     applyCurrentIndexChange(session, result.index);
@@ -12824,6 +12901,7 @@ io.on('connection', (socket) => {
         normalizedDurationMs,
         normalizedLevel,
       );
+      if (stale !== true) referenceRuntime.feed(session, stream, audio, stream.autoFollowAudioMs);
       acknowledge({
         ok: true,
         provider: stream.provider,

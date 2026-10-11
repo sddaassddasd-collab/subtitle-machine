@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import ProjectorLanguageSettings from '../components/ProjectorLanguageSettings'
+import RecordingsPanel from '../components/RecordingsPanel'
 import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import {
@@ -5322,6 +5323,10 @@ const ControlPage = () => {
             </div>
             </ControlSection>
 
+            <ControlSection title="彩排錄音與音訊跟戲">
+              <RecordingsPanel sessionId={sessionId} cellId={selectedCellId} lines={lines}
+                referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active}/>
+            </ControlSection>
             <ControlSection title="即時語音">
             <div className="input-group transcription-panel">
               <label>即時語音辨識（雲端）</label>
@@ -5718,6 +5723,12 @@ const ControlPage = () => {
                 <>
                   <p>{autoFollowStatusLabel} · {transcriptionStatusLabel}{autoFollowConfidenceLabel}</p>
                   {autoFollow.message && <p>{autoFollow.message}</p>}
+                  {autoFollow.referenceAudio && <p>錄音比對：{autoFollow.referenceAudio.name || '參考錄音'}
+                    {Number.isInteger(autoFollow.referenceAudio.index) && ` · 音訊第 ${autoFollow.referenceAudio.index + 1} 格`}
+                    {Number.isFinite(autoFollow.referenceAudio.referenceSeconds) && ` · 錄音 ${autoFollow.referenceAudio.referenceSeconds.toFixed(2)} 秒`}
+                    {Number.isInteger(autoFollow.lastCandidateIndex) && ` · 文字候選第 ${autoFollow.lastCandidateIndex + 1} 格`}
+                    {autoFollow.referenceAudio.error && ` · ${autoFollow.referenceAudio.error}`}
+                  </p>}
                   {Number.isInteger(autoFollow.sequenceIndex) && <p>順序跟隨：保留第 {autoFollow.sequenceIndex + 1} 格位置，持續核對後續台詞。</p>}
                   <p>全文校正：{autoFollow.correctionStatus === 'verified' ? '已核對位置' : autoFollow.correctionStatus === 'pending' ? '候選位置待確認' : '等待明確文字'}{autoFollow.correctionCandidates?.length > 0 && `（${autoFollow.correctionCandidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}）`}</p>
                   {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</p>}
@@ -5780,7 +5791,7 @@ const ControlPage = () => {
                 </div>
                 <div>
                   <span>最近換格依據</span>
-                  <strong>{{ onset: '起音預推', transcript: '文字確認', correction: '跳詞校正', silence: '靜默清除台詞' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
+                  <strong>{{ audio: '錄音音訊確認', onset: '起音預推', transcript: '文字確認', correction: '跳詞校正', silence: '靜默清除台詞' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
                 </div>
                 <div>
                   <span>辨識結果抵達</span>

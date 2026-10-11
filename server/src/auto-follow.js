@@ -63,6 +63,8 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     script: null, located: false, candidates: [], preparedIndex: null,
     anchor: null, openingHint: '', prediction: null, directionWait: null,
     directionSpeechStartedMs: null,
+    referenceFence: null,
+    referenceProgress: null,
   };
 }
 
@@ -289,8 +291,15 @@ function followTranscript(tracker, lines, currentIndex, event) {
     !Number.isFinite(event.endMs)) return { ignored: true };
   if (tracker.streamId !== event.streamId) {
     const ignoreBeforeMs = tracker.streamId === null ? tracker.ignoreBeforeMs : -1;
+    const referenceState = tracker.streamId === null && tracker.referenceFence ? {
+      referenceFence: tracker.referenceFence, progressIndex: tracker.progressIndex, progress: tracker.progress,
+      referenceProgress: tracker.referenceProgress,
+      located: tracker.located, anchor: tracker.anchor, armedIndex: tracker.armedIndex,
+      armedAtMs: tracker.armedAtMs, preparedIndex: tracker.preparedIndex,
+      directionWait: tracker.directionWait, openingHint: tracker.openingHint,
+    } : {};
     Object.assign(tracker, createTracker({ ignoreBeforeMs }), {
-      streamId: event.streamId, script: tracker.script,
+      ...referenceState, streamId: event.streamId, script: tracker.script,
     });
   }
   if (event.startMs < tracker.ignoreBeforeMs || event.endMs <= tracker.ignoreBeforeMs) {
@@ -307,6 +316,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.sequence = null;
     tracker.correction = createCorrection();
     tracker.prediction = null;
+    tracker.referenceFence = null;
+    tracker.referenceProgress = null;
   }
   tracker.script = script;
   if (event.startMs < tracker.latestStartMs ||
@@ -326,6 +337,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const item = { ...event, text, final: event.isFinal === true, maxIndex: old?.maxIndex ?? null };
   tracker.items.set(event.itemId, item);
   while (tracker.items.size > 8) tracker.items.delete(tracker.items.keys().next().value);
+  const referenceFence = tracker.referenceFence;
+  if (referenceFence && event.endMs <= referenceFence.audioMs) return { ignored: true };
 
   // Keep late finals as history, but they cannot undo an onset decision or arm
   // another cue. A new item with newer audio can still correct a genuine repeat.
@@ -373,6 +386,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
   const uncertain = (reason) => {
+    if (tracker.referenceProgress?.index === currentIndex && tracker.referenceProgress.completed &&
+      event.endMs <= tracker.referenceProgress.audioEndMs) return {ignored: true};
     tracker.directionWait = null;
     if (!waitingForOpening && !(text.length <= 2 && tracker.located && tracker.anchor &&
       event.endMs - tracker.anchor.endMs <= 10000)) {
@@ -407,6 +422,9 @@ function followTranscript(tracker, lines, currentIndex, event) {
     (prediction.priorItems.has(event.itemId) || event.startMs < prediction.onsetMs)) {
     return { ignored: true };
   }
+  if (referenceFence && best.index < referenceFence.index &&
+    (event.endMs < (referenceFence.decidedAudioMs ?? referenceFence.audioMs) ||
+      (referenceFence.priorItems.has(event.itemId) && old?.text === text))) return { ignored: true };
   if (best.index !== currentIndex && best.offset < Math.min(2, best.length)) {
     return uncertain('已聽到可能的開頭，等待更多內容確認。');
   }
@@ -429,6 +447,13 @@ function followTranscript(tracker, lines, currentIndex, event) {
   }
   item.maxIndex = Math.max(item.maxIndex ?? best.index, best.index);
   const progress = best.offset / best.length;
+  if (tracker.referenceProgress?.index === best.index && event.endMs <= tracker.referenceProgress.audioEndMs &&
+    progress < tracker.referenceProgress.progress) return {ignored: true};
+  if (tracker.referenceFence && tracker.referenceFence.index !== best.index) {
+    // New, confirmed words may correct an acoustic guess even when an ASR item
+    // began before that guess. Old finals still cannot rewind the committed cue.
+    tracker.referenceFence = null; tracker.referenceProgress = null;
+  }
   tracker.progressIndex = best.index;
   tracker.progress = progress;
   tracker.located = true;
@@ -569,4 +594,34 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
   return result;
 }
 
-module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, followAudio };
+function applyReferencePosition(tracker, lines, index, evidence) {
+  const script = prepareScript(lines, tracker.script), entry = script.entries[index];
+  if (!entry?.text) return false;
+  const sameLine = tracker.progressIndex === index;
+  if (!sameLine) {
+    clearPreparation(tracker); tracker.prediction = null; tracker.sequence = null;
+  }
+  if (!tracker.referenceFence || tracker.referenceFence.index !== index) {
+    tracker.referenceFence = {index, audioMs: evidence.audioStartMs, decidedAudioMs: evidence.audioEndMs,
+      priorItems: new Set(tracker.items.keys())};
+  }
+  tracker.script = script; tracker.located = true; tracker.progressIndex = index;
+  tracker.prediction = null;
+  tracker.progress = Math.max(sameLine ? tracker.progress : 0, evidence.completed ? 1 : evidence.progress);
+  tracker.referenceProgress = {index, progress: tracker.progress, completed: tracker.progress === 1, audioEndMs: evidence.audioEndMs};
+  if (tracker.progress === 1) {
+    const anchor = {itemId: `reference-${index}`, text: entry.text, endMs: evidence.audioEndMs, completed: true};
+    const following = entry.next;
+    if (following === index + 1 && !lines[index]?.music && !lines[following]?.music) {
+      tracker.anchor = anchor; tracker.armedIndex = following; tracker.preparedIndex = following;
+      tracker.armedAtMs = evidence.audioEndMs; tracker.openingHint = script.entries[following].opening;
+    }
+    if (lines[index + 1]?.type === 'direction' && !tracker.directionWait &&
+      (!Number.isFinite(tracker.directionSpeechStartedMs) || evidence.audioStartMs >= tracker.directionSpeechStartedMs)) {
+      tracker.directionWait = {fromIndex: index, index: index + 1, quietMs: 0, lastAudioEndMs: null, anchor};
+    }
+  }
+  return true;
+}
+
+module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, followAudio, applyReferencePosition };

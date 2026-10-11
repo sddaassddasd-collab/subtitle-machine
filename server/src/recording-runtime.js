@@ -1,0 +1,129 @@
+const {Worker} = require('node:worker_threads');
+const path = require('node:path');
+const {getRecordingAsset} = require('./persistence');
+const {validSegments} = require('./recordings');
+const workerPath = path.join(__dirname, 'recording-worker.js');
+const scriptSignature = session => JSON.stringify(session.lines.map(line => [line.id, line.type, line.text]));
+
+function runRecordingTask(message, timeoutMs = 180000, signal) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerPath);
+    let settled = false;
+    const cleanup = () => { settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); worker.terminate(); };
+    const abort = () => { cleanup(); reject(new Error('錄音處理已取消')); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('錄音分析超時，請分成較短音檔再試')); }, timeoutMs);
+    signal?.addEventListener('abort', abort, {once: true});
+    if (signal?.aborted) { abort(); return; }
+    worker.once('error', error => { cleanup(); reject(error); });
+    worker.once('exit', () => { if (!settled) { cleanup(); reject(new Error('錄音分析工作意外停止，請重試')); } });
+    worker.once('message', result => {
+      cleanup();
+      if (result.type === 'error') reject(new Error(result.error)); else resolve(result);
+    });
+    const transfer = [];
+    for (const key of ['pcm', 'features']) if (message[key]) {
+      // Database PCM buffers are large, dedicated allocations. Transfer them
+      // instead of doubling memory in the worker; copy tiny pooled buffers only.
+      const bytes = message[key];
+      const view = bytes.byteLength === bytes.buffer.byteLength && bytes.byteOffset === 0
+        ? bytes : Uint8Array.from(bytes);
+      message[key] = view; transfer.push(view.buffer);
+    }
+    try { worker.postMessage(message, transfer); }
+    catch {
+      try { worker.postMessage(message); }
+      catch (error) { cleanup(); reject(error); }
+    }
+  });
+}
+
+class RecordingRuntime {
+  constructor({loadAsset = getRecordingAsset, onResult, onStatus} = {}) {
+    this.loadAsset = loadAsset; this.onResult = onResult; this.onStatus = onStatus;
+    this.sessions = new Map();
+  }
+  async ensure(session) {
+    const recording = session.recordings?.find(r => r.id === session.activeRecordingId && r.cellId === session.selectedCellId);
+    if (!recording || recording.status !== 'ready') { this.stop(session.id); return; }
+    const key = `${recording.id}:${recording.revision}:${session.selectedCellId}`;
+    const previous = this.sessions.get(session.id);
+    if (previous?.key === key) return;
+    this.stop(session.id);
+    const entry = {key, revision: recording.revision, signature: scriptSignature(session), generation: 1, pending: 0, currentIndex: session.currentIndex, ready: false, recordingId: recording.id};
+    this.sessions.set(session.id, entry);
+    this.onStatus?.(session.id, {status: 'loading', recordingId: recording.id, name: recording.name});
+    try {
+      const segments = validSegments(session, recording);
+      if (!segments.length) throw new Error('尚無已確認的錄音片段，沿用文字跟戲');
+      const asset = await this.loadAsset(session.id, recording.id);
+      if (this.sessions.get(session.id) !== entry) return;
+      if (!asset?.features) throw new Error('錄音特徵不存在，請重新匯入錄音');
+      const worker = new Worker(workerPath); entry.worker = worker;
+      worker.on('message', message => {
+        if (this.sessions.get(session.id) !== entry) return;
+        if (message.type === 'ready') { entry.ready = true; this.onStatus?.(session.id, {status: 'listening', recordingId: recording.id, name: recording.name}); }
+        if (message.type === 'result') {
+          if (message.generation === entry.generation) entry.pending = Math.max(0, entry.pending - 1);
+          if (message.generation === entry.generation && message.result) this.onResult?.(session.id, {
+            ...message.result, recordingId: recording.id, revision: entry.revision, generation: entry.generation,
+          });
+        }
+        if (message.type === 'error') this.fail(session.id, entry, message.error);
+      });
+      worker.on('error', error => this.fail(session.id, entry, error.message));
+      worker.on('exit', () => { if (entry.worker === worker) this.fail(session.id, entry, '音訊比對工作已停止，沿用文字跟戲'); });
+      worker.postMessage({type: 'configure', features: asset.features, segments,
+        generation: entry.generation, currentIndex: session.currentIndex});
+    } catch (error) { this.fail(session.id, entry, error.message); }
+  }
+  fail(sessionId, entry, error) {
+    if (this.sessions.get(sessionId) !== entry) return;
+    entry.ready = false; entry.worker?.terminate(); entry.worker = null;
+    this.onStatus?.(sessionId, {status: 'error', recordingId: entry.recordingId, error});
+  }
+  position(session, audioMs = 0) {
+    const entry = this.sessions.get(session.id);
+    if (!entry) return;
+    entry.currentIndex = session.currentIndex; entry.generation++; entry.pending = 0;
+    entry.fenceMs = audioMs;
+    entry.lastAudioMs = audioMs;
+    entry.worker?.postMessage({type: 'position', generation: entry.generation, currentIndex: session.currentIndex});
+  }
+  feed(session, stream, audio, audioEndMs) {
+    if (!session.activeRecordingId || session.subtitleControlMode !== 'auto') return;
+    void this.ensure(session);
+    const entry = this.sessions.get(session.id);
+    if (!entry?.ready || !entry.worker || entry.currentIndex !== session.currentIndex) return;
+    // A slow matcher must never build an unbounded queue or delay the ASR lane.
+    if (entry.pending >= 12) { entry.needsReset = true; return; }
+    if (entry.needsReset) {
+      if (entry.pending >= 4) return;
+      this.position(session, audioEndMs); entry.needsReset = false;
+    }
+    if (Number.isFinite(entry.lastAudioMs) && audioEndMs - entry.lastAudioMs > 150) this.position(session, audioEndMs);
+    entry.lastAudioMs = audioEndMs;
+    const pcm = Buffer.from(audio, 'base64');
+    if (!pcm.length || pcm.length % 2) return;
+    entry.pending++;
+    entry.worker.postMessage({type: 'audio', pcm, audioEndMs, currentIndex: session.currentIndex,
+      generation: entry.generation, sequence: stream.lastCaptureSequence});
+  }
+  accepts(sessionId, result) {
+    const entry = this.sessions.get(sessionId);
+    return entry?.ready && entry.generation === result.generation && entry.recordingId === result.recordingId;
+  }
+  sync(session) {
+    const entry = this.sessions.get(session.id);
+    if (!entry) return;
+    if (session.subtitleControlMode !== 'auto' || session.status === 'ended' ||
+      entry.recordingId !== session.activeRecordingId || entry.signature !== scriptSignature(session)) this.stop(session.id);
+    else if (entry.currentIndex !== session.currentIndex) this.position(session);
+  }
+  invalidate(sessionId) { this.stop(sessionId); }
+  stop(sessionId) {
+    const entry = this.sessions.get(sessionId);
+    this.sessions.delete(sessionId); entry?.worker?.terminate();
+  }
+  dispose() { for (const sessionId of this.sessions.keys()) this.stop(sessionId); }
+}
+module.exports = {RecordingRuntime, runRecordingTask};
