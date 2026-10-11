@@ -24,8 +24,10 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
       const session = createSessionRecord(user.id);
       session.subtitleControlMode = SUBTITLE_CONTROL_MODES.AUTO;
       session.lines = Array.from({ length: texts?.length ?? lineCount }, (_, i) => {
-        const text = texts?.[i] ?? '這是第' + i + '句舞台演出的台詞，需要持續跟隨演員說話';
-        return { id: 'line-' + i, type: LINE_TYPES.DIALOGUE, text, translations: { primary: text } };
+        const entry = texts?.[i];
+        const text = (typeof entry === 'object' ? entry.text : entry) ?? '這是第' + i + '句舞台演出的台詞，需要持續跟隨演員說話';
+        return { id: 'line-' + i, type: LINE_TYPES.DIALOGUE, text, translations: { primary: text },
+          ...(typeof entry === 'object' ? entry : {}) };
       });
       session.sharedLines = session.lines;
       session.cells = Array.from({ length: 3 }, (_, i) =>
@@ -78,6 +80,10 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         counts: () => ({ structures: structureCalls, lines: lineCalls }),
         transcript: (text, options) => handleAutoFollowTranscript(session.id, text, options),
         state: () => getPublicAutoFollowState(session),
+        viewer: () => getViewerPayload(session),
+        projector: () => getProjectorPayload(session),
+        resetPosition: () => resetAutoFollowPosition(session),
+        speechStarted: startMs => handleAutoFollowSpeechStarted(session.id, startMs),
         dispose() {
           for (const timer of currentIndexPersistTimers.values()) clearTimeout(timer);
           for (const timer of latestRoomStateKeyframes.values()) clearTimeout(timer);

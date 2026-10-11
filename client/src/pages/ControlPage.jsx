@@ -5780,7 +5780,7 @@ const ControlPage = () => {
                 </div>
                 <div>
                   <span>最近換格依據</span>
-                  <strong>{{ onset: '起音預推', transcript: '文字確認', correction: '跳詞校正' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
+                  <strong>{{ onset: '起音預推', transcript: '文字確認', correction: '跳詞校正', silence: '靜默清除台詞' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
                 </div>
                 <div>
                   <span>辨識結果抵達</span>

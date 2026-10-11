@@ -628,3 +628,124 @@ test('remote suffix recovery needs new matching evidence, not a revised noisy pr
   s.transcript('更多噪聲亂碼無法理解請大家立刻離開這個危險的地方', { itemId: 'b', startMs: 1100, endMs: 3500 });
   assert.equal(s.index(), lines.length - 1);
 });
+
+const directionLines = [
+  '我一直以為你不會再回來',
+  { text: '（兩人離場，燈光漸暗）', type: 'direction' },
+  { text: '（長時間舞台動作）', type: 'direction' },
+  '可是我答應過你',
+];
+
+test('confirmed ending followed by a direction advances only after three seconds of quiet audio', () => {
+  const s = show(directionLines);
+  s.transcript(directionLines[0]);
+  s.audio(0.001, 1000, 149);
+  assert.equal(s.index(), 0);
+  const result = s.audio(0.001, 3980);
+  assert.equal(result.source, 'silence');
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.progressIndex, 1);
+  assert.equal(s.tracker.directionWait, null);
+  s.audio(0.001, 4000, 1000);
+  assert.equal(s.index(), 1); // Consecutive directions do not cascade.
+  s.transcript(directionLines[3], { itemId: 'b', startMs: 24100, endMs: 25000, isFinal: true });
+  assert.equal(s.index(), 3);
+});
+
+test('silence cannot clear a partial or unlocated line, a dialogue pause, or an initial direction', () => {
+  for (const scenario of ['partial', 'unlocated', 'dialogue', 'direction']) {
+    const s = show(scenario === 'dialogue' ? [directionLines[0], directionLines[3]] : directionLines,
+      scenario === 'direction' ? 1 : 0);
+    if (scenario === 'partial') s.transcript('我一直以為');
+    if (scenario === 'dialogue') s.transcript(directionLines[0]);
+    const initialIndex = s.index();
+    s.audio(0.001, 1000, 500);
+    assert.equal(s.index(), initialIndex, scenario);
+  }
+});
+
+test('sound resets the direction countdown and quiet before confirming the ending does not count', () => {
+  const s = show(directionLines);
+  s.audio(0.001, 0, 200);
+  s.transcript(directionLines[0], { startMs: 4000, endMs: 5000 });
+  s.audio(0.001, 5000, 100);
+  s.audio(0.08, 7000, 2);
+  s.audio(0.001, 7040, 149);
+  assert.equal(s.index(), 0);
+  s.audio(0.001, 10020);
+  assert.equal(s.index(), 1);
+});
+
+test('unrecognized speech cancels the pending direction instead of clearing a still-unverified line', () => {
+  const s = show(directionLines);
+  s.transcript(directionLines[0]);
+  s.audio(0.001, 1000, 100);
+  s.transcript('完全無關的其他內容', { itemId: 'b', startMs: 3100, endMs: 4000 });
+  s.audio(0.001, 4000, 200);
+  assert.equal(s.index(), 0);
+});
+
+test('late finalization cannot restore the cleared line and same-item new speech can still advance', () => {
+  const s = show(directionLines);
+  s.transcript(directionLines[0]);
+  s.audio(0.001, 1000, 150);
+  assert.equal(s.transcript(directionLines[0], { isFinal: true }).ignored, true);
+  assert.equal(s.index(), 1);
+  s.transcript(directionLines[3], { itemId: 'b', startMs: 4100, endMs: 5000, isFinal: true });
+  assert.equal(s.index(), 3);
+  const revised = show(directionLines);
+  revised.transcript(directionLines[0]);
+  revised.audio(0.001, 1000, 150);
+  revised.transcript(directionLines[0] + directionLines[3], { startMs: 0, endMs: 5000, isFinal: true });
+  assert.equal(revised.index(), 3);
+});
+
+test('finalization of unchanged ending does not restart an in-progress silence countdown', () => {
+  const s = show(directionLines);
+  s.transcript(directionLines[0]);
+  s.audio(0.001, 1000, 149);
+  s.transcript(directionLines[0], { isFinal: true });
+  s.audio(0.001, 3980);
+  assert.equal(s.index(), 1);
+});
+
+test('editing either candidate or manually relocating invalidates the direction countdown', () => {
+  for (const changedIndex of [0, 1]) {
+    const s = show(directionLines.map(line => typeof line === 'object' ? {...line} : line));
+    s.transcript(directionLines[0]);
+    s.audio(0.001, 1000, 149);
+    s.lines[changedIndex] = {...s.lines[changedIndex], text: '修改後的內容'};
+    s.audio(0.001, 3980, 200);
+    assert.equal(s.index(), 0);
+  }
+  const s = show(directionLines);
+  s.transcript(directionLines[0]);
+  s.audio(0.001, 1000, 149);
+  assert.equal(followAudio(s.tracker, s.lines, 3,
+    {level: 0.001, durationMs: 20, endMs: 4000}).index, undefined);
+  assert.equal(s.tracker.directionWait, null);
+});
+
+test('missing and repeated audio timestamps cannot count as three seconds of silence', () => {
+  const s = show(directionLines);
+  s.transcript(directionLines[0]);
+  s.audio(0.001, 1000, 100);
+  s.audio(0.001, 10000, 149); // Gap resets the accumulated quiet time.
+  assert.equal(s.index(), 0);
+  for (let i = 0; i < 200; i++) s.audio(0.001, 12960); // Duplicate endMs.
+  assert.equal(s.index(), 0);
+  s.audio(0.001, 12980);
+  assert.equal(s.index(), 1);
+});
+
+test('a long direction hold still recognizes short next dialogue across consecutive directions', () => {
+  for (const text of ['好', '走吧']) {
+    const s = show([...directionLines.slice(0, 3), text]);
+    s.transcript(directionLines[0]);
+    s.audio(0.001, 1000, 150);
+    s.audio(0.001, 4000, 2000);
+    assert.equal(s.index(), 1);
+    s.transcript(text, { itemId: 'b', startMs: 44100, endMs: 45000, isFinal: true });
+    assert.equal(s.index(), 3);
+  }
+});

@@ -8954,7 +8954,8 @@ function getPublicAutoFollowState(session) {
     sequenceIndex: state.tracker.sequence?.index ?? null,
     correctionStatus: state.tracker.correction.status,
     correctionCandidates: state.tracker.correction.candidates,
-    predictedIndex: state.tracker.prediction?.index ?? null,
+    predictedIndex: state.tracker.prediction?.source === 'silence'
+      ? null : state.tracker.prediction?.index ?? null,
     lastDecision: state.lastDecision,
     lastTranscriptReceivedAt: state.lastTranscriptReceivedAt,
     lastTranscriptAudioLagMs: state.lastTranscriptAudioLagMs,
@@ -9018,17 +9019,30 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
   });
   if (Number.isFinite(result.onsetMs)) updateAutoFollowState(sessionId, { lastOnsetAt: now });
   if (Number.isInteger(result.index)) {
-    recordAutoFollowDecision(sessionId, result.index, 'onset', {
-      onsetAudioMs: result.onsetMs, onsetDetectionMs: Math.max(0, endMs - result.onsetMs),
-    });
+    const silentDirection = result.source === 'silence';
+    recordAutoFollowDecision(sessionId, result.index, silentDirection ? 'silence' : 'onset',
+      silentDirection ? { silenceAudioMs: endMs } : {
+        onsetAudioMs: result.onsetMs, onsetDetectionMs: Math.max(0, endMs - result.onsetMs),
+      });
     updateAutoFollowState(sessionId, {
       started: true, status: AUTO_FOLLOW_STATUS.ADVANCED, lastAdvancedAt: now,
       lastCandidateIndex: result.index, lastCandidateText: session.lines[result.index]?.text || '',
-      confidence: null, message: '已依起音預推一格，等待文字核對；核對前不再預推。',
+      confidence: null, message: silentDirection
+        ? '句尾已確認，靜默 3 秒後進入舞台指示；外部台詞已清空，等待下一句。'
+        : '已依起音預推一格，等待文字核對；核對前不再預推。',
     });
     applyCurrentIndexChange(session, result.index);
   }
   maybeBroadcastAutoFollowDiagnostics(sessionId, now);
+}
+
+function handleAutoFollowSpeechStarted(sessionId, startMs) {
+  const session = getSessionRecord(sessionId);
+  if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
+  const tracker = getAutoFollowState(sessionId).tracker;
+  tracker.directionWait = null;
+  tracker.directionSpeechStartedMs = Number.isFinite(startMs)
+    ? startMs : transcriptionStreams.get(sessionId)?.autoFollowAudioMs ?? null;
 }
 
 function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
@@ -11714,6 +11728,7 @@ function startDeepgramTranscription({
       return;
     }
     if (event?.type === 'SpeechStarted') {
+      handleAutoFollowSpeechStarted(sessionId);
       updateTranscriptionState(sessionId, { lastSpeechStartedAt: Date.now() });
       broadcastTranscriptionState(sessionId);
       return;
@@ -12099,6 +12114,7 @@ function startRealtimeTranscription({
 
   rt.on('input_audio_buffer.speech_started', (event) => {
     if (!isCurrent() || !event.item_id) return;
+    handleAutoFollowSpeechStarted(sessionId, event.audio_start_ms);
     stream.autoFollowItems.set(event.item_id, { startMs: event.audio_start_ms });
   });
   rt.on('input_audio_buffer.speech_stopped', (event) => {

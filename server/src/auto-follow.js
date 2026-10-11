@@ -4,6 +4,7 @@ const OpenCC = require('opencc-js');
 const traditionalize = OpenCC.Converter({ from: 'cn', to: 'twp' });
 const MAX_HEARD = 120;
 const SEQUENCE_TTL_MS = 10000;
+const DIRECTION_SILENCE_MS = 3000;
 
 function createCorrection() {
   return { pending: null, candidates: [], lastScanMs: -Infinity, status: 'searching' };
@@ -60,7 +61,8 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     sequence: null, correction: createCorrection(), quietMs: 0, loudMs: 0, released: false,
     noiseFloor: 0.004, lastOnsetMs: -1,
     script: null, located: false, candidates: [], preparedIndex: null,
-    anchor: null, openingHint: '', prediction: null,
+    anchor: null, openingHint: '', prediction: null, directionWait: null,
+    directionSpeechStartedMs: null,
   };
 }
 
@@ -108,6 +110,7 @@ function clearPreparation(tracker) {
   tracker.preparedIndex = null;
   tracker.anchor = null;
   tracker.openingHint = '';
+  tracker.directionWait = null;
 }
 
 function preparedOpeningText(tracker, currentIndex, text, event) {
@@ -154,14 +157,19 @@ function matchPreparedOpening(tracker, script, currentIndex, text, event) {
 
 function matchPredictedOpening(tracker, script, text, event) {
   const prediction = tracker.prediction;
+  const waitingOnDirection = prediction?.source === 'silence';
   if (!prediction || event.endMs < prediction.onsetMs ||
-    event.endMs - prediction.onsetMs > 10000) return null;
+    (!waitingOnDirection && event.endMs - prediction.onsetMs > 10000)) return null;
   const opening = event.itemId === prediction.anchor.itemId && text.startsWith(prediction.anchor.text)
     ? text.slice(prediction.anchor.text.length) : text;
-  const entry = script.entries[prediction.index];
+  // A direction can hold for an entire scene movement. Keep the next dialogue
+  // available even after the normal onset prediction window has expired.
+  const index = waitingOnDirection ? script.entries[prediction.index]?.next : prediction.index;
+  const entry = script.entries[index];
   const evidence = Array.from(opening).length;
-  if (evidence < 2 || evidence > MAX_HEARD || !entry?.text.startsWith(opening)) return null;
-  return { index: prediction.index, offset: evidence, length: entry.length,
+  const minimumEvidence = waitingOnDirection && event.isFinal && entry?.length === 1 ? 1 : 2;
+  if (evidence < minimumEvidence || evidence > MAX_HEARD || !entry?.text.startsWith(opening)) return null;
+  return { index, offset: evidence, length: entry.length,
     confidence: 1, rank: 1, evidence, heard: opening, openingConfirmed: true };
 }
 
@@ -365,6 +373,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
   const uncertain = (reason) => {
+    tracker.directionWait = null;
     if (!waitingForOpening && !(text.length <= 2 && tracker.located && tracker.anchor &&
       event.endMs - tracker.anchor.endMs <= 10000)) {
       clearPreparation(tracker);
@@ -443,6 +452,18 @@ function followTranscript(tracker, lines, currentIndex, event) {
     itemId: event.itemId, text, endMs: event.endMs, completed,
   } : null;
   tracker.armedAtMs = completed ? event.endMs : null;
+  if (completed && lines[best.index + 1]?.type === 'direction' &&
+    (!Number.isFinite(tracker.directionSpeechStartedMs) || event.endMs >= tracker.directionSpeechStartedMs)) {
+    const previousWait = tracker.directionWait;
+    // Finalization of the same confirmed words must not restart the countdown.
+    tracker.directionWait = previousWait?.fromIndex === best.index &&
+      previousWait.anchor.itemId === event.itemId && previousWait.anchor.text === text
+      ? previousWait
+      : { fromIndex: best.index, index: best.index + 1, quietMs: 0, lastAudioEndMs: null,
+        anchor: { itemId: event.itemId, text, endMs: event.endMs, completed: true } };
+  } else {
+    tracker.directionWait = null;
+  }
   return {
     index: best.index, candidate: best, progress, armedIndex: tracker.armedIndex,
     status: best.index === currentIndex ? 'verified' : relocation || prediction ? 'corrected' : 'advanced',
@@ -471,6 +492,47 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
     tracker.quietMs = 0;
   }
   const result = { threshold, releaseThreshold };
+  const directionWait = tracker.directionWait;
+  if (directionWait) {
+    const indexes = [directionWait.fromIndex, directionWait.index];
+    const unchanged = indexes.every(index => {
+      const line = lines[index], source = tracker.script?.entries[index]?.source;
+      return line && source && line.text === source.text && line.type === source.type &&
+        line.music === source.music && line.role === source.role;
+    });
+    if (tracker.prediction || !tracker.located || tracker.progressIndex !== currentIndex ||
+      tracker.progress !== 1 || directionWait.fromIndex !== currentIndex ||
+      lines[currentIndex]?.type === 'direction' ||
+      lines[directionWait.index]?.type !== 'direction' || !unchanged) {
+      tracker.directionWait = null;
+    } else if (Number.isFinite(endMs) && endMs > directionWait.anchor.endMs &&
+      (directionWait.lastAudioEndMs === null || endMs > directionWait.lastAudioEndMs)) {
+      // Count only newly received, continuous quiet audio after confirming the
+      // ending. Missing audio, stale capture and an ASR delay are not silence.
+      if (directionWait.lastAudioEndMs !== null &&
+        endMs - directionWait.lastAudioEndMs > duration + 100) directionWait.quietMs = 0;
+      directionWait.lastAudioEndMs = endMs;
+      directionWait.quietMs = level < releaseThreshold ? directionWait.quietMs + duration : 0;
+      if (directionWait.quietMs >= DIRECTION_SILENCE_MS) {
+        result.index = directionWait.index;
+        result.source = 'silence';
+        tracker.prediction = {
+          index: result.index, fromIndex: currentIndex, onsetMs: endMs, decidedAudioMs: endMs,
+          source: 'silence', anchor: directionWait.anchor,
+          priorItems: new Set([...tracker.items.values()].filter(item => item.endMs <= endMs)
+            .map(item => item.itemId)),
+        };
+        tracker.sequence = { index: result.index, atMs: endMs,
+          observed: { itemId: directionWait.anchor.itemId, text: directionWait.anchor.text,
+            endMs: directionWait.anchor.endMs } };
+        clearPreparation(tracker);
+        tracker.progressIndex = result.index;
+        tracker.progress = 0;
+        tracker.candidates = [];
+        return result;
+      }
+    }
+  }
   if (tracker.loudMs < 40 || !tracker.released) return result;
   tracker.released = false;
   const onsetMs = endMs - tracker.loudMs;
