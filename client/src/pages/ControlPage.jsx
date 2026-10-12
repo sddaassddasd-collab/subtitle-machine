@@ -4201,7 +4201,7 @@ const ControlPage = () => {
 
     try {
       setParsingPrimary(true)
-      setStatus({ kind: 'info', message: '正在解析第一語言劇本…' })
+      setStatus({ kind: 'info', message: '正在解析角色並審核字幕分段…' })
       const data = await performSessionMutation(
         () =>
           fetch(`/api/session/${sessionId}/script/parse`, {
@@ -4262,7 +4262,7 @@ const ControlPage = () => {
 
     try {
       setParsingLanguageId(languageId)
-      setStatus({ kind: 'info', message: '正在解析文本並更新字幕清單…' })
+      setStatus({ kind: 'info', message: '正在解析文本並審核字幕分段…' })
       const data = await performSessionMutation(
         () =>
           fetch(
@@ -5218,7 +5218,7 @@ const ControlPage = () => {
                 }
               />
               <span className="input-note">
-                角色會被保留到字幕資料裡，可由控制端切換是否用顏色區分。
+                系統會先分段，再審核語意切點；連續舞台指示合併成一格。角色會保留，可設定顏色區分。
               </span>
               <button
                 type="submit"
@@ -5247,7 +5247,7 @@ const ControlPage = () => {
                   }
                 />
                 <span className="input-note">
-                  左邊保留原始輸入；右側字幕清單顯示拆解後寫入的結果。
+                  系統會審核分段並合併連續舞台指示；左邊保留原始輸入，右側顯示更新結果。
                 </span>
                 <button
                   type="submit"
