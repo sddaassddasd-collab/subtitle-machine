@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const { normalizeText } = require('./auto-follow');
 const {FRAME_MS, DIMENSIONS, decodeFeatures} = require('./acoustic-follow');
+const {normalizePerformanceLanguage, getFollowingLines, describeFollowingScript, isRecordingCompatible} = require('./performance-language');
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORDINGS = 5;
 const hashText = line => crypto.createHash('sha256').update(`${line?.type || 'dialogue'}\n${line?.text || ''}`).digest('hex').slice(0, 24);
@@ -15,6 +16,10 @@ function normalizeRecordings(session) {
       recording.name = String(recording.name || recording.originalName || '參考錄音').slice(0, 120);
       recording.segments = Array.isArray(recording.segments) ? recording.segments.filter(s => s && typeof s.lineId === 'string') : [];
       recording.revision = Number.isSafeInteger(recording.revision) ? recording.revision : 1;
+      recording.language = normalizePerformanceLanguage(recording.language);
+      // Older recordings were cut against the primary column, irrespective of
+      // the ASR language. Keep their calibration tied to that actual source.
+      if (recording.scriptLanguageId === undefined) recording.scriptLanguageId = 'primary';
       return recording;
     });
   if (!session.recordings.some(r => r.id === session.activeRecordingId)) session.activeRecordingId = null;
@@ -22,8 +27,9 @@ function normalizeRecordings(session) {
 }
 
 function recordingLines(session, recording) {
-  if (recording.cellId === session.selectedCellId) return session.lines || [];
-  return session.cells?.find(cell => cell.id === recording.cellId)?.lines || [];
+  const lines = recording.cellId === session.selectedCellId ? session.lines || []
+    : session.cells?.find(cell => cell.id === recording.cellId)?.lines || [];
+  return getFollowingLines(session, recording.language, lines, recording.scriptLanguageId);
 }
 
 function refreshMappings(session) {
@@ -45,18 +51,20 @@ function refreshMappings(session) {
 
 function validSegments(session, recording) {
   const byId = new Map(recording.segments.map(segment => [segment.lineId, segment]));
-  return session.lines.flatMap((line, index) => {
+  return recordingLines(session, recording).flatMap((line, index) => {
     const segment = byId.get(line.id);
     return segment && isUsableSegment(segment, line) ? [{...segment, index}] : [];
   });
 }
 
-function publicRecording(recording, {details = false} = {}) {
-  const {id, name, originalName, duration, byteLength, mime, cellId, status, progress, error, createdAt, revision} = recording;
-  return {id, name, originalName, duration, byteLength, mime, cellId, status, progress, error, createdAt, revision,
+function publicRecording(recording, {details = false, session} = {}) {
+  const {id, name, originalName, duration, byteLength, mime, cellId, status, progress, error, createdAt, revision, language, scriptLanguageId} = recording;
+  return {id, name, originalName, duration, byteLength, mime, cellId, status, progress, error, createdAt, revision, language, scriptLanguageId,
     mappedCount: recording.segments.filter(s => ['auto','manual'].includes(s.status)).length,
     reviewCount: recording.segments.filter(s => ['review','unmatched','stale'].includes(s.status)).length,
     ...(details ? {segments: recording.segments} : {}),
+    ...(session ? {compatible: isRecordingCompatible(session, recording),
+      ...(details ? {followingScript: describeFollowingScript(session, language, recordingLines(session, recording), scriptLanguageId)} : {})} : {}),
   };
 }
 
@@ -172,6 +180,7 @@ function alignSegments(lines, words, duration, featureBuffer) {
 function validateSegmentEdit(recording, line, body) {
   const start = Number(body.start), end = Number(body.end);
   if (!line) throw new Error('這格字幕已不存在');
+  if (line.type !== 'direction' && !String(line.text || '').trim()) throw new Error('這格缺少錄音語言的劇本文字，請先補齊對應劇本欄');
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > recording.duration || end - start < 0.12)
     throw new Error('片段須至少 0.12 秒，起點與終點必須位於錄音範圍內');
   return {lineId: line.id, textHash: hashText(line), start, end, confidence: 1,

@@ -15,6 +15,8 @@ const { createTracker, prepareScript, followTranscript, followAudio, applyRefere
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
+const { SOURCE_LANGUAGES, normalizePerformanceLanguage, supportedLanguage, resolveFollowingLanguage,
+  getFollowingLines, describeFollowingScript, isRecordingCompatible } = require('./performance-language');
 const {
   createOpaqueToken,
   createPasswordHash,
@@ -277,15 +279,7 @@ function isLiveTranslationLanguageAllowed(sessionOrId, languageCode) {
   return getAllowedLiveTranslationLanguageCodes(session).includes(languageCode);
 }
 
-const TRANSCRIPTION_SOURCE_LANGUAGES = Object.freeze([
-  { code: 'zh-TW', name: '繁體中文（台灣）', originalLabel: '原文（繁體中文）' },
-  { code: 'en', name: 'English', originalLabel: 'Original (English)' },
-  { code: 'ja', name: '日本語', originalLabel: '原文（日本語）' },
-  { code: 'ko', name: '한국어', originalLabel: '원문(한국어)' },
-  { code: 'es', name: 'Español', originalLabel: 'Original (Español)' },
-  { code: 'fr', name: 'Français', originalLabel: 'Original (Français)' },
-  { code: 'de', name: 'Deutsch', originalLabel: 'Original (Deutsch)' },
-]);
+const TRANSCRIPTION_SOURCE_LANGUAGES = SOURCE_LANGUAGES;
 const USER_ROLES = {
   ADMIN: 'admin',
   OPERATOR: 'operator',
@@ -3931,6 +3925,8 @@ function ensureSessionStructure(session) {
   session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(
     session.transcriptionLanguage,
   );
+  session.followingLanguageIds = Object.fromEntries(Object.entries(session.followingLanguageIds || {})
+    .filter(([code, id]) => supportedLanguage(code)?.code === code && typeof id === 'string' && id));
   session.allowedLiveTranslationLanguageCodes =
     normalizeAllowedLiveTranslationLanguageCodes(
       session.allowedLiveTranslationLanguageCodes,
@@ -4101,6 +4097,7 @@ function serializeSessionForStorage(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
+    followingLanguageIds: normalized.followingLanguageIds,
     transcription: {
       transcriptionContext: normalizeTranscriptionContextValue(
         normalized.transcription?.transcriptionContext,
@@ -7184,6 +7181,7 @@ function getPublicTranscriptionState(session) {
   const stream = transcriptionStreams.get(session.id);
   return {
     active: Boolean(state.active),
+    followingScript: describeFollowingScript(session),
     status: state.status || 'idle',
     text: typeof state.text === 'string' ? state.text : '',
     isFinal: state.isFinal !== false,
@@ -7928,6 +7926,9 @@ function getSessionSummary(session) {
     endedAt: normalized.endedAt,
     selectedCellId: normalized.selectedCellId,
     subtitleControlMode: normalized.subtitleControlMode,
+    transcriptionLanguage: normalized.transcriptionLanguage,
+    followingLanguageIds: normalized.followingLanguageIds,
+    followingScript: describeFollowingScript(normalized),
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
@@ -8955,14 +8956,20 @@ function getAutoFollowState(sessionId) {
   }
   const state = autoFollowStates.get(key);
   const cellId = sessions.get(key)?.selectedCellId || null;
-  if (state.cellId !== undefined && state.cellId !== cellId) {
+  const session = sessions.get(key);
+  const following = session ? resolveFollowingLanguage(session) : null;
+  const followingKey = following ? `${following.language}:${following.languageId}` : '';
+  if ((state.cellId !== undefined && state.cellId !== cellId) ||
+    (state.followingKey !== undefined && state.followingKey !== followingKey)) {
+    referenceRuntime.invalidate(key);
     Object.assign(state, createAutoFollowState(), {
       tracker: createTracker({ ignoreBeforeMs: transcriptionStreams.get(key)?.autoFollowAudioMs ?? -1 }),
       status: AUTO_FOLLOW_STATUS.LISTENING,
-      message: '場次已切換，正在重新定位劇本。',
+      message: '場次、演出語言或劇本欄已切換，正在重新定位。',
     });
   }
   state.cellId = cellId;
+  state.followingKey = followingKey;
   return state;
 }
 
@@ -8974,7 +8981,7 @@ function resetAutoFollowState(sessionId, patch = {}) {
   };
   const session = getSessionRecord(sessionId);
   if (session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
-    nextState.tracker.script = prepareScript(session.lines, autoFollowStates.get(sessionId)?.tracker.script);
+    nextState.tracker.script = prepareScript(getFollowingLines(session), autoFollowStates.get(sessionId)?.tracker.script);
   }
   autoFollowStates.set(sessionId, nextState);
   return nextState;
@@ -8986,6 +8993,7 @@ function getPublicAutoFollowState(session) {
     session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
   return {
     status: autoEnabled ? state.status : AUTO_FOLLOW_STATUS.IDLE,
+    followingScript: describeFollowingScript(session),
     listening: autoEnabled && state.listening === true,
     started: state.started === true,
     lastAudioLevel: Number.isFinite(state.lastAudioLevel)
@@ -9056,22 +9064,30 @@ function resetAutoFollowPosition(session, message = '') {
   referenceRuntime.position(session, stream?.autoFollowAudioMs || 0);
 }
 
+function syncPerformanceFollowing(session) {
+  referenceRuntime.invalidate(session.id);
+  const recording = session.recordings?.find(entry => entry.id === session.activeRecordingId);
+  if (recording && !isRecordingCompatible(session, recording)) session.activeRecordingId = null;
+  resetAutoFollowPosition(session, describeFollowingScript(session).message || '演出語言與劇本欄已更新，正在重新定位。');
+}
+
 function handleReferenceAudioResult(sessionId, result) {
   const session = getSessionRecord(sessionId), stream = transcriptionStreams.get(sessionId);
   if (!session || !stream?.ready || stream.closing || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO ||
     !referenceRuntime.accepts(sessionId, result) || stream.autoFollowAudioMs - result.audioEndMs > 700) return;
   const recording = session.recordings?.find(r => r.id === result.recordingId && r.id === session.activeRecordingId);
-  if (!recording || recording.status !== 'ready' || recording.revision !== result.revision || recording.cellId !== session.selectedCellId) return;
+  if (!recording || !isRecordingCompatible(session, recording) || recording.status !== 'ready' || recording.revision !== result.revision || recording.cellId !== session.selectedCellId) return;
   const state = getAutoFollowState(sessionId);
   updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name }});
   if (result.status !== 'verified') { maybeBroadcastAutoFollowDiagnostics(sessionId); return; }
   const index = session.lines.findIndex(line => line.id === result.lineId);
+  const followingLines = getFollowingLines(session);
   const segment = recording.segments.find(segment => segment.lineId === result.lineId);
-  if (index < session.currentIndex || index > session.currentIndex + 4 || !segment || !isUsableSegment(segment, session.lines[index])) return;
+  if (index < session.currentIndex || index > session.currentIndex + 4 || !segment || !isUsableSegment(segment, followingLines[index])) return;
   const committed = state.lastDecision;
   if (committed && ['transcript', 'correction'].includes(committed.source) &&
     Number.isFinite(committed.transcriptAudioEndMs) && result.audioEndMs <= committed.transcriptAudioEndMs) return;
-  if (!applyReferencePosition(state.tracker, session.lines, index, result)) return;
+  if (!applyReferencePosition(state.tracker, followingLines, index, result)) return;
   updateAutoFollowState(sessionId, {listening: true, started: true, confidence: result.confidence,
     status: index === session.currentIndex ? AUTO_FOLLOW_STATUS.VERIFIED : AUTO_FOLLOW_STATUS.ADVANCED,
     message: result.completed ? '音訊已核對句尾，文字辨識持續校正。' : '音訊已定位字幕，文字辨識持續校正。'});
@@ -9086,7 +9102,8 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const state = getAutoFollowState(sessionId);
   const now = Date.now();
-  const result = followAudio(state.tracker, session.lines, session.currentIndex, {
+  const followingLines = getFollowingLines(session);
+  const result = followAudio(state.tracker, followingLines, session.currentIndex, {
     level, durationMs, endMs,
   });
   updateAutoFollowState(sessionId, {
@@ -9102,7 +9119,7 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
       });
     updateAutoFollowState(sessionId, {
       started: true, status: AUTO_FOLLOW_STATUS.ADVANCED, lastAdvancedAt: now,
-      lastCandidateIndex: result.index, lastCandidateText: session.lines[result.index]?.text || '',
+      lastCandidateIndex: result.index, lastCandidateText: followingLines[result.index]?.text || '',
       confidence: null, message: silentDirection
         ? '句尾已確認，靜默 3 秒後進入舞台指示；外部台詞已清空，等待下一句。'
         : '已依起音預推一格，等待文字核對；核對前不再預推。',
@@ -9124,6 +9141,10 @@ function handleAutoFollowSpeechStarted(sessionId, startMs) {
 function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const session = getSessionRecord(sessionId);
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
+  const stream = transcriptionStreams.get(sessionId);
+  if ((options.language && normalizePerformanceLanguage(options.language) !== session.transcriptionLanguage) ||
+    (options.streamId && stream?.liveTranslationStreamId && options.streamId !== stream.liveTranslationStreamId)) return;
+  const followingLines = getFollowingLines(session);
   const state = getAutoFollowState(sessionId);
   const receivedAt = Date.now();
   const audioMs = transcriptionStreams.get(sessionId)?.autoFollowAudioMs;
@@ -9134,7 +9155,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   });
   let result;
   try {
-    result = followTranscript(state.tracker, session.lines,
+    result = followTranscript(state.tracker, followingLines,
       session.currentIndex, { ...options, text: transcript });
   } catch (error) {
     console.error('Auto-follow alignment failed:', { sessionId, message: error?.message });
@@ -9152,7 +9173,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     listening: true, started: state.started || Number.isInteger(result.index),
     status: result.status, lastHeardText: sanitizeLineText(transcript),
     lastCandidateIndex: result.candidate?.index ?? null,
-    lastCandidateText: session.lines[result.candidate?.index]?.text || '',
+    lastCandidateText: followingLines[result.candidate?.index]?.text || '',
     confidence: result.candidate?.confidence ?? null, message: result.message,
     ...(Number.isInteger(result.index) ? { lastVerifiedAt: now } : {}),
   });
@@ -9173,6 +9194,7 @@ function getAutoFollowTranscriptOptions(stream, itemId, isFinal, timing = {}) {
   const stored = stream.autoFollowItems?.get(itemId) || {};
   return {
     itemId, isFinal, streamId: stream.liveTranslationStreamId,
+    language: stream.language,
     order: stored.order,
     startMs: timing.startMs ?? stored.startMs,
     endMs: timing.endMs ?? stored.endMs,
@@ -12770,7 +12792,10 @@ io.on('connection', (socket) => {
         lastInterimAt: null,
         lastFinalAt: null,
       });
-      session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(language);
+      const nextPerformanceLanguage = normalizeTranscriptionSourceLanguage(language);
+      const languageChanged = session.transcriptionLanguage !== nextPerformanceLanguage;
+      session.transcriptionLanguage = nextPerformanceLanguage;
+      if (languageChanged) syncPerformanceFollowing(session);
       persistSession(session);
       broadcastControlState(sessionId);
       broadcastTranscriptionState(sessionId);
@@ -12940,10 +12965,27 @@ io.on('connection', (socket) => {
     if (!session || transcriptionStreams.has(sessionId)) return;
     const selectedLanguage = normalizeTranscriptionSourceLanguage(language);
     session.transcriptionLanguage = selectedLanguage;
+    syncPerformanceFollowing(session);
     updateTranscriptionState(sessionId, { language: selectedLanguage });
     persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastAutoFollowState(sessionId);
     broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
+  });
+
+  socket.on('transcription:set-script-language', ({sessionId, language, languageId}, ack) => {
+    const session = getOwnedSocketSession(sessionId);
+    const reply = value => { if (typeof ack === 'function') ack(value); };
+    if (!session) return reply({ok: false, reason: '找不到節目'});
+    if (language !== session.transcriptionLanguage) return reply({ok: false, reason: '演出語言已改變，請重新選擇劇本欄'});
+    if (languageId !== null && !session.languages.some(entry => entry.id === languageId))
+      return reply({ok: false, reason: '找不到指定的劇本欄'});
+    if (languageId === null) delete session.followingLanguageIds[language];
+    else session.followingLanguageIds[language] = languageId;
+    syncPerformanceFollowing(session); persistSession(session);
+    broadcastControlState(sessionId); broadcastAutoFollowState(sessionId); broadcastTranscriptionState(sessionId);
+    reply({ok: true, followingScript: describeFollowingScript(session)});
   });
 
   socket.on(

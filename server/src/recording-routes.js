@@ -4,6 +4,8 @@ const persistence = require('./persistence');
 const {runRecordingTask} = require('./recording-runtime');
 const {MAX_FILE_BYTES, MAX_RECORDINGS, normalizeRecordings, refreshMappings,
   recordingLines, publicRecording, validateSegmentEdit, hashText} = require('./recordings');
+const {SOURCE_LANGUAGES, supportedLanguage, normalizePerformanceLanguage, resolveFollowingLanguage,
+  describeFollowingScript, isRecordingCompatible} = require('./performance-language');
 
 function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, persist, broadcast, invalidate,
   storage = persistence, task = runRecordingTask, request = fetch} = {}) {
@@ -77,7 +79,8 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
         await storage.updateRecordingAnalysis(sessionId, recordingId, asset.features, asset.analysis); check();
       }
       recording.progress = 45;
-      let words = asset.analysis.words;
+      const cachedLanguage = asset.analysis.transcriptionLanguage || recording.transcriptCacheLanguage || recording.language;
+      let words = cachedLanguage === recording.language ? asset.analysis.words : null;
       if (!words?.length) {
         const apiKey = String(process.env.DEEPGRAM_API_KEY || '').trim();
         if (!apiKey) {
@@ -102,8 +105,10 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
         words = result.results?.channels?.[0]?.alternatives?.[0]?.words || [];
         if (!words.length) throw new Error('錄音未辨識出可對齊的台詞，請試聽並手動設定片段');
         asset.analysis.words = words;
+        asset.analysis.transcriptionLanguage = recording.language;
         await storage.updateRecordingAnalysis(sessionId, recordingId, null, asset.analysis); check();
       }
+      recording.transcriptCacheLanguage = recording.language;
       recording.progress = 75; await save(session);
       const script = recordingLines(session, recording).map(line => ({id: line.id, text: line.text, type: line.type}));
       const aligned = await task({type: 'align', lines: script, words, duration: recording.duration, features: asset.features}, analysisTimeoutMs, job.abort.signal); check();
@@ -123,8 +128,10 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
 
   app.get('/api/session/:sessionId/recordings', requireAuth, sessionFor, wrap(async (req, res) => {
     const session = req.recordingSession; refreshMappings(session);
-    res.json({recordings: session.recordings.map(r => publicRecording(r, {details: true})),
+    res.json({recordings: session.recordings.map(r => publicRecording(r, {details: true, session})),
       activeRecordingId: session.activeRecordingId, canTranscribe: Boolean(String(process.env.DEEPGRAM_API_KEY || '').trim()),
+      performanceLanguage: session.transcriptionLanguage, sourceLanguages: SOURCE_LANGUAGES,
+      followingScript: describeFollowingScript(session),
       limits: {maxFileBytes: MAX_FILE_BYTES, maxDuration: null, maxRecordings: MAX_RECORDINGS}});
   }));
   app.post('/api/session/:sessionId/recordings', requireAuth, sessionFor, (req, res, next) => {
@@ -146,24 +153,49 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       throw new Error('請使用 MP3、WAV、M4A 或瀏覽器可解碼的音訊檔');
     const cellId = req.body.cellId || session.selectedCellId;
     if (!session.cells.some(cell => cell.id === cellId)) throw new Error('找不到指定場次');
+    if (req.body.language && !supportedLanguage(req.body.language)) throw new Error('不支援此錄音語言');
+    const language = normalizePerformanceLanguage(req.body.language || session.transcriptionLanguage);
+    const scriptLanguageId = resolveFollowingLanguage(session, language).languageId;
     const recording = {id: crypto.randomUUID(), name: String(req.body.name || audio.originalname).slice(0,120),
       originalName: audio.originalname.slice(0,160), mime, byteLength: audio.size, duration,
       cellId, status: 'analysing', progress: 0, error: '', revision: 1,
-      language: session.transcriptionLanguage || 'zh-TW', createdAt: Date.now(), segments: session.cells.find(cell => cell.id === cellId).lines.map(line => ({lineId: line.id, textHash: hashText(line),
-        start: null, end: null, confidence: 0, status: line.type === 'direction' ? 'direction' : 'unmatched'}))};
+      language, scriptLanguageId, createdAt: Date.now(), segments: []};
+    recording.segments = recordingLines(session, recording).map(line => ({lineId: line.id, textHash: hashText(line),
+      start: null, end: null, confidence: 0, status: line.type === 'direction' ? 'direction' : 'unmatched'}));
     await storage.putRecordingAsset(session.id, recording.id, {audio: audio.buffer, pcm: pcm.buffer, analysis: {}});
     session.recordings.push(recording);
     try { await save(session); } catch (error) {
       session.recordings = session.recordings.filter(r => r.id !== recording.id);
       await storage.deleteRecordingAssets(session.id, recording.id); throw error;
     }
-    res.status(202).json({recording: publicRecording(recording, {details: true})});
+    res.status(202).json({recording: publicRecording(recording, {details: true, session})});
     void processRecording(session.id, recording.id, {audio: audio.buffer, pcm: pcm.buffer, features: null, analysis: {}});
   }));
   app.post('/api/session/:sessionId/recordings/:recordingId/align', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
     if (jobs.size + uploading >= 1 || jobs.has(recording.id)) return res.status(409).json({error: '錄音正在處理中'});
+    recording.scriptLanguageId = resolveFollowingLanguage(req.recordingSession, recording.language).languageId;
+    recording.revision++; invalidate(req.recordingSession.id);
     res.status(202).json({ok: true}); void processRecording(req.recordingSession.id, recording.id);
+  }));
+  app.put('/api/session/:sessionId/recordings/:recordingId/language', requireAuth, sessionFor, wrap(async (req, res) => {
+    const recording = find(req, res); if (!recording) return;
+    const language = supportedLanguage(req.body.language)?.code;
+    if (!language) throw new Error('不支援此錄音語言');
+    if (jobs.size + uploading >= 1) return res.status(409).json({error: '錄音正在處理中，完成後再修改語言'});
+    const session = req.recordingSession;
+    if (language === recording.language) return res.json({recording: publicRecording(recording, {details: true, session})});
+    const previous = {...recording}, active = session.activeRecordingId;
+    recording.transcriptCacheLanguage ||= recording.language;
+    recording.language = language; recording.scriptLanguageId = resolveFollowingLanguage(session, language).languageId;
+    recording.revision++; recording.status = 'analysing'; recording.progress = 0; recording.error = '';
+    recording.segments = recordingLines(session, recording).map(line => ({lineId: line.id, textHash: hashText(line),
+      start: null, end: null, confidence: 0, status: line.type === 'direction' ? 'direction' : 'unmatched'}));
+    if (active === recording.id) session.activeRecordingId = null;
+    try { await save(session); } catch (error) { Object.assign(recording, previous); session.activeRecordingId = active; throw error; }
+    invalidate(session.id);
+    res.status(202).json({recording: publicRecording(recording, {details: true, session})});
+    void processRecording(session.id, recording.id);
   }));
   app.put('/api/session/:sessionId/recordings/active', requireAuth, sessionFor, wrap(async (req, res) => {
     const session = req.recordingSession, id = req.body.recordingId;
@@ -171,6 +203,8 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       throw new Error('請選擇目前場次已完成處理的錄音');
     if (id !== null) {
       const recording = session.recordings.find(r => r.id === id);
+      if (!isRecordingCompatible(session, recording)) throw new Error('錄音語言或劇本欄與目前演出設定不同，請選擇對應錄音或重新切段');
+      refreshMappings(session);
       const ids = new Set(session.lines.filter(line => line.type !== 'direction').map(line => line.id));
       if (!recording.segments.some(segment => ids.has(segment.lineId) && ['auto','manual'].includes(segment.status)))
         throw new Error('請先確認至少一個台詞片段，再啟用音訊跟戲');

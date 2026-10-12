@@ -27,7 +27,8 @@ async function decodeRecording(file) {
 
 const recordingMime = file => file.type || ({wav:'audio/wav', mp3:'audio/mpeg', m4a:'audio/mp4', flac:'audio/flac', ogg:'audio/ogg', webm:'audio/webm', aac:'audio/aac'}[file.name.split('.').at(-1)?.toLowerCase()] || 'application/octet-stream')
 
-export default function RecordingsPanel({sessionId, cellId, lines, referenceAudio, microphoneActive}) {
+export default function RecordingsPanel({sessionId, cellId, lines, referenceAudio, microphoneActive,
+  performanceLanguage, sourceLanguages, followingScript, languages}) {
   const [recordings, setRecordings] = useState([])
   const [selectedId, setSelectedId] = useState('')
   const [activeId, setActiveId] = useState(null)
@@ -38,13 +39,20 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const [viewport, setViewport] = useState(null)
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
   const [playTime, setPlayTime] = useState(0)
+  const [importLanguage, setImportLanguage] = useState('performance')
+  const [recordingLanguage, setRecordingLanguage] = useState('')
   const audioRef = useRef(null), inputRef = useRef(null), dragRef = useRef(null), clipEndRef = useRef(null)
   const scopeRef = useRef(`${sessionId}:${cellId}`)
   scopeRef.current = `${sessionId}:${cellId}`
   const recording = recordings.find(r => r.id === selectedId)
   const segment = recording?.segments.find(s => s.lineId === lineId)
-  const currentLine = lines.find(line => line.id === lineId)
-  const scriptSignature = useMemo(() => lines.map(line => `${line.id}:${line.type}:${line.text}`).join('\n'), [lines])
+  const recordingLines = useMemo(() => lines.map(line => ({...line, text: line.type === 'direction' ? line.text
+    : recording?.scriptLanguageId === 'primary' ? line.text : line.translations?.[recording?.scriptLanguageId] || ''})), [lines, recording?.scriptLanguageId])
+  const currentLine = recordingLines.find(line => line.id === lineId)
+  const scriptSignature = useMemo(() => recordingLines.map(line => `${line.id}:${line.type}:${line.text}`).join('\n'), [recordingLines])
+  const languageName = code => sourceLanguages.find(language => language.code === code)?.name || code
+  const compatible = recording?.language === performanceLanguage && Boolean(followingScript?.languageId) &&
+    recording?.scriptLanguageId === followingScript.languageId && recording?.compatible !== false
   const base = `/api/session/${encodeURIComponent(sessionId)}/recordings`
   const load = useCallback(async () => {
     const scope = scopeRef.current
@@ -65,7 +73,8 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     void refresh()
     const interval = window.setInterval(refresh, 2000)
     return () => { disposed = true; window.clearInterval(interval) }
-  }, [load, cellId, scriptSignature])
+  }, [load, cellId, scriptSignature, performanceLanguage, followingScript?.languageId])
+  useEffect(() => { setRecordingLanguage(recording?.language || '') }, [selectedId, recording?.language])
   useEffect(() => {
     if (!lines.some(line => line.id === lineId)) setLineId(lines[0]?.id || '')
   }, [lines, lineId])
@@ -109,6 +118,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
       form.append('pcm', pcm, 'reference.pcm')
       form.append('cellId', cellId)
       form.append('name', file.name)
+      form.append('language', importLanguage === 'performance' ? performanceLanguage : importLanguage)
       const data = await mutation('', {method: 'POST', body: form})
       setSelectedId(data.recording.id); setNotice('錄音已匯入，背景分析進度會自動更新')
     })
@@ -148,6 +158,12 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
 
   return <div className="recordings-panel">
     <p>匯入彩排錄音後自動按字幕格切段。試聽校正後，按「使用此錄音跟戲」啟用音訊與文字並行判斷；文字先確認也會立即換格。</p>
+    <label className="recording-select">匯入錄音的語言
+      <select value={importLanguage} disabled={Boolean(busy)} onChange={event => setImportLanguage(event.target.value)}>
+        <option value="performance">依演出語言（{languageName(performanceLanguage)}）</option>
+        {sourceLanguages.map(language => <option key={language.code} value={language.code}>{language.name}</option>)}
+      </select>
+    </label>
     <div className="recording-actions">
       <button type="button" onClick={() => inputRef.current?.click()} disabled={Boolean(busy) || recordings.length >= 5}>
         {busy === '正在解碼與上傳…' ? busy : '匯入錄音並自動切段'}
@@ -160,18 +176,32 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
       <label className="recording-select">目前場次的錄音
         <select value={scopeRecordings.some(r => r.id === selectedId) ? selectedId : ''} onChange={event => setSelectedId(event.target.value)}>
           <option value="" disabled>選擇錄音</option>
-          {scopeRecordings.map(r => <option key={r.id} value={r.id}>{r.name} · {labels[r.status] || r.status}</option>)}
+          {scopeRecordings.map(r => <option key={r.id} value={r.id}>{r.name} · {languageName(r.language)} · {labels[r.status] || r.status}</option>)}
         </select>
       </label>
       {recording && recording.cellId === cellId && <>
         <div className="recording-meta">
           <strong>{labels[recording.status] || recording.status}{processing ? ` ${recording.progress || 0}%` : ''}</strong>
           <span>{timeLabel(recording.duration)} · {recording.mappedCount} 格可用 · {recording.reviewCount} 格待確認</span>
+          <span>{languageName(recording.language)} · 劇本欄：{languages.find(language => language.id === recording.scriptLanguageId)?.name || '尚未對應'}</span>
           {processing && <progress max="100" value={recording.progress || 0} aria-label="錄音處理進度"/>}
         </div>
         {recording.error && <p className="recording-note">{recording.error}</p>}
+        {recording.followingScript?.message && <p className="recording-note">{recording.followingScript.message}</p>}
+        <label className="recording-select">錄音辨識語言
+          <select value={recordingLanguage} disabled={Boolean(busy) || processing} onChange={event => setRecordingLanguage(event.target.value)}>
+            {sourceLanguages.map(language => <option key={language.code} value={language.code}>{language.name}</option>)}
+          </select>
+        </label>
+        <button type="button" className="subtle-button" disabled={Boolean(busy) || processing || recordingLanguage === recording.language}
+          onClick={() => {
+            if (recording.segments.some(segment => segment.status === 'manual') && !window.confirm('變更錄音語言會重新辨識並更新已校正的片段範圍，確定繼續？')) return
+            void act('更新錄音語言…', () => mutation(`/${selectedId}/language`, {method: 'PUT',
+              headers: {'Content-Type': 'application/json'}, body: JSON.stringify({language: recordingLanguage})}))
+          }}>套用語言並重新辨識</button>
         <div className="recording-actions">
-          <button type="button" className="subtle-button" disabled={Boolean(busy) || recording.status !== 'ready' || (!recording.mappedCount && activeId !== selectedId)}
+          <button type="button" className="subtle-button" disabled={Boolean(busy) || recording.status !== 'ready' ||
+            (activeId !== selectedId && (!recording.mappedCount || !compatible))}
             onClick={() => act('切換中…', () => mutation('/active', {method: 'PUT', headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({recordingId: activeId === selectedId ? null : selectedId})}))}>
             {activeId === selectedId ? '停用音訊跟戲' : '使用此錄音跟戲'}
@@ -188,6 +218,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             }}>移除錄音</button>
         </div>
         <p className="recording-note">{activeId === selectedId ? '此錄音已啟用；未確認的片段仍由文字跟戲。' : '此錄音尚未啟用，現場仍由文字跟戲。'}</p>
+        {!compatible && <p className="recording-note">此錄音的語言或劇本欄與目前演出設定不同，無法啟用；請選擇對應錄音，或確認劇本欄後重新自動切段。</p>}
         {referenceAudio?.recordingId === selectedId && <p className="recording-live-status">
           音訊比對：{{loading:'載入中', listening:'等待人聲', searching:'尚未可靠定位', candidate:'核對中', verified:'已確認', error:'沿用文字跟戲'}[referenceAudio.status] || '等待收音'}
           {Number.isFinite(referenceAudio.referenceSeconds) && ` · 錄音 ${timeLabel(referenceAudio.referenceSeconds)}`}
@@ -204,7 +235,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         {microphoneActive && <small>收音中試聽請使用耳機，避免錄音進入現場麥克風。</small>}
         <label className="recording-select">對應字幕格
           <select value={lineId} onChange={event => setLineId(event.target.value)}>
-            {lines.map((line, index) => <option key={line.id} value={line.id}>{index + 1}. {line.text?.slice(0, 48) || '空白字幕'}</option>)}
+            {recordingLines.map((line, index) => <option key={line.id} value={line.id}>{index + 1}. {line.text?.slice(0, 48) || '此語言缺少台詞'}</option>)}
           </select>
         </label>
         {currentLine && <div className="recording-segment-editor">
@@ -213,7 +244,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             <button type="button" className="subtle-button" disabled={lineIndex >= lines.length - 1} onClick={() => setLineId(lines[lineIndex + 1].id)}>下一格</button>
             <span className={`recording-segment-state ${segment?.status || 'unmatched'}`}>{segmentLabels[segment?.status] || '未對齊'}</span>
           </div>
-          <p className="recording-subtitle">{currentLine.text || '空白字幕'}</p>
+          <p className="recording-subtitle">{currentLine.text || '此語言缺少台詞，請先補齊對應劇本欄'}</p>
           {currentLine.type === 'direction' && <small>舞台指示保留在控制端；現場仍依句尾與靜默規則清屏。</small>}
           <svg viewBox="0 0 1000 100" className="recording-waveform" aria-label="錄音波形，可拖曳片段起點與終點"
             onPointerMove={event => {
@@ -250,7 +281,8 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             <button type="button" className="subtle-button" onClick={() => moveHandle('start', audioRef.current?.currentTime || 0)}>播放位置設為起點</button>
             <button type="button" className="subtle-button" onClick={() => moveHandle('end', audioRef.current?.currentTime || 0)}>播放位置設為終點</button>
             <button type="button" className="subtle-button" onClick={playClip} disabled={Number(end) <= Number(start)}>試聽片段</button>
-            <button type="button" onClick={handleSave} disabled={Boolean(busy) || processing || Number(end) - Number(start) < 0.12}>確認並保存範圍</button>
+            <button type="button" onClick={handleSave} disabled={Boolean(busy) || processing || Number(end) - Number(start) < 0.12 ||
+              (currentLine.type !== 'direction' && !currentLine.text?.trim())}>確認並保存範圍</button>
           </div>
         </div>}
       </>}

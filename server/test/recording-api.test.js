@@ -27,17 +27,18 @@ const waitFor = async predicate => {
   throw new Error('Timed out waiting for recording job/worker');
 };
 
-function fixture({recordingTask, recordingStorage} = {}) {
+function fixture({recordingTask, recordingStorage, recordingRequest} = {}) {
   const filename = require.resolve('../src/server');
   let source = fs.readFileSync(filename,'utf8');
   source = source.replace('  broadcast: broadcastControlState,', `  broadcast: broadcastControlState,
     task: module.recordingTask, storage: module.recordingStorage,
-    request: async () => ({ok: true, json: async () => ({results: {channels: [{alternatives: [{words: [
+    request: module.recordingRequest || (async () => ({ok: true, json: async () => ({results: {channels: [{alternatives: [{words: [
       {word:'我們今晚開始演出',start:0,end:1.44,confidence:0.99},
       {word:'可是我答應過你',start:1.84,end:3.28,confidence:0.99},
-    ]}]}]}})}),`);
+    ]}]}]}})})),`);
   const loaded=new Module(filename,module);loaded.filename=filename;loaded.paths=Module._nodeModulePaths(path.dirname(filename));
   loaded.recordingTask=recordingTask;loaded.recordingStorage=recordingStorage;
+  loaded.recordingRequest=recordingRequest;
   loaded._compile(source.replace(/startServer\(\);\s*$/, `
     module.exports = () => {
       const user={id:'reference-api-owner',role:USER_ROLES.OPERATOR}; users.set(user.id,user);
@@ -54,6 +55,9 @@ function fixture({recordingTask, recordingStorage} = {}) {
         state:()=>getPublicAutoFollowState(session), viewer:()=>getViewerPayload(session),
         transcript:(text,options)=>handleAutoFollowTranscript(session.id,text,options),
         audioResult: result=>handleReferenceAudioResult(session.id,result),
+        socket:(name,payload)=>{let reply;handlers.get(name)(payload,value=>{reply=value});return reply;},
+        changePerformanceLanguage:language=>{session.transcriptionLanguage=language;syncPerformanceFollowing(session);},
+        idle:()=>{transcriptionStreams.delete(session.id);},
         store:()=>serializeSessionForStorage(session), reload:s=>ensureSessionStructure(s),
         send(payload) {let reply;handlers.get('transcription:audio')({sessionId:session.id,...payload},value=>{reply=value});return reply;},
         dispose(){referenceRuntime.dispose();recordingRoutes.cancelSession(session.id);for(const timer of currentIndexPersistTimers.values())clearTimeout(timer);for(const timer of latestRoomStateKeyframes.values())clearTimeout(timer);}
@@ -61,6 +65,19 @@ function fixture({recordingTask, recordingStorage} = {}) {
     };
   `),filename);
   return loaded.exports();
+}
+
+function addEnglish(f) {
+  f.session.languages.push({id:'english',name:'English',code:'en'});
+  f.session.lines[0].translations.english='We begin the show tonight';
+  f.session.lines[2].translations.english='But I promised you';
+}
+function languageRequest(calls) {
+  return async url=>{
+    const language=new URL(url).searchParams.get('language');calls.push(language);
+    const text=language==='en'?['We begin the show tonight','But I promised you']:['我們今晚開始演出','可是我答應過你'];
+    return {ok:true,json:async()=>({results:{channels:[{alternatives:[{words:text.map((word,index)=>({word,start:index*1.84,end:index*1.84+1.44,confidence:.99}))}]}]}})};
+  };
 }
 
 // Exercise the real Express auth, multipart parser and routes with Node HTTP
@@ -258,4 +275,73 @@ test('without a transcription key import still preserves playable audio and manu
     assert.equal((await request(f,base+`/${r.id}/audio`)).status,200);
     await persistence.deleteRecordingAssets(f.session.id);
   }finally{process.env.DEEPGRAM_API_KEY=key;}
+});
+
+test('English performance follows its translation column while viewer output remains Chinese and old-language results are ignored',async t=>{
+  const f=fixture();t.after(()=>f.dispose());addEnglish(f);
+  f.session.subtitleControlMode='auto';f.changePerformanceLanguage('en');f.stream.language='en';
+  f.stream.autoFollowAudioMs=1600;
+  f.transcript('But I promised you',{language:'en',streamId:'recording-live',itemId:'english',startMs:0,endMs:1600,isFinal:true});
+  assert.equal(f.session.currentIndex,2);assert.equal(f.viewer().text,'可是我答應過你');
+  assert.equal(f.state().lastCandidateText,'But I promised you');assert.equal(f.state().followingScript.languageId,'english');
+  f.transcript('We begin the show tonight',{language:'en',streamId:'previous-ASR-connection',itemId:'late-old-stream',startMs:1700,endMs:2200,isFinal:true});
+  assert.equal(f.session.currentIndex,2);assert.equal(f.state().lastHeardText,'But I promised you');
+  f.changePerformanceLanguage('zh-TW');
+  f.transcript('We begin the show tonight',{language:'en',streamId:'recording-live',itemId:'late-English',startMs:1700,endMs:2200,isFinal:true});
+  assert.equal(f.session.currentIndex,2);assert.equal(f.state().lastHeardText,'');
+});
+
+test('explicit script bindings persist and changing a binding fences the prior cue and disables incompatible audio',async t=>{
+  const f=fixture();t.after(()=>f.dispose());addEnglish(f);const recording=await importRecording(f);
+  f.session.subtitleControlMode='auto';f.stream.autoFollowAudioMs=2000;
+  assert.equal(f.socket('transcription:set-script-language',{sessionId:f.session.id,language:'en',languageId:'english'}).ok,false);
+  const reply=f.socket('transcription:set-script-language',{sessionId:f.session.id,language:'zh-TW',languageId:'english'});
+  assert.equal(reply.ok,true);assert.equal(f.session.activeRecordingId,null);
+  assert.equal(f.store().followingLanguageIds['zh-TW'],'english');
+  f.transcript('But I promised you',{streamId:'recording-live',itemId:'old-column',startMs:0,endMs:1000,isFinal:true});
+  assert.equal(f.session.currentIndex,0);
+  assert.equal((await request(f,`/api/session/${f.session.id}/recordings/active`,{method:'PUT',body:{recordingId:recording.id}})).status,400);
+  f.idle();f.socket('transcription:set-language',{sessionId:f.session.id,language:'en'});
+  assert.equal(f.session.transcriptionLanguage,'en');assert.equal(f.state().followingScript.languageId,'english');
+  await persistence.deleteRecordingAssets(f.session.id);
+});
+
+test('an English recording uses English ASR and cuts, preserves features on language correction and never reuses another language cache',async t=>{
+  const calls=[], f=fixture({recordingRequest:languageRequest(calls)});t.after(()=>f.dispose());addEnglish(f);
+  const r=await importRecording(f),base=`/api/session/${f.session.id}/recordings/${r.id}`;
+  const features=(await persistence.getRecordingAsset(f.session.id,r.id)).features;
+  assert.equal((await request(f,base+'/language',{method:'PUT',body:{language:'en'}})).status,202);
+  await waitFor(()=>r.status==='ready');
+  assert.deepEqual(calls,['zh-TW','en']);assert.equal(r.language,'en');assert.equal(r.scriptLanguageId,'english');
+  assert.equal(r.segments.find(segment=>segment.lineId==='a').status,'auto');
+  assert.equal(r.segments.find(segment=>segment.lineId==='a').textHash,hashText({...f.session.lines[0],text:'We begin the show tonight'}));
+  assert.deepEqual((await persistence.getRecordingAsset(f.session.id,r.id)).features,features);
+  assert.equal((await request(f,`/api/session/${f.session.id}/recordings/active`,{method:'PUT',body:{recordingId:r.id}})).status,400);
+  f.changePerformanceLanguage('en');
+  assert.equal((await request(f,`/api/session/${f.session.id}/recordings/active`,{method:'PUT',body:{recordingId:r.id}})).status,200);
+  const revision=r.revision;
+  assert.equal((await request(f,base+'/align',{method:'POST'})).status,202);
+  await waitFor(()=>r.status==='ready'&&r.revision>revision+1);assert.deepEqual(calls,['zh-TW','en']);
+  const key=process.env.DEEPGRAM_API_KEY;delete process.env.DEEPGRAM_API_KEY;
+  try{
+    assert.equal((await request(f,base+'/language',{method:'PUT',body:{language:'zh-TW'}})).status,202);
+    await waitFor(()=>r.status==='ready');assert.match(r.error,/金鑰/);assert.equal(r.segments[0].status,'unmatched');
+    assert.deepEqual(calls,['zh-TW','en']);assert.equal(f.session.activeRecordingId,null);
+  }finally{process.env.DEEPGRAM_API_KEY=key;}
+  await persistence.deleteRecordingAssets(f.session.id);
+});
+
+test('import language can be selected independently and missing language text is reported without primary-column fallback',async t=>{
+  const calls=[],f=fixture({recordingRequest:languageRequest(calls)});t.after(()=>f.dispose());addEnglish(f);
+  const pcm=phrasePcm(phrases[0]),body=new FormData();
+  body.append('audio',new Blob([wav(pcm)],{type:'audio/wav'}),'english.wav');body.append('pcm',new Blob([pcm]),'test.pcm');body.append('language','en');
+  assert.equal((await request(f,`/api/session/${f.session.id}/recordings`,{method:'POST',body})).status,202);
+  await waitFor(()=>f.session.recordings[0]?.status==='ready');const r=f.session.recordings[0];
+  assert.equal(r.language,'en');assert.equal(f.session.transcriptionLanguage,'zh-TW');assert.deepEqual(calls,['en']);
+  f.session.languages=f.session.languages.filter(language=>language.id!=='english');f.changePerformanceLanguage('en');
+  assert.equal(f.state().followingScript.available,false);assert.match(f.state().followingScript.message,/劇本欄/);
+  f.session.subtitleControlMode='auto';f.stream.autoFollowAudioMs=1000;
+  f.transcript('可是我答應過你',{language:'en',streamId:'recording-live',itemId:'wrong-column',startMs:0,endMs:1000,isFinal:true});
+  assert.equal(f.session.currentIndex,0);
+  await persistence.deleteRecordingAssets(f.session.id);
 });

@@ -2866,6 +2866,22 @@ const ControlPage = () => {
     })
   }
 
+  const handleFollowingScriptLanguageChange = event => {
+    if (!socketRef.current?.connected || !sessionId) return
+    const language = transcription.language || 'zh-TW'
+    const languageId = event.target.value || null
+    socketRef.current.timeout(5000).emit('transcription:set-script-language', {
+      sessionId, language, languageId,
+    }, (error, response) => {
+      if (error || response?.ok !== true) {
+        setStatus({kind: 'error', message: response?.reason || '未收到劇本欄設定確認，請重試'})
+        return
+      }
+      setTranscription(previous => ({...previous, followingScript: response.followingScript}))
+      setStatus({kind: 'info', message: response.followingScript?.message || '跟戲劇本欄已更新，已重設定位'})
+    })
+  }
+
   const handleViewerTranslationLanguageAccessChange = (
     languageCode,
     allowed,
@@ -5325,7 +5341,9 @@ const ControlPage = () => {
 
             <ControlSection title="彩排錄音與音訊跟戲">
               <RecordingsPanel sessionId={sessionId} cellId={selectedCellId} lines={lines}
-                referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active}/>
+                referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active}
+                performanceLanguage={transcription.language || 'zh-TW'} sourceLanguages={transcription.sourceLanguages}
+                followingScript={transcription.followingScript || sessionMeta?.followingScript} languages={languages}/>
             </ControlSection>
             <ControlSection title="即時語音">
             <div className="input-group transcription-panel">
@@ -5353,7 +5371,7 @@ const ControlPage = () => {
                 <option value="deepgram">Deepgram Nova-3（建議）</option>
                 <option value="openai">OpenAI（備援）</option>
               </select>
-              <label htmlFor="transcription-source-language">現場說話語言</label>
+              <label htmlFor="transcription-source-language">演出語言（現場辨識）</label>
               <select
                 id="transcription-source-language"
                 value={transcription.language || 'zh-TW'}
@@ -5367,8 +5385,16 @@ const ControlPage = () => {
                 ))}
               </select>
               <span className="input-note">
-                辨識中切換會保留已完成字幕，並以新語言重新建立辨識連線。
+                現場辨識、文字跟戲與錄音匯入預設使用此語言。辨識中切換會保留已完成字幕，重新連線與定位。
               </span>
+              <label htmlFor="following-script-language">跟戲使用的劇本欄</label>
+              <select id="following-script-language"
+                value={transcription.followingScript?.explicit ? transcription.followingScript.languageId || '' : ''}
+                disabled={transcription.status === 'connecting'} onChange={handleFollowingScriptLanguageChange}>
+                <option value="">自動選擇{transcription.followingScript?.languageName ? `（${transcription.followingScript.languageName}）` : '（請確認語言名稱或手動指定）'}</option>
+                {languages.map(language => <option key={language.id} value={language.id}>{language.name}</option>)}
+              </select>
+              {transcription.followingScript?.message && <p className="input-note" role="status">{transcription.followingScript.message}</p>}
               <fieldset className="translation-language-access">
                 <legend>觀眾可選擇的即時翻譯</legend>
                 <div className="translation-language-access-grid">
@@ -5723,6 +5749,10 @@ const ControlPage = () => {
                 <>
                   <p>{autoFollowStatusLabel} · {transcriptionStatusLabel}{autoFollowConfidenceLabel}</p>
                   {autoFollow.message && <p>{autoFollow.message}</p>}
+                  {autoFollow.followingScript && <p>演出語言：{transcription.sourceLanguages.find(language => language.code === autoFollow.followingScript.language)?.name || autoFollow.followingScript.language}
+                    {` · 跟戲劇本：${autoFollow.followingScript.languageName || '尚未指定'}`}
+                    {autoFollow.followingScript.message && ` · ${autoFollow.followingScript.message}`}
+                  </p>}
                   {autoFollow.referenceAudio && <p>錄音比對：{autoFollow.referenceAudio.name || '參考錄音'}
                     {Number.isInteger(autoFollow.referenceAudio.index) && ` · 音訊第 ${autoFollow.referenceAudio.index + 1} 格`}
                     {Number.isFinite(autoFollow.referenceAudio.referenceSeconds) && ` · 錄音 ${autoFollow.referenceAudio.referenceSeconds.toFixed(2)} 秒`}

@@ -2,8 +2,10 @@ const {Worker} = require('node:worker_threads');
 const path = require('node:path');
 const {getRecordingAsset} = require('./persistence');
 const {validSegments} = require('./recordings');
+const {getFollowingLines, isRecordingCompatible} = require('./performance-language');
 const workerPath = path.join(__dirname, 'recording-worker.js');
-const scriptSignature = session => JSON.stringify(session.lines.map(line => [line.id, line.type, line.text]));
+const scriptSignature = session => JSON.stringify([session.transcriptionLanguage,
+  getFollowingLines(session).map(line => [line.id, line.type, line.text])]);
 
 function runRecordingTask(message, timeoutMs = 180000, signal) {
   return new Promise((resolve, reject) => {
@@ -44,7 +46,7 @@ class RecordingRuntime {
   }
   async ensure(session) {
     const recording = session.recordings?.find(r => r.id === session.activeRecordingId && r.cellId === session.selectedCellId);
-    if (!recording || recording.status !== 'ready') { this.stop(session.id); return; }
+    if (!recording || !isRecordingCompatible(session, recording) || recording.status !== 'ready') { this.stop(session.id); return; }
     const key = `${recording.id}:${recording.revision}:${session.selectedCellId}`;
     const previous = this.sessions.get(session.id);
     if (previous?.key === key) return;
@@ -116,7 +118,9 @@ class RecordingRuntime {
     const entry = this.sessions.get(session.id);
     if (!entry) return;
     if (session.subtitleControlMode !== 'auto' || session.status === 'ended' ||
-      entry.recordingId !== session.activeRecordingId || entry.signature !== scriptSignature(session)) this.stop(session.id);
+      entry.recordingId !== session.activeRecordingId ||
+      !isRecordingCompatible(session, session.recordings.find(recording => recording.id === entry.recordingId) || {}) ||
+      entry.signature !== scriptSignature(session)) this.stop(session.id);
     else if (entry.currentIndex !== session.currentIndex) this.position(session);
   }
   invalidate(sessionId) { this.stop(sessionId); }
