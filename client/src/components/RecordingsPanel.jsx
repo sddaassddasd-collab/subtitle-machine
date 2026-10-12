@@ -28,7 +28,7 @@ async function decodeRecording(file) {
 const recordingMime = file => file.type || ({wav:'audio/wav', mp3:'audio/mpeg', m4a:'audio/mp4', flac:'audio/flac', ogg:'audio/ogg', webm:'audio/webm', aac:'audio/aac'}[file.name.split('.').at(-1)?.toLowerCase()] || 'application/octet-stream')
 
 export default function RecordingsPanel({sessionId, cellId, lines, referenceAudio, microphoneActive,
-  performanceLanguage, sourceLanguages, followingScript, languages}) {
+  performanceLanguage, sourceLanguages, followingScript, languages, visible = true}) {
   const [recordings, setRecordings] = useState([])
   const [selectedId, setSelectedId] = useState('')
   const [activeId, setActiveId] = useState(null)
@@ -68,12 +68,13 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   }, [base, cellId])
 
   useEffect(() => {
+    if (!visible) { audioRef.current?.pause(); clipEndRef.current = null; return }
     let disposed = false
     const refresh = () => load().catch(error => { if (!disposed) setError(error.message) })
     void refresh()
     const interval = window.setInterval(refresh, 2000)
     return () => { disposed = true; window.clearInterval(interval) }
-  }, [load, cellId, scriptSignature, performanceLanguage, followingScript?.languageId])
+  }, [load, cellId, scriptSignature, performanceLanguage, followingScript?.languageId, visible])
   useEffect(() => { setRecordingLanguage(recording?.language || '') }, [selectedId, recording?.language])
   useEffect(() => {
     if (!lines.some(line => line.id === lineId)) setLineId(lines[0]?.id || '')

@@ -98,7 +98,7 @@ function describeFollowingScript(session, language = session.transcriptionLangua
 function isRecordingCompatible(session, recording) {
   const code = normalizePerformanceLanguage(session.transcriptionLanguage);
   const selected = resolveFollowingLanguage(session, code);
-  return recording.language === code && Boolean(selected.languageId) &&
+  return session.captionMode !== 'live' && recording.language === code && Boolean(selected.languageId) &&
     recording.scriptLanguageId === selected.languageId;
 }
 

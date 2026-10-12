@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef } from 'react'
 
-export function ControlStatusSummary({ automatic, status, audio, progress, confidence, hint, error }) {
-  const fields = automatic
+export function ControlStatusSummary({ automatic, live = false, status, audio, progress, confidence, hint, error }) {
+  const fields = live ? ['即時字幕', status, audio] : automatic
     ? [status, audio, progress || '進度待定位']
     : ['手動控制', '自動跟戲未啟用']
 

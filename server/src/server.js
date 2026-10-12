@@ -17,6 +17,7 @@ const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
 const { SOURCE_LANGUAGES, normalizePerformanceLanguage, supportedLanguage, resolveFollowingLanguage,
   getFollowingLines, describeFollowingScript, isRecordingCompatible } = require('./performance-language');
+const {getCaptionMode, enterLiveCaptions, resumeScriptCaptions} = require('./caption-mode');
 const {
   createOpaqueToken,
   createPasswordHash,
@@ -3991,6 +3992,12 @@ function ensureSessionStructure(session) {
   session.subtitleControlMode = normalizeSubtitleControlMode(
     session.subtitleControlMode,
   );
+  session.captionMode = getCaptionMode(session);
+  if (session.captionMode === 'live') {
+    session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
+    session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.TRANSCRIPTION;
+    session.activeRecordingId = null;
+  }
   session.transcription = ensureTranscriptionState(session);
   ensureSessionHistory(session);
   syncSelectedCellLines(session);
@@ -4116,6 +4123,9 @@ function serializeSessionForStorage(session) {
     selectedCellId: normalized.selectedCellId,
     currentIndex: normalized.currentIndex,
     subtitleControlMode: normalized.subtitleControlMode,
+    captionMode: normalized.captionMode,
+    discussionLanguage: normalized.discussionLanguage,
+    scriptResume: normalized.scriptResume,
     recordings: normalized.recordings,
     activeRecordingId: normalized.activeRecordingId,
     languages: normalized.languages.map((language) => ({
@@ -7181,6 +7191,8 @@ function getPublicTranscriptionState(session) {
   const stream = transcriptionStreams.get(session.id);
   return {
     active: Boolean(state.active),
+    liveEntries: getCaptionMode(session) === 'live' && stream ? buildTranscriptionDisplayEntries(stream)
+      .map(entry => ({id: entry.id, text: entry.text, speakerId: entry.speakerId, isFinal: entry.isFinal !== false})) : [],
     followingScript: describeFollowingScript(session),
     status: state.status || 'idle',
     text: typeof state.text === 'string' ? state.text : '',
@@ -7926,6 +7938,9 @@ function getSessionSummary(session) {
     endedAt: normalized.endedAt,
     selectedCellId: normalized.selectedCellId,
     subtitleControlMode: normalized.subtitleControlMode,
+    captionMode: getCaptionMode(normalized),
+    discussionLanguage: normalized.discussionLanguage || normalized.transcriptionLanguage,
+    resumeCue: normalized.scriptResume?.index ?? null,
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
     followingScript: describeFollowingScript(normalized),
@@ -8041,7 +8056,7 @@ function getSessionDisplayState(session) {
 
   const transcription = ensureTranscriptionState(normalized);
   const liveText = sanitizeTranscriptionMultilineText(transcription.text);
-  const hasLiveText = transcription.active && liveText.length > 0;
+  const hasLiveText = (transcription.active || getCaptionMode(normalized) === 'live') && liveText.length > 0;
   const activeStream = transcriptionStreams.get(normalized.id);
   const liveEntries = hasLiveText
     ? buildTranscriptionDisplayEntries(activeStream)
@@ -8068,7 +8083,7 @@ function getSessionDisplayState(session) {
   const activeScriptLine =
     lines.length > 0 ? lines[normalized.currentIndex] || null : null;
   const musicActive =
-    normalized.musicEffectEnabled !== false &&
+    getCaptionMode(normalized) !== 'live' && normalized.musicEffectEnabled !== false &&
     isLineMarkedMusic(activeScriptLine);
   const musicText = musicActive
     ? normalizeMusicText(activeScriptLine?.musicText)
@@ -8182,7 +8197,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     };
   }
 
-  if (hasLiveText && normalized.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+  if (hasLiveText && getCaptionMode(normalized) === 'live') {
     return {
       sessionId: normalized.id,
       viewerToken,
@@ -8208,7 +8223,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     };
   }
 
-  if (transcription.active && normalized.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+  if (getCaptionMode(normalized) === 'live') {
     return {
       sessionId: normalized.id,
       viewerToken,
@@ -8302,7 +8317,7 @@ function getProjectorPayload(session) {
   }
 
   if (projectorDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION &&
-    normalized.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+    getCaptionMode(normalized) === 'live') {
     if (hasLiveText) {
       return {
         sessionId: normalized.id,
@@ -8330,7 +8345,7 @@ function getProjectorPayload(session) {
         transcription,
       };
     }
-    if (transcription.active) {
+    if (getCaptionMode(normalized) === 'live') {
       return {
         sessionId: normalized.id,
         projectorToken: normalized.projectorToken,
@@ -8707,7 +8722,7 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
 
 function broadcastLiveTranscriptionState(sessionId, stream) {
   const session = getSessionRecord(sessionId);
-  if (!session || session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) return;
+  if (!session || getCaptionMode(session) !== 'live') return;
   const payload = getLiveTranscriptionPatchPayload(sessionId, stream);
   if (!payload) return;
 
@@ -8777,7 +8792,8 @@ function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
 }
 
 function broadcastLiveTranslationState(sessionId, stream, languageCode) {
-  if (getSessionRecord(sessionId)?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) return;
+  const session = getSessionRecord(sessionId);
+  if (!session || getCaptionMode(session) !== 'live') return;
   if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
   if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
   const payload = getLiveTranslationPatchPayload(
@@ -8857,6 +8873,7 @@ function broadcastViewerState(sessionId) {
 
 function applyCurrentIndexChange(session, nextIndex, options = {}) {
   if (!session) return false;
+  if (getCaptionMode(session) === 'live') return false;
   const manualOverride = options.manualOverride === true;
   if (
     manualOverride &&
@@ -9069,6 +9086,16 @@ function syncPerformanceFollowing(session) {
   const recording = session.recordings?.find(entry => entry.id === session.activeRecordingId);
   if (recording && !isRecordingCompatible(session, recording)) session.activeRecordingId = null;
   resetAutoFollowPosition(session, describeFollowingScript(session).message || '演出語言與劇本欄已更新，正在重新定位。');
+}
+
+function switchCaptionMode(session, mode, language, {stopStream = true} = {}) {
+  if (stopStream) stopTranscriptionStream(session.id, {keepText: false, reason: 'caption source changed'});
+  referenceRuntime.invalidate(session.id);
+  if (mode === 'live') enterLiveCaptions(session, language);
+  else resumeScriptCaptions(session);
+  updateTranscriptionState(session.id, {text: '', isFinal: true, language: session.transcriptionLanguage});
+  resetAutoFollowPosition(session, mode === 'live' ? '即時字幕已啟用，劇本位置保留。' : '已返回劇本字幕，重新定位跟戲。');
+  session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
 }
 
 function handleReferenceAudioResult(sessionId, result) {
@@ -12754,12 +12781,16 @@ io.on('connection', (socket) => {
       }
 
       if (autoFollow === true) {
+        if (getCaptionMode(session) === 'live') switchCaptionMode(session, 'script', null, {stopStream: false});
+        session.captionMode = 'script';
         session.subtitleControlMode = SUBTITLE_CONTROL_MODES.AUTO;
         session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.SCRIPT;
         resetAutoFollowState(sessionId, {
           status: AUTO_FOLLOW_STATUS.LISTENING,
           message: '正在啟動收音並定位劇本。',
         });
+      } else if (getCaptionMode(session) !== 'live') {
+        switchCaptionMode(session, 'live', language, {stopStream: false});
       }
 
       updateTranscriptionState(sessionId, {
@@ -12795,6 +12826,7 @@ io.on('connection', (socket) => {
       const nextPerformanceLanguage = normalizeTranscriptionSourceLanguage(language);
       const languageChanged = session.transcriptionLanguage !== nextPerformanceLanguage;
       session.transcriptionLanguage = nextPerformanceLanguage;
+      if (getCaptionMode(session) === 'live') session.discussionLanguage = nextPerformanceLanguage;
       if (languageChanged) syncPerformanceFollowing(session);
       persistSession(session);
       broadcastControlState(sessionId);
@@ -12946,8 +12978,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('transcription:stop', ({ sessionId }) => {
+  socket.on('transcription:stop', ({ sessionId, preserveText }) => {
     if (!sessionId) return;
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
 
     const stream = transcriptionStreams.get(sessionId);
     if (!stream || stream.socketId !== socket.id) {
@@ -12955,9 +12989,24 @@ io.on('connection', (socket) => {
     }
 
     stopTranscriptionStream(sessionId, {
-      keepText: false,
+      keepText: preserveText === true && getCaptionMode(session) === 'live',
       reason: 'client requested stop',
     });
+  });
+
+  socket.on('caption:set-mode', ({sessionId, mode, language}, ack) => {
+    const reply = value => { if (typeof ack === 'function') ack(value); };
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return reply({ok: false, reason: '找不到節目'});
+    if (!['script', 'live'].includes(mode)) return reply({ok: false, reason: '不支援此字幕模式'});
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理，請先停止該端收音'});
+    if (mode === 'live' && language && !supportedLanguage(language)) return reply({ok: false, reason: '不支援此辨識語言'});
+    if (getCaptionMode(session) !== mode || (mode === 'live' && language &&
+      normalizePerformanceLanguage(language) !== session.transcriptionLanguage)) switchCaptionMode(session, mode, language);
+    else if (mode === 'live' && language) session.discussionLanguage = normalizeTranscriptionSourceLanguage(language);
+    persistSession(session); broadcastControlState(sessionId); broadcastViewerState(sessionId); broadcastTranscriptionState(sessionId);
+    reply({ok: true, session: getSessionSummary(session)});
   });
 
   socket.on('transcription:set-language', ({ sessionId, language }) => {
@@ -12965,6 +13014,7 @@ io.on('connection', (socket) => {
     if (!session || transcriptionStreams.has(sessionId)) return;
     const selectedLanguage = normalizeTranscriptionSourceLanguage(language);
     session.transcriptionLanguage = selectedLanguage;
+    if (getCaptionMode(session) === 'live') session.discussionLanguage = selectedLanguage;
     syncPerformanceFollowing(session);
     updateTranscriptionState(sessionId, { language: selectedLanguage });
     persistSession(session);
@@ -13108,7 +13158,11 @@ io.on('connection', (socket) => {
     if (!session) return;
 
     const nextMode = normalizeSubtitleControlMode(mode);
-    if (session.subtitleControlMode === nextMode) return;
+    const sourceChanged = getCaptionMode(session) === 'live';
+    const stream = transcriptionStreams.get(sessionId);
+    if (sourceChanged && stream && stream.socketId !== socket.id) return;
+    if (sourceChanged) switchCaptionMode(session, 'script');
+    if (session.subtitleControlMode === nextMode && !sourceChanged) return;
 
     session.subtitleControlMode = nextMode;
     resetAutoFollowState(sessionId, {
@@ -13246,15 +13300,13 @@ io.on('connection', (socket) => {
     if (session.projectorDisplayMode === nextDisplayMode) {
       return;
     }
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream && stream.socketId !== socket.id) return;
 
-    pushSessionHistory(session);
-    session.projectorDisplayMode = nextDisplayMode;
-    session.projectorRevision = normalizeProjectorRevision(
-      session.projectorRevision + 1,
-    );
+    switchCaptionMode(session, nextDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION ? 'live' : 'script');
     persistSession(session);
     broadcastControlState(sessionId);
-    broadcastProjectorState(sessionId);
+    broadcastViewerState(sessionId);
   });
 
   socket.on('updateProjectorLayout', ({ sessionId, layout }) => {

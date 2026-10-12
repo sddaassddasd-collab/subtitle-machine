@@ -3,6 +3,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import ProjectorLanguageSettings from '../components/ProjectorLanguageSettings'
 import RecordingsPanel from '../components/RecordingsPanel'
+import WorkspaceDialog from '../components/WorkspaceDialog'
+import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
 import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import {
@@ -57,11 +59,13 @@ const ALL_LANGUAGES_OPTION_ID = '__all_languages__'
 const NEW_ROLE_OPTION_ID = '__new_role__'
 const DEFAULT_MUSIC_TEXT = '此處有音樂'
 const MAX_MUSIC_TEXT_CHARS = 80
-const ControlSection = ({ title, defaultOpen = false, children }) => {
+const ControlSection = ({ title, defaultOpen = false, panel, activePanel, children }) => {
   const [open, setOpen] = useState(defaultOpen)
+  const visible = !panel || (Array.isArray(panel) ? panel.includes(activePanel) : panel === activePanel)
+  useEffect(() => { if (visible) setOpen(true) }, [visible])
 
   return (
-    <section className={`control-section ${open ? 'is-open' : ''}`}>
+    <section hidden={!visible} className={`control-section ${open ? 'is-open' : ''}`}>
       <button
         type="button"
         className="control-section-summary"
@@ -1069,6 +1073,19 @@ const ControlPage = () => {
     lastRejectReason: '',
   })
   const [audioDiagnosticsOpen, setAudioDiagnosticsOpen] = useState(false)
+  const [activePanel, setActivePanel] = useState(null)
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [captionSwitching, setCaptionSwitching] = useState(false)
+  const [liveLanguage, setLiveLanguage] = useState('')
+  const toolsRef = useRef(null)
+  useEffect(() => {
+    if (!toolsOpen) return
+    const close = event => {
+      if (event.key === 'Escape' || (event.type === 'pointerdown' && !toolsRef.current?.contains(event.target))) setToolsOpen(false)
+    }
+    document.addEventListener('pointerdown', close); document.addEventListener('keydown', close)
+    return () => {document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close)}
+  }, [toolsOpen])
   const [status, setStatus] = useState({ kind: 'info', message: '' })
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return ''
@@ -1103,8 +1120,7 @@ const ControlPage = () => {
   const lineInsertionAnchorIdRef = useRef(null)
   const pendingCueRequestRef = useRef(null)
   const [cueScrollRequest, setCueScrollRequest] = useState(null)
-  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
-  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(() => window.innerWidth < 900)
   const [qrCodeUrl, setQrCodeUrl] = useState('')
   const [viewerAliasInput, setViewerAliasInput] = useState('')
   const [programTitleInput, setProgramTitleInput] = useState('')
@@ -1155,6 +1171,7 @@ const ControlPage = () => {
     silenceNode: null,
     resumeListenersCleanup: null,
   })
+  const transcriptionAttemptRef = useRef(0)
   const projectorLayoutInputValues = useMemo(
     () => ({
       fontSizePercent: String(projectorLayout.fontSizePercent),
@@ -1665,6 +1682,7 @@ const ControlPage = () => {
   )
 
   const releaseMicrophoneCapture = () => {
+    transcriptionAttemptRef.current++
     const state = captureStateRef.current
     if (!state) return
 
@@ -2320,6 +2338,7 @@ const ControlPage = () => {
 
   const handleShiftCurrentIndex = useCallback(
     (delta) => {
+      if (sessionMeta?.captionMode === 'live') return
       const normalizedDelta = Number(delta)
       if (!Number.isFinite(normalizedDelta) || normalizedDelta === 0) return
       if (!socketRef.current || !sessionId) return
@@ -2367,6 +2386,7 @@ const ControlPage = () => {
       requestCueScroll,
       sessionId,
       subtitleControlMode,
+      sessionMeta?.captionMode,
     ],
   )
 
@@ -2511,8 +2531,16 @@ const ControlPage = () => {
       return true
     }
 
+    let attemptId, acquiredStream, pendingContext, pendingCleanup
+    const discardPendingCapture = () => {
+      if (pendingContext && pendingContext === captureStateRef.current.audioContext) return
+      pendingCleanup?.()
+      pendingContext?.close().catch(() => {})
+      acquiredStream?.getTracks().forEach(track => track.stop())
+    }
     try {
       releaseMicrophoneCapture()
+      attemptId = transcriptionAttemptRef.current
       setStatus({
         kind: 'info',
         message: autoFollow
@@ -2536,6 +2564,8 @@ const ControlPage = () => {
           channelCount: { ideal: 2 },
         },
       })
+      acquiredStream = stream
+      if (attemptId !== transcriptionAttemptRef.current) { discardPendingCapture(); return false }
 
       const AudioContextClass = window.AudioContext || window.webkitAudioContext
       if (!AudioContextClass) {
@@ -2543,7 +2573,9 @@ const ControlPage = () => {
       }
 
       const audioContext = new AudioContextClass()
+      pendingContext = audioContext
       await audioContext.resume()
+      if (attemptId !== transcriptionAttemptRef.current) { discardPendingCapture(); return false }
 
       const sourceNode = audioContext.createMediaStreamSource(stream)
       const silenceNode = audioContext.createGain()
@@ -2554,6 +2586,7 @@ const ControlPage = () => {
       let lastAckDiagnosticAt = 0
 
       const sendAudioPacket = (packet) => {
+        if (attemptId !== transcriptionAttemptRef.current) return
         const socket = socketRef.current
         if (!socket?.connected || !sessionId) return
         socket.emit('transcription:audio', {
@@ -2581,6 +2614,7 @@ const ControlPage = () => {
       }
 
       const emitSamples = (sourceSamples) => {
+        if (attemptId !== transcriptionAttemptRef.current) return
         if (!sourceSamples?.length) return
         const socket = socketRef.current
         if (!socket || !sessionId) return
@@ -2638,6 +2672,7 @@ const ControlPage = () => {
         typeof AudioWorkletNodeClass === 'function'
       ) {
         await audioContext.audioWorklet.addModule(MIC_CAPTURE_WORKLET_URL.href)
+        if (attemptId !== transcriptionAttemptRef.current) { discardPendingCapture(); return false }
         const workletNode = new AudioWorkletNodeClass(
           audioContext,
           'mic-capture-processor',
@@ -2726,6 +2761,7 @@ const ControlPage = () => {
           handleAudioContextStateChange,
         )
       }
+      pendingCleanup = resumeListenersCleanup
       captureStateRef.current = {
         mediaStream: stream,
         audioContext,
@@ -2766,7 +2802,7 @@ const ControlPage = () => {
       if (startResult?.ok !== true) {
         throw new Error(startResult?.reason || '語音辨識服務未就緒')
       }
-      if (captureStateRef.current.audioContext !== audioContext) {
+      if (attemptId !== transcriptionAttemptRef.current || captureStateRef.current.audioContext !== audioContext) {
         throw new Error('麥克風收音已停止')
       }
       transcriptionReady = true
@@ -2791,6 +2827,8 @@ const ControlPage = () => {
       })
       return true
     } catch (error) {
+      discardPendingCapture()
+      if (attemptId !== undefined && attemptId !== transcriptionAttemptRef.current) return false
       autoStartedTranscriptionRef.current = false
       projectorStartedTranscriptionRef.current = false
       releaseMicrophoneCapture()
@@ -2807,6 +2845,56 @@ const ControlPage = () => {
       })
       return false
     }
+  }
+
+  const changeCaptionMode = async (mode, language) => {
+    if (!socketRef.current?.connected) throw new Error('尚未連上節目，請稍後再試')
+    const response = await new Promise((resolve, reject) => socketRef.current.timeout(5000).emit('caption:set-mode', {
+      sessionId, mode, language,
+    }, (error, result) => error ? reject(new Error('字幕模式切換逾時，請確認連線')) : resolve(result)))
+    if (!response?.ok) throw new Error(response?.reason || '無法切換字幕模式')
+    setSessionMeta(response.session)
+    return response.session
+  }
+
+  const handleEnterLiveCaptions = async () => {
+    if (captionSwitching) return
+    if (!await pendingLineSaveRef.current) return
+    setCaptionSwitching(true)
+    try {
+      setEditingModeEnabled(false); setEditingCell(null)
+      if (sessionMeta?.captionMode !== 'live') {
+        const state = await changeCaptionMode('live', liveLanguage || sessionMeta?.discussionLanguage || transcription.language || 'zh-TW')
+        releaseMicrophoneCapture()
+        await handleStartLiveTranscription({forceRestart: true, languageOverride: state.transcriptionLanguage})
+      } else {
+        await handleStartLiveTranscription({forceRestart: true, preserveTextOnRestart: true})
+      }
+    } catch (error) { setStatus({kind: 'error', message: error.message}) }
+    finally { setCaptionSwitching(false) }
+  }
+
+  const handleReturnScriptCaptions = async () => {
+    if (captionSwitching) return
+    if (!await pendingLineSaveRef.current) return
+    setCaptionSwitching(true)
+    try {
+      const state = await changeCaptionMode('script')
+      releaseMicrophoneCapture()
+      autoStartedTranscriptionRef.current = false; projectorStartedTranscriptionRef.current = false
+      if (state.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+        const started = await handleStartLiveTranscription({autoFollow: true, forceRestart: true, languageOverride: state.transcriptionLanguage})
+        if (!started) { setStatus({kind: 'error', message: '已返回劇本與保留的 CUE，但自動收音未啟動；請確認收音設定或切換手動跟戲。'}); return }
+      }
+      setStatus({kind: 'success', message: '已返回劇本字幕與保留的 CUE'})
+    } catch (error) { setStatus({kind: 'error', message: error.message}) }
+    finally { setCaptionSwitching(false) }
+  }
+
+  const handlePauseLiveCaptions = () => {
+    releaseMicrophoneCapture()
+    socketRef.current?.emit('transcription:stop', {sessionId, preserveText: true})
+    setStatus({kind: 'info', message: '已暫停收音，字幕保留；可繼續收音或返回劇本'})
   }
 
   const handleStopLiveTranscription = (options = {}) => {
@@ -3110,6 +3198,7 @@ const ControlPage = () => {
   }
 
   const handleLineTextDoubleClick = (event, index, languageId) => {
+    setEditingModeEnabled(true)
     event.stopPropagation()
     clearPendingLineClick()
     setRoleEditor(null)
@@ -4498,32 +4587,10 @@ const ControlPage = () => {
   })
 
   const handleProjectorDisplayModeChange = async (event) => {
-    if (!socketRef.current || !sessionId) return
     const nextDisplayMode = normalizeProjectorDisplayMode(event.target.value)
     if (nextDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION) {
-      const started = await handleStartLiveTranscription()
-      if (!started) return
-    } else if (
-      projectorStartedTranscriptionRef.current &&
-      subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO
-    ) {
-      handleStopLiveTranscription()
-    }
-
-    projectorDisplayModeDirtyRef.current = true
-    projectorDisplayModeDraftRef.current = nextDisplayMode
-    setProjectorDisplayMode(nextDisplayMode)
-    socketRef.current.emit('setProjectorDisplayMode', {
-      sessionId,
-      displayMode: nextDisplayMode,
-    })
-    setStatus({
-      kind: 'info',
-      message:
-        nextDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION
-          ? '投影端已切換為即時語音辨識模式'
-          : '投影端已切換為固定劇本字幕模式',
-    })
+      await handleEnterLiveCaptions()
+    } else await handleReturnScriptCaptions()
   }
 
   const handleResetProjectorLayout = () => {
@@ -4711,15 +4778,16 @@ const ControlPage = () => {
   }
 
   const currentLine = lines[liveCurrentIndex] || null
+  const isLiveOutput = sessionMeta?.captionMode === 'live'
   const editingModeLabel = editingModeEnabled && lines.length > 0
     ? currentIndex === liveCurrentIndex
       ? '編輯模式已開啟，清單暫停跟隨 CUE。'
       : `編輯模式：停留在第 ${currentIndex + 1} 行，直播 CUE 在第 ${liveCurrentIndex + 1} 行。`
     : ''
   const comparisonLanguagePreviewNote = comparisonLanguage
-    ? `${comparisonLanguage.name} 欄顯示目前字幕清單結果；要更新內容請在左側輸入區重新解析。`
+    ? `${comparisonLanguage.name} 欄顯示目前字幕清單結果；要更新內容請開啟「工具 → 劇本準備與解析」重新解析。`
     : comparisonLanguageId === ALL_LANGUAGES_OPTION_ID
-      ? '全部語言欄顯示目前字幕清單結果；要更新內容請在左側輸入區重新解析。'
+      ? '全部語言欄顯示目前字幕清單結果；要更新內容請開啟「工具 → 劇本準備與解析」重新解析。'
     : ''
   rowRefs.current = []
 
@@ -4757,8 +4825,10 @@ const ControlPage = () => {
   const projectorPreviewTexts =
     !displayEnabled
       ? []
+    : isLiveOutput
+      ? [{id: 'live', text: transcription.text?.trim() || '等待即時字幕'}]
     : currentLine?.type === 'direction'
-        ? [{ id: 'direction', text: '舞台指示不投影' }]
+        ? []
         : currentLine
           ? projectorPreviewLanguages
               .map((language) => ({
@@ -4806,7 +4876,7 @@ const ControlPage = () => {
     '--projector-preview-top': `${50 + projectorLayout.offsetY * 0.9}%`,
   }
   const previewRoleColor =
-    roleColorEnabled && currentLine?.type !== 'direction'
+    !isLiveOutput && roleColorEnabled && currentLine?.type !== 'direction'
       ? roleToColor(currentLine?.role)
       : ''
   const canMoveToPreviousLine = lines.length > 0 && liveCurrentIndex > 0
@@ -4840,54 +4910,36 @@ const ControlPage = () => {
 
   return (
     <div
-      className={`control-page ${
-        leftPanelCollapsed ? 'left-panel-collapsed' : ''
-      } ${rightPanelCollapsed ? 'right-panel-collapsed' : ''}`}
+      className={`control-page cue-workspace ${editingModeEnabled ? 'editing-layout' : ''} ${rightPanelCollapsed ? 'right-panel-collapsed' : ''}`}
+      style={{'--cue-language-columns': visibleLanguages.length}}
     >
-      <aside className={`control-sidebar ${leftPanelCollapsed ? 'collapsed' : ''}`}>
-        <div className="control-sidebar-fixed">
-          <div className="sidebar-toggle-row">
-            <button
-              type="button"
-              className="subtle-button"
-              onClick={() => setLeftPanelCollapsed((prev) => !prev)}
-            >
-              {leftPanelCollapsed ? '展開控制端' : '收合控制端'}
-            </button>
-            {!leftPanelCollapsed && (
-              <button
-                type="button"
-                className="subtle-button"
-                onClick={() => navigate('/')}
-              >
-                返回首頁
-              </button>
-            )}
-          </div>
-
-          {!leftPanelCollapsed && (
-            <header className="control-header">
-              <div className="session-title-row">
-                <div>
-                  <h1>{sessionMeta?.title || '未命名節目'}</h1>
-                  <p className="input-note">
-                    {sessionMeta?.status === 'ended'
-                      ? '已停止外部字幕輸出；檢視端與投影端網址仍可使用'
-                      : '節目啟用中'}
-                  </p>
-                </div>
-                <span className={`session-state-badge ${sessionMeta?.status || 'active'}`}>
-                  {sessionMeta?.status === 'ended' ? '已結束' : '進行中'}
-                </span>
-              </div>
-            </header>
-          )}
+      <header className="workspace-header">
+        <div className="workspace-identity">
+          <button type="button" className="subtle-button" onClick={() => navigate('/')}>字幕機</button>
+          <h1>{sessionMeta?.title || '未命名節目'}</h1>
+          <label className="workspace-scene">場次
+            <select aria-label="目前控制場次" value={selectedCellId || ''} onChange={event => handleSelectCell(event.target.value)}>
+              {cells.map(cell => <option key={cell.id} value={cell.id}>{cell.name}</option>)}
+            </select>
+          </label>
         </div>
-
-        {!leftPanelCollapsed && (
-          <>
-            <div className="control-sidebar-scroll">
-              <ControlSection title="節目" defaultOpen>
+        <nav className="workspace-nav" aria-label="控制端工具">
+          <button type="button" className={`subtle-button ${editingModeEnabled ? 'active' : ''}`} aria-pressed={editingModeEnabled}
+            onClick={() => handleEditingModeChange({target: {checked: !editingModeEnabled}})}>{editingModeEnabled ? '完成編輯' : '編輯'}</button>
+          <div ref={toolsRef} className="workspace-tools">
+            <button type="button" className="subtle-button" aria-expanded={toolsOpen} onClick={() => setToolsOpen(previous => !previous)}>工具 ▾</button>
+            {toolsOpen && <div className="workspace-tools-menu">
+              {TOOL_PANELS.map(panel => <button type="button" key={panel} onClick={() => {setActivePanel(panel); setToolsOpen(false)}}>{WORKSPACE_PANELS[panel]}</button>)}
+            </div>}
+          </div>
+          <button type="button" className="subtle-button" onClick={() => setActivePanel('settings')}>設定</button>
+          <button type="button" className="subtle-button" onClick={() => setActivePanel('share')}>分享</button>
+          <button type="button" className="subtle-button" aria-pressed={!rightPanelCollapsed} onClick={() => setRightPanelCollapsed(previous => !previous)}>預覽</button>
+        </nav>
+      </header>
+      <WorkspaceDialog open={Boolean(activePanel)} title={WORKSPACE_PANELS[activePanel] || '設定'} onClose={() => setActivePanel(null)}>
+        {status.message && <p className={`workspace-panel-notice ${status.kind === 'error' ? 'recording-error' : ''}`} role="status">{status.message}</p>}
+<ControlSection panel="settings" activePanel={activePanel} title="節目" defaultOpen>
                 <div className="input-group">
                   <label htmlFor="program-title">節目名稱</label>
                   <div className="viewer-alias-editor">
@@ -4904,8 +4956,7 @@ const ControlPage = () => {
                   </div>
                 </div>
               </ControlSection>
-
-              <ControlSection title="系統連線" defaultOpen>
+<ControlSection panel="settings" activePanel={activePanel} title="系統連線" defaultOpen>
               <div className="input-group">
                 <label htmlFor="openai-key">OpenAI API Key</label>
                 <input
@@ -4925,8 +4976,7 @@ const ControlPage = () => {
                 </label>
               </div>
             </ControlSection>
-
-            <ControlSection title="分享與投影連結" defaultOpen>
+<ControlSection panel="share" activePanel={activePanel} title="分享與投影連結" defaultOpen>
               <div className="input-group">
                 <label htmlFor="viewer-alias">目前場次觀眾網址</label>
                 <p className="input-note">
@@ -5003,8 +5053,7 @@ const ControlPage = () => {
                 </span>
               </div>
             </ControlSection>
-
-            <ControlSection title="場次、角色與語言" defaultOpen>
+<ControlSection panel="settings" activePanel={activePanel} title="場次、角色與語言" defaultOpen>
             <div className="input-group">
               <div className="section-header-inline">
                 <label>場次</label>
@@ -5136,40 +5185,9 @@ const ControlPage = () => {
               </span>
             </div>
 
-            <div className="input-group">
-              <label>外部字幕預設語言</label>
-              <div className="language-default-grid">
-                <label className="input-group" htmlFor="viewer-default-language">
-                  <span>檢視端預設</span>
-                  <select
-                    id="viewer-default-language"
-                    value={viewerDefaultLanguageId}
-                    onChange={handleViewerDefaultLanguageChange}
-                  >
-                    {languages.map((language) => (
-                      <option key={language.id} value={language.id}>
-                        {language.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <ProjectorLanguageSettings
-                  languages={languages}
-                  mode={selectedProjectorLanguageMode}
-                  languageId={projectorDefaultLanguageId}
-                  secondaryLanguageId={projectorSecondaryLanguageId}
-                  busy={projectorLanguagesSaving}
-                  onLanguagesChange={handleProjectorLanguagesChange}
-                  onModeChange={handleProjectorLanguageModeChange}
-                />
-              </div>
-              <span className="input-note">
-                檢視端一次顯示一種語言，觀眾可自行切換；投影端最多兩種，可任選上、下排語言，並同步套用到預覽與投影。
-              </span>
-            </div>
-            </ControlSection>
 
-            <ControlSection title="貼上與解析" defaultOpen={!lines.length}>
+            </ControlSection>
+<ControlSection panel="script" activePanel={activePanel} title="貼上與解析" defaultOpen>
             <div className="input-group script-parse-model-card">
               <label htmlFor="script-parse-model">劇本拆解模型</label>
               <select
@@ -5246,8 +5264,7 @@ const ControlPage = () => {
               </form>
             ))}
             </ControlSection>
-
-            <ControlSection title="匯入與備份">
+<ControlSection panel="backup" activePanel={activePanel} title="匯入與備份" defaultOpen>
             <div className="input-group">
               <label>翻譯用簡易 JSON</label>
               <div className="json-actions">
@@ -5338,14 +5355,13 @@ const ControlPage = () => {
               </span>
             </div>
             </ControlSection>
-
-            <ControlSection title="彩排錄音與音訊跟戲">
+<ControlSection panel="recordings" activePanel={activePanel} title="彩排錄音與音訊跟戲" defaultOpen>
               <RecordingsPanel sessionId={sessionId} cellId={selectedCellId} lines={lines}
-                referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active}
+                referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active} visible={activePanel === 'recordings'}
                 performanceLanguage={transcription.language || 'zh-TW'} sourceLanguages={transcription.sourceLanguages}
                 followingScript={transcription.followingScript || sessionMeta?.followingScript} languages={languages}/>
             </ControlSection>
-            <ControlSection title="即時語音">
+<ControlSection panel={['follow', 'live']} activePanel={activePanel} title={activePanel === 'live' ? '即時字幕與座談設定' : '自動跟戲與收音設定'} defaultOpen>
             <div className="input-group transcription-panel">
               <label>即時語音辨識（雲端）</label>
               <label htmlFor="transcription-provider">辨識引擎</label>
@@ -5371,12 +5387,15 @@ const ControlPage = () => {
                 <option value="deepgram">Deepgram Nova-3（建議）</option>
                 <option value="openai">OpenAI（備援）</option>
               </select>
-              <label htmlFor="transcription-source-language">演出語言（現場辨識）</label>
+              <label htmlFor="transcription-source-language">{activePanel === 'live' ? '即時字幕／座談語言' : '演出語言（現場辨識）'}</label>
               <select
                 id="transcription-source-language"
-                value={transcription.language || 'zh-TW'}
+                value={activePanel === 'live' && !isLiveOutput ? liveLanguage || sessionMeta?.discussionLanguage || transcription.language || 'zh-TW' : transcription.language || 'zh-TW'}
                 disabled={transcription.status === 'connecting'}
-                onChange={handleTranscriptionLanguageChange}
+                onChange={event => {
+                  if (activePanel === 'live') setLiveLanguage(event.target.value)
+                  if (activePanel !== 'live' || isLiveOutput) void handleTranscriptionLanguageChange(event)
+                }}
               >
                 {transcription.sourceLanguages.map((language) => (
                   <option key={language.code} value={language.code}>
@@ -5385,8 +5404,10 @@ const ControlPage = () => {
                 ))}
               </select>
               <span className="input-note">
-                現場辨識、文字跟戲與錄音匯入預設使用此語言。辨識中切換會保留已完成字幕，重新連線與定位。
+                {activePanel === 'live' ? '座談語言會與演出設定分開保存；返回劇本時恢復原演出語言與 CUE。'
+                  : '現場辨識、文字跟戲與錄音匯入預設使用此語言。辨識中切換會保留已完成字幕，重新連線與定位。'}
               </span>
+              <div className="input-group" hidden={activePanel !== 'follow'}>
               <label htmlFor="following-script-language">跟戲使用的劇本欄</label>
               <select id="following-script-language"
                 value={transcription.followingScript?.explicit ? transcription.followingScript.languageId || '' : ''}
@@ -5395,7 +5416,8 @@ const ControlPage = () => {
                 {languages.map(language => <option key={language.id} value={language.id}>{language.name}</option>)}
               </select>
               {transcription.followingScript?.message && <p className="input-note" role="status">{transcription.followingScript.message}</p>}
-              <fieldset className="translation-language-access">
+              </div>
+              <fieldset className="translation-language-access" hidden={activePanel !== 'live'}>
                 <legend>觀眾可選擇的即時翻譯</legend>
                 <div className="translation-language-access-grid">
                   {transcription.translationLanguages
@@ -5462,13 +5484,15 @@ const ControlPage = () => {
                 />
                 辨認講者
               </label>
+              {activePanel === 'live' && <p className="input-note">啟用後，觀眾與投影同步改為即時字幕；原劇本 CUE 保留，返回時恢復。</p>}
+              {activePanel === 'live' && isLiveOutput && <button type="button" className="subtle-button" disabled={captionSwitching} onClick={handleReturnScriptCaptions}>停止即時字幕並返回劇本</button>}
               <div className="transcription-actions">
                 <button
                   type="button"
-                  onClick={handleStartLiveTranscription}
-                  disabled={transcriptionBusy}
+                  onClick={activePanel === 'live' ? handleEnterLiveCaptions : () => handleStartLiveTranscription({autoFollow: true})}
+                  disabled={activePanel === 'live' ? captionSwitching || (isLiveOutput && transcriptionBusy) : transcriptionBusy}
                 >
-                  {transcription.status === 'connecting'
+                  {activePanel === 'live' && !isLiveOutput ? '切換並開始即時字幕' : transcription.status === 'connecting'
                     ? '連線中…'
                     : transcription.active
                       ? '辨識中'
@@ -5477,10 +5501,10 @@ const ControlPage = () => {
                 <button
                   type="button"
                   className="subtle-button"
-                  onClick={handleStopLiveTranscription}
-                  disabled={!transcriptionBusy}
+                  onClick={activePanel === 'live' ? handlePauseLiveCaptions : () => handleStopLiveTranscription({autoFollow: true})}
+                  disabled={!transcriptionBusy || (activePanel === 'live' && !isLiveOutput)}
                 >
-                  停止收音
+                  {activePanel === 'live' ? '暫停收音' : '停止收音'}
                 </button>
               </div>
               <div className="transcription-meta">
@@ -5529,7 +5553,7 @@ const ControlPage = () => {
                   ))}
               </div>
               <div
-                className={`transcription-preview ${
+                hidden={activePanel !== 'live'} className={`transcription-preview ${
                   transcription.isFinal ? 'final' : 'partial'
                 }`}
               >
@@ -5537,17 +5561,264 @@ const ControlPage = () => {
               </div>
             </div>
             </ControlSection>
-            </div>
-
-          </>
-        )}
-      </aside>
-
+<ControlSection panel="projection" activePanel={activePanel} title="外部字幕語言" defaultOpen><div className="input-group">
+              <label>外部字幕預設語言</label>
+              <div className="language-default-grid">
+                <label className="input-group" htmlFor="viewer-default-language">
+                  <span>檢視端預設</span>
+                  <select
+                    id="viewer-default-language"
+                    value={viewerDefaultLanguageId}
+                    onChange={handleViewerDefaultLanguageChange}
+                  >
+                    {languages.map((language) => (
+                      <option key={language.id} value={language.id}>
+                        {language.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <ProjectorLanguageSettings
+                  languages={languages}
+                  mode={selectedProjectorLanguageMode}
+                  languageId={projectorDefaultLanguageId}
+                  secondaryLanguageId={projectorSecondaryLanguageId}
+                  busy={projectorLanguagesSaving}
+                  onLanguagesChange={handleProjectorLanguagesChange}
+                  onModeChange={handleProjectorLanguageModeChange}
+                />
+              </div>
+              <span className="input-note">
+                檢視端一次顯示一種語言，觀眾可自行切換；投影端最多兩種，可任選上、下排語言，並同步套用到預覽與投影。
+              </span>
+            </div></ControlSection>
+<ControlSection panel="projection" activePanel={activePanel} title="角色與音樂顯示" defaultOpen><div className="projector-preview-toggles">
+                <label className="checkbox-row viewer-preview-toggle">
+                  <input
+                    type="checkbox"
+                    checked={roleColorEnabled}
+                    onChange={handleToggleRoleColorEnabled}
+                  />
+                  顏色分辨角色
+                </label>
+                <label className="checkbox-row viewer-preview-toggle">
+                  <input
+                    type="checkbox"
+                    checked={musicEffectEnabled}
+                    onChange={handleToggleMusicEffectEnabled}
+                  />
+                  開啟「此段有音樂」效果
+                </label>
+              </div></ControlSection>
+<ControlSection panel="projection" activePanel={activePanel} title="投影版面與輸出" defaultOpen><div className="projector-preview-controls">
+              <div className="projector-control-panel projector-control-panel-inline">
+                <label className="projector-control-select">
+                  <span>投影顯示內容</span>
+                  <select
+                    value={projectorDisplayMode}
+                    onChange={handleProjectorDisplayModeChange}
+                  >
+                    <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
+                      固定劇本字幕
+                    </option>
+                    <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
+                      即時語音辨識
+                    </option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="subtle-button"
+                  onClick={handleResetProjectorLayout}
+                >
+                  重設投影版面
+                </button>
+              </div>
+              <div className="projector-control-grid">
+                <div className="projector-control-panel">
+                  <span className="projector-control-label">字體大小</span>
+                  <div className="projector-stepper">
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'fontSizePercent',
+                        -PROJECTOR_FONT_STEP,
+                      )}
+                    >
+                      −
+                    </button>
+                    <label className="projector-layout-input-wrap">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[+-]?[0-9]*"
+                        className="projector-layout-input"
+                        aria-label="字體大小百分比"
+                        value={projectorLayoutInputDrafts.fontSizePercent}
+                        onChange={(event) =>
+                          handleProjectorLayoutInputChange(
+                            'fontSizePercent',
+                            event,
+                          )
+                        }
+                        onFocus={() =>
+                          handleProjectorLayoutInputFocus('fontSizePercent')
+                        }
+                        onBlur={() =>
+                          handleProjectorLayoutInputBlur('fontSizePercent')
+                        }
+                        onKeyDown={handleProjectorLayoutInputKeyDown}
+                      />
+                      <span>%</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'fontSizePercent',
+                        PROJECTOR_FONT_STEP,
+                      )}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <div className="projector-control-panel">
+                  <span className="projector-control-label">字幕寬度</span>
+                  <div className="projector-stepper">
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'widthPercent',
+                        -PROJECTOR_WIDTH_STEP,
+                      )}
+                    >
+                      −
+                    </button>
+                    <label className="projector-layout-input-wrap">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[+-]?[0-9]*"
+                        className="projector-layout-input"
+                        aria-label="字幕寬度百分比"
+                        value={projectorLayoutInputDrafts.widthPercent}
+                        onChange={(event) =>
+                          handleProjectorLayoutInputChange('widthPercent', event)
+                        }
+                        onFocus={() =>
+                          handleProjectorLayoutInputFocus('widthPercent')
+                        }
+                        onBlur={() =>
+                          handleProjectorLayoutInputBlur('widthPercent')
+                        }
+                        onKeyDown={handleProjectorLayoutInputKeyDown}
+                      />
+                      <span>%</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      {...getProjectorRepeatHandlers(
+                        'widthPercent',
+                        PROJECTOR_WIDTH_STEP,
+                      )}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <div className="projector-control-panel">
+                  <span className="projector-control-label">字幕位置</span>
+                  <div className="projector-position-readout">
+                    左右 {projectorLayout.offsetX} / 上下 {projectorLayout.offsetY}
+                  </div>
+                  <div className="projector-axis-pad">
+                    <span />
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往上移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetY',
+                        -PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      ↑
+                    </button>
+                    <span />
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往左移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetX',
+                        -PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      ←
+                    </button>
+                    <div className="projector-axis-center">位置</div>
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往右移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetX',
+                        PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      →
+                    </button>
+                    <span />
+                    <button
+                      type="button"
+                      className="projector-step-button"
+                      aria-label="字幕往下移"
+                      {...getProjectorRepeatHandlers(
+                        'offsetY',
+                        PROJECTOR_POSITION_STEP,
+                      )}
+                    >
+                      ↓
+                    </button>
+                    <span />
+                  </div>
+                </div>
+              </div>
+            </div></ControlSection>
+<ControlSection panel="settings" activePanel={activePanel} title="快捷鍵與操作說明" defaultOpen><div className="control-instructions">
+              • 上下方向鍵切換字幕
+              <br />
+              • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 重做
+              <br />
+              • 觀眾進入檢視端會先套用預設語言，之後仍可自行切換語言與字級
+            </div></ControlSection>
+<ControlSection panel="settings" activePanel={activePanel} title="活動管理" defaultOpen>
+  <p>演後座談可由工具開啟；整場活動結束時才停止外部字幕輸出。</p>
+  <button type="button" className="danger-button" onClick={handleEndSession} disabled={sessionMeta?.status === 'ended'}>結束整場活動</button>
+</ControlSection>
+<ControlSection panel="script" activePanel={activePanel} title="字幕管理" defaultOpen>            <button
+              type="button"
+              className="subtle-button danger-button"
+              onClick={handleClearCurrentCellSubtitles}
+              disabled={
+                clearingSubtitles ||
+                parsingPrimary ||
+                Boolean(parsingLanguageId) ||
+                lines.length === 0
+              }
+            >
+              {clearingSubtitles ? '清空中…' : '清空字幕'}
+            </button></ControlSection>
+      </WorkspaceDialog>
       <section className="script-panel">
         <header className="script-header">
           <div className="script-heading">
             <div className="script-title-line">
-              <h2>{selectedCell?.name || '場次字幕清單'}</h2>
+              <h2>{isLiveOutput ? editingModeEnabled ? '劇本編輯（即時字幕持續輸出）' : '即時字幕' : '字幕格'}</h2>
               <span className="script-cue-pill">
                 {lines.length
                   ? `CUE ${liveCurrentIndex + 1} / ${lines.length}`
@@ -5564,8 +5835,8 @@ const ControlPage = () => {
               <small className="script-music-hint">{musicSelectionHint}</small>
             </div>
           </div>
-          <div className="script-toolbar">
-            <label className="script-compare-select" htmlFor="comparison-language-select">
+          <div className="workspace-follow-summary">
+            <label className="script-compare-select" htmlFor="comparison-language-select" hidden={isLiveOutput && !editingModeEnabled}>
               <span>平行檢視</span>
               <select
                 id="comparison-language-select"
@@ -5585,16 +5856,13 @@ const ControlPage = () => {
                 ))}
               </select>
             </label>
-            <label
-              className={`script-edit-mode-toggle ${editingModeEnabled ? 'active' : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={editingModeEnabled}
-                onChange={handleEditingModeChange}
-              />
-              <span>編輯模式</span>
-            </label>
+            <span>{isLiveOutput ? '座談語言' : '演出語言'}：{transcription.sourceLanguages.find(language => language.code === transcription.language)?.name || '中文'}</span>
+            {!isLiveOutput && <span>跟戲劇本：{transcription.followingScript?.languageName || '尚未指定'}</span>}
+            <button type="button" className="subtle-button" onClick={() => setActivePanel(isLiveOutput ? 'live' : 'follow')}>{isLiveOutput ? '即時字幕設定' : '跟戲設定'}</button>
+          </div>
+          <div className="script-toolbar" hidden={!editingModeEnabled}>
+
+
             <div className="script-history-controls" role="group" aria-label="編輯紀錄">
               <button
                 type="button"
@@ -5621,231 +5889,26 @@ const ControlPage = () => {
             <button type="button" className="subtle-button" onClick={handleAddLine}>
               新增字幕格
             </button>
-            <button
-              type="button"
-              className="subtle-button danger-button"
-              onClick={handleClearCurrentCellSubtitles}
-              disabled={
-                clearingSubtitles ||
-                parsingPrimary ||
-                Boolean(parsingLanguageId) ||
-                lines.length === 0
-              }
-            >
-              {clearingSubtitles ? '清空中…' : '清空字幕'}
-            </button>
+
           </div>
         </header>
 
-        <div className="script-live-controls">
-          <div className="control-actions">
-            <div
-              className="subtitle-mode-switch"
-              aria-label="字幕控制模式"
-              title={`目前為${subtitleControlModeLabel}`}
-            >
-              <button
-                type="button"
-                className={`subtitle-mode-button ${
-                  subtitleControlMode === SUBTITLE_CONTROL_MODES.MANUAL
-                    ? 'active'
-                    : ''
-                }`}
-                onClick={() =>
-                  handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.MANUAL)
-                }
-              >
-                手動
-              </button>
-              <button
-                type="button"
-                className={`subtitle-mode-button ${
-                  subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
-                    ? 'active'
-                    : ''
-                }`}
-                onClick={() =>
-                  handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.AUTO)
-                }
-              >
-                自動
-              </button>
-            </div>
-            <button
-              type="button"
-              className="subtle-button audio-diagnostics-toggle"
-              aria-haspopup="dialog"
-              onClick={() => setAudioDiagnosticsOpen(true)}
-            >
-              狀態詳情
-            </button>
-            <button
-              type="button"
-              className={`toggle-button ${displayEnabled ? 'active' : ''}`}
-              onClick={handleToggleDisplay}
-            >
-              {displayEnabled ? '遮蔽外部字幕' : '重新顯示字幕'}
-            </button>
-            <button
-              type="button"
-              className="subtle-button"
-              onClick={() => handleShiftCurrentIndex(-1)}
-              disabled={!canMoveToPreviousLine}
-            >
-              上一句
-            </button>
-            <button
-              type="button"
-              className="subtle-button"
-              onClick={() => handleShiftCurrentIndex(1)}
-              disabled={!canMoveToNextLine}
-            >
-              下一句
-            </button>
-            <button
-              type="button"
-              className="subtle-button danger-button"
-              onClick={handleEndSession}
-              disabled={sessionMeta?.status === 'ended'}
-            >
-              停止外部字幕
-            </button>
-          </div>
-          <ControlStatusSummary
-            automatic={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO}
-            status={`${autoFollowStatusLabel} · ${transcriptionStatusLabel}`}
-            audio={audioBriefLabel}
-            progress={autoFollow.located && Number.isInteger(autoFollow.progressIndex)
-              ? `第 ${autoFollow.progressIndex + 1} 格 · ${Math.round(autoFollow.progress * 100)}%`
-              : ''}
-            confidence={autoFollowConfidenceLabel}
-            hint={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
-              ? transcription.error || (
-                Number.isInteger(autoFollow.predictedIndex)
-                  ? `已預推第 ${autoFollow.predictedIndex + 1} 格，等待核對`
-                  : Number.isInteger(autoFollow.preparedIndex)
-                    ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
-                    : autoFollow.message
-              )
-              : ''}
-            error={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && Boolean(transcription.error)}
-          />
-          <div
-            className={`status-bar ${
-              status.kind === 'success'
-                ? 'status-success'
-                : status.kind === 'error'
-                  ? 'status-error'
-                  : ''
-            }`}
-          >
-            <span title={status.message}>{status.message}</span>
-          </div>
-          <ControlStatusDetails open={audioDiagnosticsOpen} onClose={() => setAudioDiagnosticsOpen(false)}>
-            <div className="control-status-messages">
-              <p className={status.kind === 'error' ? 'control-status-error' : ''}>{status.message || '尚無操作訊息'}</p>
-              {transcription.error && <p className="control-status-error">{transcription.error}</p>}
-              {subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && (
-                <>
-                  <p>{autoFollowStatusLabel} · {transcriptionStatusLabel}{autoFollowConfidenceLabel}</p>
-                  {autoFollow.message && <p>{autoFollow.message}</p>}
-                  {autoFollow.followingScript && <p>演出語言：{transcription.sourceLanguages.find(language => language.code === autoFollow.followingScript.language)?.name || autoFollow.followingScript.language}
-                    {` · 跟戲劇本：${autoFollow.followingScript.languageName || '尚未指定'}`}
-                    {autoFollow.followingScript.message && ` · ${autoFollow.followingScript.message}`}
-                  </p>}
-                  {autoFollow.referenceAudio && <p>錄音比對：{autoFollow.referenceAudio.name || '參考錄音'}
-                    {Number.isInteger(autoFollow.referenceAudio.index) && ` · 音訊第 ${autoFollow.referenceAudio.index + 1} 格`}
-                    {Number.isFinite(autoFollow.referenceAudio.referenceSeconds) && ` · 錄音 ${autoFollow.referenceAudio.referenceSeconds.toFixed(2)} 秒`}
-                    {Number.isInteger(autoFollow.lastCandidateIndex) && ` · 文字候選第 ${autoFollow.lastCandidateIndex + 1} 格`}
-                    {autoFollow.referenceAudio.error && ` · ${autoFollow.referenceAudio.error}`}
-                  </p>}
-                  {Number.isInteger(autoFollow.sequenceIndex) && <p>順序跟隨：保留第 {autoFollow.sequenceIndex + 1} 格位置，持續核對後續台詞。</p>}
-                  <p>全文校正：{autoFollow.correctionStatus === 'verified' ? '已核對位置' : autoFollow.correctionStatus === 'pending' ? '候選位置待確認' : '等待明確文字'}{autoFollow.correctionCandidates?.length > 0 && `（${autoFollow.correctionCandidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}）`}</p>
-                  {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</p>}
-                  {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && <p>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</p>}
-                  {Number.isInteger(autoFollow.preparedIndex) && <p>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</p>}
-                  {autoFollow.status === 'searching' && autoFollow.candidates?.length > 1 && <p>核對位置：{autoFollow.candidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}</p>}
-                  {autoFollow.lastCandidateText && <p>候選字幕：{autoFollow.lastCandidateText}</p>}
-                </>
-              )}
-            </div>
-            {audioDiagnosticsVisible && (
-              <div className="audio-diagnostics-panel">
-                <div>
-                  <span>前端麥克風</span>
-                  <strong>{micDiagnostics.active ? '已啟動' : '未啟動'}</strong>
-                </div>
-                <div>
-                  <span>前端音量</span>
-                  <strong>{micLevelLabel}</strong>
-                </div>
-                <div>
-                  <span>前端送出</span>
-                  <strong>{formatRelativeSeconds(micDiagnostics.lastSentAt)}</strong>
-                </div>
-                <div>
-                  <span>Socket 連線</span>
-                  <strong>{micDiagnostics.socketConnected ? '已連線' : '未連線'}</strong>
-                </div>
-                <div>
-                  <span>後端 ack</span>
-                  <strong>{formatRelativeSeconds(micDiagnostics.lastAckAt)}</strong>
-                </div>
-                <div>
-                  <span>ack 音量</span>
-                  <strong>{backendAckLevelLabel}</strong>
-                </div>
-                <div>
-                  <span>拒收原因</span>
-                  <strong>{micDiagnostics.lastRejectReason || '無'}</strong>
-                </div>
-                <div>
-                  <span>後端音訊</span>
-                  <strong>{formatRelativeSeconds(autoFollow.lastAudioAt)}</strong>
-                </div>
-                <div>
-                  <span>後端音量</span>
-                  <strong>{backendLevelLabel}</strong>
-                </div>
-                <div>
-                  <span>觸發門檻</span>
-                  <strong>{autoFollowTriggerThreshold.toFixed(3)}</strong>
-                </div>
-                <div>
-                  <span>最近觸發</span>
-                  <strong>{formatRelativeSeconds(autoFollow.lastOnsetAt)}</strong>
-                </div>
-                <div>
-                  <span>辨識狀態</span>
-                  <strong>{transcriptionStatusLabel}</strong>
-                </div>
-                <div>
-                  <span>最近換格依據</span>
-                  <strong>{{ audio: '錄音音訊確認', onset: '起音預推', transcript: '文字確認', correction: '跳詞校正', silence: '靜默清除台詞' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
-                </div>
-                <div>
-                  <span>辨識結果抵達</span>
-                  <strong>{formatRelativeSeconds(autoFollow.lastTranscriptReceivedAt)}</strong>
-                </div>
-                {[
-                  ['辨識落後音訊約', autoFollow.lastTranscriptAudioLagMs],
-                  ['文字定位耗時', autoFollow.lastAlignmentMs],
-                  ['起音偵測耗時', autoFollow.lastDecision?.onsetDetectionMs],
-                  ['觀眾顯示回報往返', autoFollow.lastDecision?.displayAckMs?.viewer],
-                  ['投影顯示回報往返', autoFollow.lastDecision?.displayAckMs?.projector],
-                  ['提詞顯示回報往返', autoFollow.lastDecision?.displayAckMs?.prompter],
-                ].map(([label, value]) => (
-                  <div key={label}>
-                    <span>{label}</span>
-                    <strong>{Number.isFinite(value) ? `${Math.round(value)} ms` : '尚無資料'}</strong>
-                  </div>
-                ))}
-              </div>
-            )}
-          </ControlStatusDetails>
-        </div>
 
-        <div className="script-list">
+
+        {isLiveOutput && !editingModeEnabled && <div className="workspace-live-captions" aria-live="polite">
+          <div className="workspace-live-heading"><h2>座談內容</h2><span>劇本位置保留在 CUE {(sessionMeta?.resumeCue ?? liveCurrentIndex) + 1}</span></div>
+          {(transcription.liveEntries?.length ? transcription.liveEntries : transcription.text?.trim()
+            ? transcription.text.split('\n').filter(Boolean).map((text, index) => ({id: index, text, isFinal: transcription.isFinal})) : [])
+            .map((entry, index) => <article key={entry.id || index} className={`workspace-live-caption ${entry.isFinal ? 'final' : 'partial'}`}>
+              <small>{Number.isInteger(entry.speakerId) ? `講者 ${entry.speakerId + 1} · ` : ''}{entry.isFinal ? '已確認' : '辨識中'}</small><p>{entry.text}</p>
+            </article>)}
+          {!transcription.text?.trim() && <p className="empty-hint">{transcription.active ? '收音中，等待發言…' : '尚未收音；啟動後將顯示即時字幕'}</p>}
+          {transcription.error && <p className="recording-error" role="alert">{transcription.error}</p>}
+        </div>}
+        <div className="script-column-heading" hidden={isLiveOutput && !editingModeEnabled}>
+          <span>字幕格</span><div>{visibleLanguages.map(language => <span key={language.id}>{language.name}</span>)}</div>
+        </div>
+        <div className="script-list" hidden={isLiveOutput && !editingModeEnabled}>
           {lines.length === 0 && (
             <div className="empty-state">
               <p className="empty-hint">
@@ -5911,6 +5974,7 @@ const ControlPage = () => {
               >
                 <div className="script-line-header">
                   <div className="script-line-tags">
+                    <span className="cue-number">{String(index + 1).padStart(3, '0')}</span>
                     <span
                       className={`script-line-type ${
                         lineType === 'direction'
@@ -6148,6 +6212,211 @@ const ControlPage = () => {
             )
           })}
         </div>
+<div className="script-live-controls">
+          <div className="control-actions">
+            {isLiveOutput && <>
+              <button type="button" disabled={captionSwitching || transcriptionBusy} onClick={handleEnterLiveCaptions}>{transcriptionBusy ? '收音中' : transcription.text?.trim() ? '繼續收音' : '開始收音'}</button>
+              <button type="button" className="subtle-button" disabled={!transcriptionBusy} onClick={handlePauseLiveCaptions}>暫停收音</button>
+              <button type="button" className="subtle-button" disabled={captionSwitching} onClick={handleReturnScriptCaptions}>返回劇本字幕</button>
+            </>}
+            <div
+              hidden={isLiveOutput} className="subtitle-mode-switch"
+              aria-label="字幕控制模式"
+              title={`目前為${subtitleControlModeLabel}`}
+            >
+              <button
+                type="button"
+                className={`subtitle-mode-button ${
+                  subtitleControlMode === SUBTITLE_CONTROL_MODES.MANUAL
+                    ? 'active'
+                    : ''
+                }`}
+                onClick={() =>
+                  handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.MANUAL)
+                }
+              >
+                手動跟戲
+              </button>
+              <button
+                type="button"
+                className={`subtitle-mode-button ${
+                  subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+                    ? 'active'
+                    : ''
+                }`}
+                onClick={() =>
+                  handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.AUTO)
+                }
+              >
+                自動跟戲
+              </button>
+            </div>
+            <button
+              type="button"
+              className="subtle-button audio-diagnostics-toggle"
+              aria-haspopup="dialog"
+              onClick={() => setAudioDiagnosticsOpen(true)}
+            >
+              狀態詳情
+            </button>
+            <button
+              type="button"
+              className={`toggle-button ${displayEnabled ? 'active' : ''}`}
+              onClick={handleToggleDisplay}
+            >
+              {displayEnabled ? '遮蔽外部字幕' : '重新顯示字幕'}
+            </button>
+            <button
+              type="button"
+              className="subtle-button"
+              hidden={isLiveOutput} onClick={() => handleShiftCurrentIndex(-1)}
+              disabled={!canMoveToPreviousLine}
+            >
+              上一句
+            </button>
+            <button
+              type="button"
+              className="subtle-button"
+              hidden={isLiveOutput} onClick={() => handleShiftCurrentIndex(1)}
+              disabled={!canMoveToNextLine}
+            >
+              下一句
+            </button>
+
+          </div>
+          <ControlStatusSummary live={isLiveOutput}
+            automatic={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO}
+            status={isLiveOutput ? transcriptionStatusLabel : `${autoFollowStatusLabel} · ${transcriptionStatusLabel}`}
+            audio={audioBriefLabel}
+            progress={autoFollow.located && Number.isInteger(autoFollow.progressIndex)
+              ? `第 ${autoFollow.progressIndex + 1} 格 · ${Math.round(autoFollow.progress * 100)}%`
+              : ''}
+            confidence={autoFollowConfidenceLabel}
+            hint={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+              ? transcription.error || (
+                Number.isInteger(autoFollow.predictedIndex)
+                  ? `已預推第 ${autoFollow.predictedIndex + 1} 格，等待核對`
+                  : Number.isInteger(autoFollow.preparedIndex)
+                    ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
+                    : autoFollow.message
+              )
+              : ''}
+            error={(isLiveOutput || subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) && Boolean(transcription.error)}
+          />
+          <div
+            className={`status-bar ${
+              status.kind === 'success'
+                ? 'status-success'
+                : status.kind === 'error'
+                  ? 'status-error'
+                  : ''
+            }`}
+          >
+            <span title={status.message}>{status.message}</span>
+          </div>
+          <ControlStatusDetails open={audioDiagnosticsOpen} onClose={() => setAudioDiagnosticsOpen(false)}>
+            <div className="control-status-messages">
+              <p className={status.kind === 'error' ? 'control-status-error' : ''}>{status.message || '尚無操作訊息'}</p>
+              {transcription.error && <p className="control-status-error">{transcription.error}</p>}
+              {subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && (
+                <>
+                  <p>{autoFollowStatusLabel} · {transcriptionStatusLabel}{autoFollowConfidenceLabel}</p>
+                  {autoFollow.message && <p>{autoFollow.message}</p>}
+                  {autoFollow.followingScript && <p>演出語言：{transcription.sourceLanguages.find(language => language.code === autoFollow.followingScript.language)?.name || autoFollow.followingScript.language}
+                    {` · 跟戲劇本：${autoFollow.followingScript.languageName || '尚未指定'}`}
+                    {autoFollow.followingScript.message && ` · ${autoFollow.followingScript.message}`}
+                  </p>}
+                  {autoFollow.referenceAudio && <p>錄音比對：{autoFollow.referenceAudio.name || '參考錄音'}
+                    {Number.isInteger(autoFollow.referenceAudio.index) && ` · 音訊第 ${autoFollow.referenceAudio.index + 1} 格`}
+                    {Number.isFinite(autoFollow.referenceAudio.referenceSeconds) && ` · 錄音 ${autoFollow.referenceAudio.referenceSeconds.toFixed(2)} 秒`}
+                    {Number.isInteger(autoFollow.lastCandidateIndex) && ` · 文字候選第 ${autoFollow.lastCandidateIndex + 1} 格`}
+                    {autoFollow.referenceAudio.error && ` · ${autoFollow.referenceAudio.error}`}
+                  </p>}
+                  {Number.isInteger(autoFollow.sequenceIndex) && <p>順序跟隨：保留第 {autoFollow.sequenceIndex + 1} 格位置，持續核對後續台詞。</p>}
+                  <p>全文校正：{autoFollow.correctionStatus === 'verified' ? '已核對位置' : autoFollow.correctionStatus === 'pending' ? '候選位置待確認' : '等待明確文字'}{autoFollow.correctionCandidates?.length > 0 && `（${autoFollow.correctionCandidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}）`}</p>
+                  {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</p>}
+                  {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && <p>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</p>}
+                  {Number.isInteger(autoFollow.preparedIndex) && <p>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</p>}
+                  {autoFollow.status === 'searching' && autoFollow.candidates?.length > 1 && <p>核對位置：{autoFollow.candidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}</p>}
+                  {autoFollow.lastCandidateText && <p>候選字幕：{autoFollow.lastCandidateText}</p>}
+                </>
+              )}
+            </div>
+            {audioDiagnosticsVisible && (
+              <div className="audio-diagnostics-panel">
+                <div>
+                  <span>前端麥克風</span>
+                  <strong>{micDiagnostics.active ? '已啟動' : '未啟動'}</strong>
+                </div>
+                <div>
+                  <span>前端音量</span>
+                  <strong>{micLevelLabel}</strong>
+                </div>
+                <div>
+                  <span>前端送出</span>
+                  <strong>{formatRelativeSeconds(micDiagnostics.lastSentAt)}</strong>
+                </div>
+                <div>
+                  <span>Socket 連線</span>
+                  <strong>{micDiagnostics.socketConnected ? '已連線' : '未連線'}</strong>
+                </div>
+                <div>
+                  <span>後端 ack</span>
+                  <strong>{formatRelativeSeconds(micDiagnostics.lastAckAt)}</strong>
+                </div>
+                <div>
+                  <span>ack 音量</span>
+                  <strong>{backendAckLevelLabel}</strong>
+                </div>
+                <div>
+                  <span>拒收原因</span>
+                  <strong>{micDiagnostics.lastRejectReason || '無'}</strong>
+                </div>
+                <div>
+                  <span>後端音訊</span>
+                  <strong>{formatRelativeSeconds(autoFollow.lastAudioAt)}</strong>
+                </div>
+                <div>
+                  <span>後端音量</span>
+                  <strong>{backendLevelLabel}</strong>
+                </div>
+                <div>
+                  <span>觸發門檻</span>
+                  <strong>{autoFollowTriggerThreshold.toFixed(3)}</strong>
+                </div>
+                <div>
+                  <span>最近觸發</span>
+                  <strong>{formatRelativeSeconds(autoFollow.lastOnsetAt)}</strong>
+                </div>
+                <div>
+                  <span>辨識狀態</span>
+                  <strong>{transcriptionStatusLabel}</strong>
+                </div>
+                <div>
+                  <span>最近換格依據</span>
+                  <strong>{{ audio: '錄音音訊確認', onset: '起音預推', transcript: '文字確認', correction: '跳詞校正', silence: '靜默清除台詞' }[autoFollow.lastDecision?.source] || '尚未換格'}</strong>
+                </div>
+                <div>
+                  <span>辨識結果抵達</span>
+                  <strong>{formatRelativeSeconds(autoFollow.lastTranscriptReceivedAt)}</strong>
+                </div>
+                {[
+                  ['辨識落後音訊約', autoFollow.lastTranscriptAudioLagMs],
+                  ['文字定位耗時', autoFollow.lastAlignmentMs],
+                  ['起音偵測耗時', autoFollow.lastDecision?.onsetDetectionMs],
+                  ['觀眾顯示回報往返', autoFollow.lastDecision?.displayAckMs?.viewer],
+                  ['投影顯示回報往返', autoFollow.lastDecision?.displayAckMs?.projector],
+                  ['提詞顯示回報往返', autoFollow.lastDecision?.displayAckMs?.prompter],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <span>{label}</span>
+                    <strong>{Number.isFinite(value) ? `${Math.round(value)} ms` : '尚無資料'}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </ControlStatusDetails>
+        </div>
       </section>
 
       <aside className={`preview-sidebar ${rightPanelCollapsed ? 'collapsed' : ''}`}>
@@ -6164,25 +6433,8 @@ const ControlPage = () => {
         {!rightPanelCollapsed && (
           <div className="preview-sidebar-scroll">
             <div className="projector-preview-header">
-              <label>投影預覽</label>
-              <div className="projector-preview-toggles">
-                <label className="checkbox-row viewer-preview-toggle">
-                  <input
-                    type="checkbox"
-                    checked={roleColorEnabled}
-                    onChange={handleToggleRoleColorEnabled}
-                  />
-                  顏色分辨角色
-                </label>
-                <label className="checkbox-row viewer-preview-toggle">
-                  <input
-                    type="checkbox"
-                    checked={musicEffectEnabled}
-                    onChange={handleToggleMusicEffectEnabled}
-                  />
-                  開啟「此段有音樂」效果
-                </label>
-              </div>
+              <label>輸出預覽</label>
+
             </div>
             <div
               className={`projector-status-panel projector-status-${projectorStatusLevel}`}
@@ -6204,9 +6456,9 @@ const ControlPage = () => {
               className={`viewer-preview-box ${
                 displayEnabled ? '' : 'viewer-muted'
               } ${
-                currentLine?.type === 'direction' ? 'viewer-direction' : ''
+                !isLiveOutput && currentLine?.type === 'direction' ? 'viewer-direction' : ''
               } ${
-                currentLineMusicVisible ? 'viewer-music-preview' : ''
+                !isLiveOutput && currentLineMusicVisible ? 'viewer-music-preview' : ''
               }`}
               style={projectorPreviewStyle}
             >
@@ -6225,7 +6477,7 @@ const ControlPage = () => {
                 </div>
               </div>
             </div>
-            {currentLine?.role && (
+            {!isLiveOutput && currentLine?.role && (
               <div
                 className="viewer-preview-role"
                 style={previewRoleColor ? { color: previewRoleColor } : undefined}
@@ -6233,202 +6485,21 @@ const ControlPage = () => {
                 角色：{currentLine.role}
               </div>
             )}
-            {currentLineMusicVisible && (
+            {!isLiveOutput && currentLine?.type === 'direction' && <small className="input-note">目前為舞台指示，台詞輸出空白。</small>}
+            {!isLiveOutput && currentLineMusicVisible && (
               <div className="viewer-preview-music">
                 {getMusicText(currentLine)}
               </div>
             )}
-            {!musicEffectEnabled && (
+            {!isLiveOutput && !musicEffectEnabled && (
               <div className="viewer-preview-note">
                 目前已關閉「此段有音樂」效果，逐行音樂標記會保留但不顯示。
               </div>
             )}
-            <div className="projector-preview-controls">
-              <div className="projector-control-panel projector-control-panel-inline">
-                <label className="projector-control-select">
-                  <span>投影顯示內容</span>
-                  <select
-                    value={projectorDisplayMode}
-                    onChange={handleProjectorDisplayModeChange}
-                  >
-                    <option value={PROJECTOR_DISPLAY_MODES.SCRIPT}>
-                      固定劇本字幕
-                    </option>
-                    <option value={PROJECTOR_DISPLAY_MODES.TRANSCRIPTION}>
-                      即時語音辨識
-                    </option>
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="subtle-button"
-                  onClick={handleResetProjectorLayout}
-                >
-                  重設投影版面
-                </button>
-              </div>
-              <div className="projector-control-grid">
-                <div className="projector-control-panel">
-                  <span className="projector-control-label">字體大小</span>
-                  <div className="projector-stepper">
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      {...getProjectorRepeatHandlers(
-                        'fontSizePercent',
-                        -PROJECTOR_FONT_STEP,
-                      )}
-                    >
-                      −
-                    </button>
-                    <label className="projector-layout-input-wrap">
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[+-]?[0-9]*"
-                        className="projector-layout-input"
-                        aria-label="字體大小百分比"
-                        value={projectorLayoutInputDrafts.fontSizePercent}
-                        onChange={(event) =>
-                          handleProjectorLayoutInputChange(
-                            'fontSizePercent',
-                            event,
-                          )
-                        }
-                        onFocus={() =>
-                          handleProjectorLayoutInputFocus('fontSizePercent')
-                        }
-                        onBlur={() =>
-                          handleProjectorLayoutInputBlur('fontSizePercent')
-                        }
-                        onKeyDown={handleProjectorLayoutInputKeyDown}
-                      />
-                      <span>%</span>
-                    </label>
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      {...getProjectorRepeatHandlers(
-                        'fontSizePercent',
-                        PROJECTOR_FONT_STEP,
-                      )}
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-                <div className="projector-control-panel">
-                  <span className="projector-control-label">字幕寬度</span>
-                  <div className="projector-stepper">
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      {...getProjectorRepeatHandlers(
-                        'widthPercent',
-                        -PROJECTOR_WIDTH_STEP,
-                      )}
-                    >
-                      −
-                    </button>
-                    <label className="projector-layout-input-wrap">
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[+-]?[0-9]*"
-                        className="projector-layout-input"
-                        aria-label="字幕寬度百分比"
-                        value={projectorLayoutInputDrafts.widthPercent}
-                        onChange={(event) =>
-                          handleProjectorLayoutInputChange('widthPercent', event)
-                        }
-                        onFocus={() =>
-                          handleProjectorLayoutInputFocus('widthPercent')
-                        }
-                        onBlur={() =>
-                          handleProjectorLayoutInputBlur('widthPercent')
-                        }
-                        onKeyDown={handleProjectorLayoutInputKeyDown}
-                      />
-                      <span>%</span>
-                    </label>
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      {...getProjectorRepeatHandlers(
-                        'widthPercent',
-                        PROJECTOR_WIDTH_STEP,
-                      )}
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-                <div className="projector-control-panel">
-                  <span className="projector-control-label">字幕位置</span>
-                  <div className="projector-position-readout">
-                    左右 {projectorLayout.offsetX} / 上下 {projectorLayout.offsetY}
-                  </div>
-                  <div className="projector-axis-pad">
-                    <span />
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      aria-label="字幕往上移"
-                      {...getProjectorRepeatHandlers(
-                        'offsetY',
-                        -PROJECTOR_POSITION_STEP,
-                      )}
-                    >
-                      ↑
-                    </button>
-                    <span />
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      aria-label="字幕往左移"
-                      {...getProjectorRepeatHandlers(
-                        'offsetX',
-                        -PROJECTOR_POSITION_STEP,
-                      )}
-                    >
-                      ←
-                    </button>
-                    <div className="projector-axis-center">位置</div>
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      aria-label="字幕往右移"
-                      {...getProjectorRepeatHandlers(
-                        'offsetX',
-                        PROJECTOR_POSITION_STEP,
-                      )}
-                    >
-                      →
-                    </button>
-                    <span />
-                    <button
-                      type="button"
-                      className="projector-step-button"
-                      aria-label="字幕往下移"
-                      {...getProjectorRepeatHandlers(
-                        'offsetY',
-                        PROJECTOR_POSITION_STEP,
-                      )}
-                    >
-                      ↓
-                    </button>
-                    <span />
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="control-instructions">
-              • 上下方向鍵切換字幕
-              <br />
-              • `Cmd/Ctrl + Z` 復原，`Shift + Cmd/Ctrl + Z` 還原
-              <br />
-              • 觀眾進入檢視端會先套用預設語言，之後仍可自行切換語言與字級
-            </div>
+
+
+            <button type="button" className="subtle-button" onClick={() => setActivePanel('projection')}>投影與顯示設定</button>
+            {!isLiveOutput && <div className="workspace-next-cue"><span>下一句</span><p>{lines[liveCurrentIndex + 1]?.type === 'direction' ? '舞台指示' : getLineLanguageText(lines[liveCurrentIndex + 1], primaryLanguage.id) || '已到最後一格'}</p></div>}
           </div>
         )}
       </aside>

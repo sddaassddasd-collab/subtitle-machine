@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { createTracker, prepareScript, followTranscript, followAudio } = require('../src/auto-follow');
 const performanceLanguage = require('../src/performance-language');
+const captionMode = require('../src/caption-mode');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
 
 // Execute the real server functions, replacing only IO/persistence dependencies.
@@ -22,7 +23,7 @@ function fixture(mode = 'auto') {
   const emissions = [];
   const context = vm.createContext({
     Date, crypto: require('node:crypto'), createTracker, prepareScript, followTranscript, followAudio,
-    ...performanceLanguage, console: { error() {} },
+    ...performanceLanguage, ...captionMode, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
     AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS: 250, DEFAULT_SESSION_ID: 'test',
