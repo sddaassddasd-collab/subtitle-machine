@@ -4239,6 +4239,7 @@ const ControlPage = () => {
             ? `第一語言字幕已更新（${loadedLineCount} 行）`
             : '第一語言字幕已更新'),
       })
+      setActivePanel((panel) => panel === 'script' ? null : panel)
     } finally {
       setParsingPrimary(false)
     }
@@ -4295,6 +4296,7 @@ const ControlPage = () => {
             ? `${languageName} 字幕清單已更新（${parsedLineCount} 行）`
             : `${languageName} 字幕清單已更新`),
       })
+      setActivePanel((panel) => panel === 'script' ? null : panel)
     } finally {
       setParsingLanguageId('')
     }
