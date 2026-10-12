@@ -1,7 +1,6 @@
 const crypto = require('node:crypto');
 const { normalizeText } = require('./auto-follow');
 const {FRAME_MS, DIMENSIONS, decodeFeatures} = require('./acoustic-follow');
-const MAX_DURATION = 3600;
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RECORDINGS = 5;
 const hashText = line => crypto.createHash('sha256').update(`${line?.type || 'dialogue'}\n${line?.text || ''}`).digest('hex').slice(0, 24);
@@ -179,5 +178,5 @@ function validateSegmentEdit(recording, line, body) {
     status: line.type === 'direction' ? 'direction' : 'manual'};
 }
 
-module.exports = {MAX_DURATION, MAX_FILE_BYTES, MAX_RECORDINGS, hashText, isUsableSegment,
+module.exports = {MAX_FILE_BYTES, MAX_RECORDINGS, hashText, isUsableSegment,
   normalizeRecordings, recordingLines, refreshMappings, validSegments, publicRecording, alignSegments, validateSegmentEdit};

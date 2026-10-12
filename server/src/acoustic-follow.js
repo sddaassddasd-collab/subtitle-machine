@@ -92,7 +92,7 @@ function decodeFeatures(buffer) {
     buffer.readUInt32LE(4) !== VERSION || buffer.readUInt32LE(8) !== SAMPLE_RATE ||
     buffer.readUInt32LE(12) !== FRAME_MS || buffer.readUInt32LE(16) !== DIMENSIONS) throw new Error('錄音特徵版本不相容，請重新匯入');
   const count = buffer.readUInt32LE(20);
-  if (count > 90000 || buffer.length !== 24 + count * (DIMENSIONS + 1) * 4) throw new Error('錄音特徵資料不完整');
+  if (buffer.length !== 24 + count * (DIMENSIONS + 1) * 4) throw new Error('錄音特徵資料不完整');
   const bytes = buffer.subarray(24);
   return { count, matrix: new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)) };
 }

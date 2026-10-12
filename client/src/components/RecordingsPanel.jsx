@@ -10,7 +10,7 @@ async function decodeRecording(file) {
   const context = new Context({sampleRate: 16000})
   try {
     const audio = await context.decodeAudioData(await file.arrayBuffer())
-    if (audio.duration < 0.5 || audio.duration > 3600) throw new Error('錄音須介於 0.5 秒與 60 分鐘，請依場次分段匯入')
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) throw new Error('音檔沒有可讀取的錄音內容')
     const worker = new Worker(new URL('../lib/recording-decode-worker.js', import.meta.url), {type: 'module'})
     const channels = Array.from({length: audio.numberOfChannels}, (_, i) => audio.getChannelData(i).slice())
     const pcm = await new Promise((resolve, reject) => {
@@ -102,7 +102,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     event.target.value = ''
     if (!file) return
     void act('正在解碼與上傳…', async () => {
-      if (file.size > 64 * 1024 * 1024) throw new Error('音檔最多 64 MB，請依場次分段匯入')
+      if (file.size > 64 * 1024 * 1024) throw new Error('音檔最多 64 MB，請壓縮音檔後再匯入')
       const pcm = await decodeRecording(file)
       const form = new FormData()
       form.append('audio', new Blob([file], {type: recordingMime(file)}), file.name)
@@ -153,7 +153,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         {busy === '正在解碼與上傳…' ? busy : '匯入錄音並自動切段'}
       </button>
       <input ref={inputRef} type="file" accept="audio/*,.wav,.mp3,.m4a,.flac" hidden onChange={handleImport}/>
-      <small>每份最多 64 MB、60 分鐘；每個節目最多 5 份。</small>
+      <small>錄音時長不限；每份最多 64 MB，每個節目最多 5 份。</small>
     </div>
     {!canTranscribe && <p className="recording-note">尚未設定 Deepgram 金鑰，匯入後可先手動標記片段。</p>}
     {scopeRecordings.length > 0 && <>

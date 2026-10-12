@@ -82,6 +82,24 @@ test('feature extraction has a versioned bounded representation and worker extra
   assert.ok(local.peaks.length>0);
 });
 
+test('recordings beyond the old one-hour feature cap can locate cues in the tail and still reject truncated data', () => {
+  const local=extractFeatures(phrasePcm(phrases[0]));
+  const prefixFrames=90025, offsetSeconds=prefixFrames*local.frameMs/1000;
+  const header=Buffer.from(local.features.subarray(0,24));
+  header.writeUInt32LE(prefixFrames+local.frameCount,20);
+  const feature=Buffer.concat([header,Buffer.alloc(prefixFrames*25*4),local.features.subarray(24)]);
+  assert.equal(decodeFeatures(feature).count,prefixFrames+local.frameCount);
+  assert.throws(()=>decodeFeatures(feature.subarray(0,feature.length-4)));
+  const matcher=new AcousticFollower(feature,[{lineId:'a',index:0,start:offsetSeconds,end:offsetSeconds+local.duration}]);
+  const frontend=new StreamingFeatures(24000), take=phrasePcm(phrases[0],24000);
+  let confirmed;
+  for(let offset=0;offset+960<=take.length;offset+=960)for(const frame of frontend.push(take.subarray(offset,offset+960),(offset+960)/48)){
+    const result=matcher.feed(frame,0);
+    if(result?.status==='verified')confirmed=result;
+  }
+  assert.ok(confirmed);assert.ok(confirmed.referenceSeconds>3600);assert.equal(confirmed.lineId,'a');
+});
+
 test('different tempo, amplitude and small pitch changes still locate synthetic audio without transcription', () => {
   const referencePcm=Buffer.concat([phrasePcm(phrases[0],16000,{silence:0.4}), phrasePcm(phrases[1])]);
   const features=extractFeatures(referencePcm).features;

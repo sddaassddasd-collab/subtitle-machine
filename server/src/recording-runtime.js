@@ -11,7 +11,7 @@ function runRecordingTask(message, timeoutMs = 180000, signal) {
     let settled = false;
     const cleanup = () => { settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); worker.terminate(); };
     const abort = () => { cleanup(); reject(new Error('錄音處理已取消')); };
-    const timer = setTimeout(() => { cleanup(); reject(new Error('錄音分析超時，請分成較短音檔再試')); }, timeoutMs);
+    const timer = setTimeout(() => { cleanup(); reject(new Error('錄音分析超時，請稍後再試')); }, timeoutMs);
     signal?.addEventListener('abort', abort, {once: true});
     if (signal?.aborted) { abort(); return; }
     worker.once('error', error => { cleanup(); reject(error); });

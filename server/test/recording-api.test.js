@@ -13,6 +13,8 @@ process.env.DEEPGRAM_API_KEY = 'test-only-not-a-real-key';
 const persistence = require('../src/persistence');
 const {phrasePcm, phrases} = require('./helpers/reference-audio');
 const {hashText} = require('../src/recordings');
+const {extractFeatures} = require('../src/acoustic-follow');
+const {runRecordingTask} = require('../src/recording-runtime');
 
 function wav(pcm, sampleRate = 16000) {
   const header = Buffer.alloc(44); header.write('RIFF'); header.writeUInt32LE(pcm.length + 36,4);
@@ -25,15 +27,17 @@ const waitFor = async predicate => {
   throw new Error('Timed out waiting for recording job/worker');
 };
 
-function fixture() {
+function fixture({recordingTask, recordingStorage} = {}) {
   const filename = require.resolve('../src/server');
   let source = fs.readFileSync(filename,'utf8');
   source = source.replace('  broadcast: broadcastControlState,', `  broadcast: broadcastControlState,
+    task: module.recordingTask, storage: module.recordingStorage,
     request: async () => ({ok: true, json: async () => ({results: {channels: [{alternatives: [{words: [
       {word:'我們今晚開始演出',start:0,end:1.44,confidence:0.99},
       {word:'可是我答應過你',start:1.84,end:3.28,confidence:0.99},
     ]}]}]}})}),`);
   const loaded=new Module(filename,module);loaded.filename=filename;loaded.paths=Module._nodeModulePaths(path.dirname(filename));
+  loaded.recordingTask=recordingTask;loaded.recordingStorage=recordingStorage;
   loaded._compile(source.replace(/startServer\(\);\s*$/, `
     module.exports = () => {
       const user={id:'reference-api-owner',role:USER_ROLES.OPERATOR}; users.set(user.id,user);
@@ -61,13 +65,13 @@ function fixture() {
 
 // Exercise the real Express auth, multipart parser and routes with Node HTTP
 // objects, without listening on a port or contacting a transcription provider.
-async function request(f, route, {method='GET', body, cookie=f.cookie, headers={}}={}) {
+async function request(f, route, {method='GET', body, bodyStream, cookie=f.cookie, headers={}}={}) {
   let bytes=Buffer.alloc(0);
   if(body instanceof FormData) {
     const encoded=new Request('http://test.invalid/',{method:'POST',body});
     bytes=Buffer.from(await encoded.arrayBuffer());headers['content-type']=encoded.headers.get('content-type');
   } else if(body) {bytes=Buffer.from(JSON.stringify(body));headers['content-type']='application/json';}
-  const req=Readable.from(bytes.length?[bytes]:[]);Object.assign(req,{method,url:route,originalUrl:route,headers:{...headers,cookie,'content-length':String(bytes.length)},httpVersion:'1.0',httpVersionMajor:1,httpVersionMinor:0});
+  const req=Readable.from(bodyStream || (bytes.length?[bytes]:[]));Object.assign(req,{method,url:route,originalUrl:route,headers:{...headers,cookie,'content-length':headers['content-length'] || String(bytes.length)},httpVersion:'1.0',httpVersionMajor:1,httpVersionMinor:0});
   const chunks=[];
   const socket=new Duplex({read(){},write(chunk,_encoding,callback){chunks.push(Buffer.from(chunk));callback();}});
   socket.remoteAddress='127.0.0.1';req.socket=socket;req.connection=socket;
@@ -77,6 +81,22 @@ async function request(f, route, {method='GET', body, cookie=f.cookie, headers={
   const raw=Buffer.concat(chunks), separator=raw.indexOf('\r\n\r\n');
   const payload=raw.subarray(separator+4);
   return {status:res.statusCode,headers:res.getHeaders(),bytes:payload,json:()=>JSON.parse(payload.toString())};
+}
+
+// Stream padding in small reused chunks: test the real multipart parser without
+// constructing several full copies of a one-hour decoded PCM payload.
+function streamedUpload(audio, {audioBytes=audio.length, pcm=Buffer.alloc(2), pcmBytes=pcm.length}={}) {
+  const boundary='reference-audio-test-boundary';
+  const first=Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="test.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
+  const middle=Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="pcm"; filename="test.pcm"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+  const last=Buffer.from(`\r\n--${boundary}--\r\n`), padding=Buffer.alloc(65536);
+  function* padded(prefix, length) {
+    yield prefix;
+    for(let remaining=length-prefix.length;remaining>0;remaining-=padding.length) yield padding.subarray(0,Math.min(remaining,padding.length));
+  }
+  return {method:'POST',headers:{'content-type':`multipart/form-data; boundary=${boundary}`,
+    'content-length':String(first.length+audioBytes+middle.length+pcmBytes+last.length)},
+    bodyStream:(function*(){yield first;yield* padded(audio,audioBytes);yield middle;yield* padded(pcm,pcmBytes);yield last;})()};
 }
 async function importRecording(f) {
   const pcm=Buffer.concat([phrasePcm(phrases[0],16000,{silence:0.4}),phrasePcm(phrases[1])]);
@@ -104,6 +124,37 @@ test('upload, automatic cuts, waveform, protected ranged playback, manual correc
   const restored=f.reload(JSON.parse(JSON.stringify(f.store())));assert.equal(restored.recordings[0].segments.find(s=>s.lineId==='a').start,0.1);
   const asset=await persistence.getRecordingAsset(f.session.id,recording.id,{audio:true,pcm:true});assert.ok(asset.audio.length);assert.ok(asset.features.length);assert.equal(asset.pcm,null);assert.ok(asset.analysis.words.length);
   const deletion=await request(f,base,{method:'DELETE'});assert.equal(deletion.status,200);assert.equal(f.session.recordings.length,0);assert.equal(await persistence.getRecordingAsset(f.session.id,recording.id),null);
+});
+
+test('multipart accepts decoded PCM beyond one hour and scales analysis deadlines without a duration limit',async t=>{
+  const duration=3701, pcmBytes=duration*16000*2, prefix=phrasePcm(phrases[0]);
+  const deadlines=[];
+  const f=fixture({recordingStorage:{
+    async putRecordingAsset(_sessionId,_recordingId,asset){assert.equal(asset.pcm.length,pcmBytes);},
+    async updateRecordingAnalysis(){},
+  },recordingTask:async(message,timeout,signal)=>{
+    deadlines.push(timeout);
+    if(message.type==='extract'){
+      assert.equal(message.pcm.length,pcmBytes);
+      // Only upload acceptance is under test here; tail matching has its own
+      // real acoustic regression, so avoid extracting an hour of silent padding.
+      return extractFeatures(prefix);
+    }
+    return runRecordingTask(message,timeout,signal);
+  }});t.after(()=>f.dispose());
+  const base=`/api/session/${f.session.id}/recordings`;
+  const response=await request(f,base,streamedUpload(wav(prefix),{pcm:prefix,pcmBytes}));
+  assert.equal(response.status,202,response.bytes.toString());
+  await waitFor(()=>f.session.recordings[0]?.status==='ready');
+  assert.equal(f.session.recordings[0].duration,duration);assert.equal(f.session.recordings[0].error,'');
+  assert.deepEqual(deadlines,[duration*100,duration*100]);
+  assert.equal((await request(f,base)).json().limits.maxDuration,null);
+});
+
+test('the source audio byte limit is enforced while streaming independently of decoded PCM size',async t=>{
+  const f=fixture();t.after(()=>f.dispose());
+  const response=await request(f,`/api/session/${f.session.id}/recordings`,streamedUpload(Buffer.alloc(2),{audioBytes:64*1024*1024+1}));
+  assert.equal(response.status,400);assert.equal(f.session.recordings.length,0);
 });
 
 test('recordings are isolated between owners and a different scene cannot be activated',async t=>{

@@ -2,15 +2,41 @@ const crypto = require('node:crypto');
 const multer = require('multer');
 const persistence = require('./persistence');
 const {runRecordingTask} = require('./recording-runtime');
-const {MAX_FILE_BYTES, MAX_DURATION, MAX_RECORDINGS, normalizeRecordings, refreshMappings,
+const {MAX_FILE_BYTES, MAX_RECORDINGS, normalizeRecordings, refreshMappings,
   recordingLines, publicRecording, validateSegmentEdit, hashText} = require('./recordings');
 
 function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, persist, broadcast, invalidate,
   storage = persistence, task = runRecordingTask, request = fetch} = {}) {
   const jobs = new Map();
   let uploading = 0;
-  const upload = multer({storage: multer.memoryStorage(), limits: {
-    fileSize: Math.max(MAX_FILE_BYTES, MAX_DURATION * 16000 * 2), files: 2, fields: 4, fieldSize: 1024,
+  // The source file has a byte limit; decoded PCM must not impose a time limit.
+  const upload = multer({storage: {
+    _handleFile(_req, file, done) {
+      const chunks = [];
+      let size = 0, settled = false;
+      file.stream.on('data', chunk => {
+        if (settled) return;
+        size += chunk.length;
+        if (file.fieldname === 'audio' && size > MAX_FILE_BYTES) {
+          settled = true; chunks.length = 0;
+          done(new multer.MulterError('LIMIT_FILE_SIZE', file.fieldname)); return;
+        }
+        chunks.push(chunk);
+      });
+      file.stream.on('end', () => {
+        if (settled) return;
+        settled = true;
+        let buffer;
+        try { buffer = Buffer.concat(chunks, size); }
+        catch (error) { chunks.length = 0; done(error); return; }
+        chunks.length = 0; done(null, {buffer, size});
+      });
+      // Multer handles stream errors and decrements its pending write count.
+      file.stream.on('error', () => { settled = true; chunks.length = 0; });
+    },
+    _removeFile(_req, file, done) { delete file.buffer; done(null); },
+  }, limits: {
+    files: 2, fields: 4, fieldSize: 1024,
   }}).fields([{name: 'audio', maxCount: 1}, {name: 'pcm', maxCount: 1}]);
   const sessionFor = (req, res, next) => {
     const session = ownedSession(req, res);
@@ -35,6 +61,8 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     const job = {abort: new AbortController(), sessionId}; jobs.set(recordingId, job);
     const current = () => sessions.get(sessionId)?.recordings.find(r => r.id === recordingId);
     const check = () => { if (job.abort.signal.aborted || !current()) throw new Error('錄音處理已取消'); };
+    const analysisTimeoutMs = Math.max(180000, Math.ceil(recording.duration * 100));
+    const transcriptionTimeoutMs = Math.max(600000, Math.ceil(recording.duration * 1000));
     try {
       let asset = uploadedAsset || await storage.getRecordingAsset(sessionId, recordingId, {audio: true, pcm: true}); check();
       if (!asset) throw new Error('音檔不存在，請重新匯入');
@@ -42,7 +70,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       await save(session);
       if (!asset.features) {
         if (!asset.pcm) throw new Error('缺少音訊分析資料，請重新匯入');
-        const extracted = await task({type: 'extract', pcm: asset.pcm}, 180000, job.abort.signal); check();
+        const extracted = await task({type: 'extract', pcm: asset.pcm}, analysisTimeoutMs, job.abort.signal); check();
         asset.pcm = null;
         asset.features = Buffer.from(extracted.features);
         asset.analysis = {...asset.analysis, peaks: extracted.peaks, frameMs: extracted.frameMs};
@@ -60,7 +88,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
         recording.status = 'transcribing'; await save(session);
         const query = new URLSearchParams({model: 'nova-3', language: recording.language || session.transcriptionLanguage || 'zh-TW',
           punctuate: 'true', smart_format: 'true'});
-        const timeout = setTimeout(() => job.abort.abort(), 600000);
+        const timeout = setTimeout(() => job.abort.abort(), transcriptionTimeoutMs);
         let result;
         try {
           const response = await request(`https://api.deepgram.com/v1/listen?${query}`, {
@@ -78,7 +106,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       }
       recording.progress = 75; await save(session);
       const script = recordingLines(session, recording).map(line => ({id: line.id, text: line.text, type: line.type}));
-      const aligned = await task({type: 'align', lines: script, words, duration: recording.duration, features: asset.features}, 180000, job.abort.signal); check();
+      const aligned = await task({type: 'align', lines: script, words, duration: recording.duration, features: asset.features}, analysisTimeoutMs, job.abort.signal); check();
       const latestLines = new Map(recordingLines(session, recording).map(line => [line.id, line]));
       recording.segments = aligned.segments.map(segment => segment.textHash === hashText(latestLines.get(segment.lineId))
         ? segment : {...segment, status: 'stale'});
@@ -87,7 +115,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       await save(session);
     } catch (error) {
       if (current()) {
-        recording.status = 'error'; recording.error = error.name === 'AbortError' ? '錄音辨識超時，請分成較短音檔再試' : error.message;
+        recording.status = 'error'; recording.error = error.name === 'AbortError' ? '錄音辨識超時，請稍後再試或先手動標記片段' : error.message;
         recording.progress = 0; await save(session).catch(() => {});
       }
     } finally { jobs.delete(recordingId); }
@@ -97,7 +125,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     const session = req.recordingSession; refreshMappings(session);
     res.json({recordings: session.recordings.map(r => publicRecording(r, {details: true})),
       activeRecordingId: session.activeRecordingId, canTranscribe: Boolean(String(process.env.DEEPGRAM_API_KEY || '').trim()),
-      limits: {maxFileBytes: MAX_FILE_BYTES, maxDuration: MAX_DURATION, maxRecordings: MAX_RECORDINGS}});
+      limits: {maxFileBytes: MAX_FILE_BYTES, maxDuration: null, maxRecordings: MAX_RECORDINGS}});
   }));
   app.post('/api/session/:sessionId/recordings', requireAuth, sessionFor, (req, res, next) => {
     if (jobs.size + uploading >= 1) return res.status(409).json({error: '目前已有錄音正在處理，請稍後再匯入'});
@@ -112,7 +140,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     if (!audio?.buffer.length || audio.size > MAX_FILE_BYTES || !pcm?.buffer.length || pcm.size % 2)
       throw new Error('請提供可解碼的錄音與單聲道 PCM 資料');
     const duration = pcm.size / 2 / 16000;
-    if (duration < 0.5 || duration > MAX_DURATION) throw new Error('錄音須介於 0.5 秒與 60 分鐘，請依場次分段匯入');
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('音檔沒有可讀取的錄音內容');
     const mime = audio.mimetype;
     if (!/^audio\/(mpeg|mp3|wav|x-wav|wave|mp4|m4a|x-m4a|aac|ogg|webm|flac|x-flac|aiff|x-aiff)$/.test(mime))
       throw new Error('請使用 MP3、WAV、M4A 或瀏覽器可解碼的音訊檔');
