@@ -19,6 +19,8 @@ const { SOURCE_LANGUAGES, normalizePerformanceLanguage, supportedLanguage, resol
   getFollowingLines, describeFollowingScript, isRecordingCompatible } = require('./performance-language');
 const {getCaptionMode, enterLiveCaptions, resumeScriptCaptions} = require('./caption-mode');
 const { reviewScriptSegmentation, mergeConsecutiveDirections } = require('./script-segmentation-review');
+const { alignFullScript, normalizeAlignmentReviews, hash: alignmentHash,
+  alignmentError } = require('./full-script-alignment');
 const {
   createOpaqueToken,
   createPasswordHash,
@@ -2529,6 +2531,7 @@ function createLineRecord(entry, primaryLanguageId = 'primary') {
   );
   translations[primaryLanguageId] = text;
   const music = normalizeLineMusic(entry?.music);
+  const alignmentReviews = normalizeAlignmentReviews(entry?.alignmentReviews, text, translations);
 
   return {
     id:
@@ -2542,6 +2545,7 @@ function createLineRecord(entry, primaryLanguageId = 'primary') {
     musicText: music ? normalizeMusicText(entry?.musicText) : '',
     role: rawType === LINE_TYPES.DIALOGUE ? role : null,
     translations,
+    ...(Object.keys(alignmentReviews).length ? { alignmentReviews } : {}),
   };
 }
 
@@ -2627,6 +2631,7 @@ function normalizeLineEntry(entry, keepEmpty = false, options = {}) {
         musicText: entry.musicText,
         role: entry.role ?? entry.speaker ?? entry.character ?? null,
         translations: rawTranslations || { [primaryLanguageId]: text },
+        alignmentReviews: entry.alignmentReviews,
       },
       primaryLanguageId,
     );
@@ -7959,7 +7964,8 @@ function getSessionSummary(session) {
 
 function getControlPayload(session) {
   const normalized = ensureSessionStructure(session);
-  const lines = ensureSessionLines(normalized).map((line) => toPublicLine(line));
+  const lines = ensureSessionLines(normalized).map((line) => ({ ...toPublicLine(line),
+    ...(Object.keys(line.alignmentReviews || {}).length ? { alignmentReviews: line.alignmentReviews } : {}) }));
   const selectedCell = getSelectedCell(normalized);
   return {
     sessionId: normalized.id,
@@ -11318,6 +11324,28 @@ app.put(
   },
 );
 
+app.post('/api/session/:sessionId/lines/:lineId/languages/:languageId/alignment/confirm', requireAuth, (req, res) => {
+  const session = getOwnedSessionFromRequest(req, res);
+  if (!session) return;
+  const languageId = req.params.languageId;
+  const index = session.lines.findIndex(line => line.id === req.params.lineId);
+  if (index < 0 || languageId === 'primary' || !session.languages.some(language => language.id === languageId)) {
+    return res.status(404).json({ error: '找不到字幕格或譯文語言' });
+  }
+  const line = session.lines[index], review = line.alignmentReviews?.[languageId];
+  if (!review) return res.status(400).json({ error: '此格沒有待確認的對齊結果' });
+  const text = getLineLanguageText(line, languageId);
+  if (req.body?.expectedText !== text || req.body?.expectedPrimaryText !== line.text) {
+    return res.status(409).json({ error: '字幕已被修改，請重新檢查後確認' });
+  }
+  pushSessionHistory(session);
+  const confirmed = { ...review, status: 'confirmed', primaryHash: alignmentHash(line.text), targetHash: alignmentHash(text) };
+  session.lines[index] = createLineRecord({ ...line, alignmentReviews: { ...line.alignmentReviews, [languageId]: confirmed } });
+  persistSession(session);
+  broadcastControlState(session.id);
+  res.json(getControlPayload(session));
+});
+
 app.post(
   '/api/session/:sessionId/cells/:cellId/languages/:languageId/parse',
   requireAuth,
@@ -11354,81 +11382,77 @@ app.post(
       return res.status(400).json({ error: '缺少目標語言文字內容' });
     }
 
-    const normalizedRawText = normalizeScriptPromptText(rawScriptText, language.code);
+    const snapshot = JSON.parse(JSON.stringify(session.lines));
+    const sourceFingerprint = lines => JSON.stringify(lines.map(line => ({
+      id: line.id, text: line.text, type: line.type, role: line.role, music: line.music,
+      musicCueId: line.musicCueId, musicText: line.musicText,
+      targetText: getLineLanguageText(line, language.id), review: line.alignmentReviews?.[language.id] || null,
+    })));
+    const before = sourceFingerprint(snapshot);
+    const languageBefore = JSON.stringify({ name: language.name, code: language.code });
+    const requestId = typeof req.body?.alignmentRequestId === 'string'
+      ? req.body.alignmentRequestId.replace(/[^a-zA-Z0-9_-]/gu, '').slice(0, 80) : '';
+    let applied = false;
 
     try {
-      let parsedLines;
-      let warning = '';
-      const parseWarnings = [];
-      try {
-        parsedLines = await parseScriptWithOpenAI(normalizedRawText, apiKey, {
-          languageCode: language.code,
-          model: scriptParseModel,
-          onWarning: message => parseWarnings.push(message),
-        });
-        warning = parseWarnings.join(' ');
-      } catch (error) {
-        console.error('Failed to parse secondary language script:', error);
-        if (!fallbackCodes.has(error?.code)) {
-          throw error;
-        }
-
-        parsedLines = prepareImportedScriptLines(
-          fallbackSegmentScript(normalizedRawText, { languageCode: language.code }),
-          language.code,
-          { sampleText: normalizedRawText },
-        );
-        warning = error?.message
-          ? `OpenAI 拆解失敗（${error.message}），已改用原稿分段結果`
-          : 'OpenAI 拆解失敗，已改用原稿分段結果';
+      const result = await alignFullScript({
+        client: new OpenAI({ apiKey, maxRetries: 1, timeout: 600000 }),
+        cues: snapshot.map(({ id, text, type, role, music, musicCueId, musicText }) =>
+          ({ id, text, type, role, music, musicCueId, musicText })),
+        rawText: rawScriptText, languageName: language.name, languageCode: language.code, model: scriptParseModel,
+        targetWidth: resolveScriptSegmentationProfile(language.code, rawScriptText).maxLineWidthUnits,
+        measureText: measureSubtitleTextWidth,
+        onProgress: phase => io.to(`control:${session.id}`).emit('alignment:progress', {
+          requestId, languageId: language.id, phase,
+        }),
+      });
+      const currentLanguage = session.languages.find(entry => entry.id === language.id);
+      const targetCell = session.cells.find(entry => entry.id === requestedCellId);
+      if (sessions.get(session.id) !== session || !targetCell ||
+          !currentLanguage || JSON.stringify({ name: currentLanguage.name, code: currentLanguage.code }) !== languageBefore ||
+          sourceFingerprint(session.lines) !== before) {
+        throw alignmentError('ALIGNMENT_CONFLICT', '對齊期間原文、字幕結構或此語言已被修改；未覆蓋現有內容，請重新對齊。');
       }
-
-      const normalizedParsedLines = mergeConsecutiveDirections(normalizeScriptLines(parsedLines, {
-        primaryLanguageId: 'primary',
-      }), createLineRecord);
-      if (normalizedParsedLines.length === 0) {
-        const emptyLinesError = new Error('解析完成但沒有產生可用字幕');
-        emptyLinesError.code = 'EMPTY_PARSED_LINES';
-        throw emptyLinesError;
-      }
-
-      const targetCell = session.cells.find((entry) => entry.id === requestedCellId);
-      if (!targetCell) {
-        const missingCellError = new Error('解析完成，但找不到目前場次');
-        missingCellError.code = 'CELL_NOT_FOUND_AFTER_PARSE';
-        throw missingCellError;
-      }
-
-      const nextLines = buildSequentialSecondaryLanguageTimeline({
-        session,
-        timelineLines: targetCell.lines,
-        parsedLines: normalizedParsedLines,
-        languageId: language.id,
+      const nextLines = session.lines.map((line, index) => {
+        const row = result.rows[index];
+        const updated = updateSessionLineLanguageText(line, language.id, row.text);
+        const reviews = { ...(updated.alignmentReviews || {}) };
+        if (row.review) reviews[language.id] = row.review;
+        else delete reviews[language.id];
+        return createLineRecord({ ...updated, alignmentReviews: reviews });
       });
 
       pushSessionHistory(session);
-      setCellLanguageSource(targetCell, language.id, normalizedParsedLines, {
+      const sourceCues = new Map(snapshot.map(line => [line.id, line]));
+      setCellLanguageSource(targetCell, language.id, result.rows.filter(row => row.text).map(row => ({
+        text: row.text, type: sourceCues.get(row.cueId)?.type || 'dialogue',
+        role: sourceCues.get(row.cueId)?.role || null,
+      })), {
         text: rawScriptText,
       });
-      targetCell.lines = normalizeScriptLines(nextLines, {
-        keepEmpty: true,
-        primaryLanguageId: 'primary',
-      }).filter((line) => lineHasAnyLanguageText(line));
-      session.selectedCellId = targetCell.id;
+      session.lines = nextLines;
+      session.sharedLines = nextLines;
+      session.cells.forEach(cell => { cell.lines = nextLines; });
+      applied = true;
       syncSelectedCellLines(session);
       persistSession(session);
       broadcastControlState(session.id);
       broadcastViewerState(session.id);
 
+      const reviewCount = result.rows.filter(row => row.review).length;
+      const warning = [result.mode === 'scenes' ? '全文超出模型容量，已改為逐場對齊與覆核；請檢查場景銜接。' : '',
+        reviewCount ? `${language.name} 已依原文格子對齊，${reviewCount} 格待確認。` : ''].filter(Boolean).join(' ');
       res.json({
         ...getControlPayload(session),
-        parsedLineCount: normalizedParsedLines.length,
+        parsedLineCount: result.rows.length,
+        alignment: { mode: result.mode, reviewCount, repairCount: result.repairCount },
         ...(warning ? { warning } : {}),
       });
     } catch (error) {
-      res.status(500).json({
-        error: '解析多語字幕失敗',
-        details: error.message,
+      res.status(error.code === 'ALIGNMENT_CONFLICT' ? 409 : error.code === 'ALIGNMENT_NO_PRIMARY' ? 400 : 500).json({
+        error: applied ? '對齊已套用，後續同步失敗，請重新載入確認' : '全文對齊未完成，原字幕尚未變更',
+        details: `${error.message} ${applied ? '請重新載入確認字幕。' : '原字幕尚未變更。'}`,
+        code: error.code || 'ALIGNMENT_FAILED',
       });
     }
   },

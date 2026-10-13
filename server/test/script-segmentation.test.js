@@ -243,16 +243,13 @@ test('quoted source survives review, normalization and route persistence; direct
   assert.ok(result.session.history.past.length > 0);
 });
 
-test('primary and secondary imports expose review warnings and merge directions in the imported column', async () => {
-  for (const secondary of [false, true]) {
-    const f = fixture({ reviewer: () => { throw new Error('simulated outage'); } });
-    const result = await f.route('en', 'Alice: I am home.\n(The lights dim.)\n(The actors leave.)', secondary);
-    assert.equal(result.status, 200);
-    assert.match(result.body.warning, /保留程式切點/);
-    assert.equal(result.body.parsedLineCount, 2);
-    const key = secondary ? 'english' : 'primary';
-    assert.equal(result.body.lines[1].translations[key], '(The lights dim.)\n(The actors leave.)');
-  }
+test('primary imports expose segmentation review warnings and merge consecutive directions', async () => {
+  const f = fixture({ reviewer: () => { throw new Error('simulated outage'); } });
+  const result = await f.route('en', 'Alice: I am home.\n(The lights dim.)\n(The actors leave.)', false);
+  assert.equal(result.status, 200);
+  assert.match(result.body.warning, /保留程式切點/);
+  assert.equal(result.body.parsedLineCount, 2);
+  assert.equal(result.body.lines[1].translations.primary, '(The lights dim.)\n(The actors leave.)');
 });
 
 test('large scripts retain the entire ordered source across review batches and bounded stage context', async () => {

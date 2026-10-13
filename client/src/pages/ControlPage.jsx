@@ -1105,6 +1105,9 @@ const ControlPage = () => {
   const [draftInputs, setDraftInputs] = useState({})
   const [parsingPrimary, setParsingPrimary] = useState(false)
   const [parsingLanguageId, setParsingLanguageId] = useState('')
+  const alignmentRequestRef = useRef(null)
+  const [alignmentPhase, setAlignmentPhase] = useState('')
+  const [confirmingAlignmentKey, setConfirmingAlignmentKey] = useState('')
   const [clearingSubtitles, setClearingSubtitles] = useState(false)
   const [comparisonLanguageId, setComparisonLanguageId] = useState('')
   const [editingModeEnabled, setEditingModeEnabled] = useState(false)
@@ -2043,6 +2046,18 @@ const ControlPage = () => {
       navigate('/', { replace: true })
     }
 
+    const handleAlignmentProgress = (payload) => {
+      if (!alignmentRequestRef.current || payload?.requestId !== alignmentRequestRef.current) return
+      const scene = payload.phase?.startsWith('scene-')
+      const phase = scene ? payload.phase.slice(6) : payload.phase
+      const labels = { allocating: '全文分配', validating: '文字與格子檢查', auditing: '全文覆核', repairing: '修正對照結果' }
+      if (!labels[phase]) return
+      const label = scene ? { allocating: '逐場分配', validating: '逐場文字與格子檢查',
+        auditing: '逐場覆核', repairing: '逐場修正對照結果' }[phase] : labels[phase]
+      setAlignmentPhase(label)
+      setStatus({ kind: 'info', message: `${label}進行中…` })
+    }
+
     socket.on('connect', rejoinAndRefresh)
     socket.on('connect', markSocketConnected)
     socket.on('reconnect', rejoinAndRefresh)
@@ -2051,6 +2066,7 @@ const ControlPage = () => {
     socket.on('control:transcription', handleTranscriptionUpdate)
     socket.on('control:auto-follow', handleAutoFollowUpdate)
     socket.on('control:deleted', handleSessionDeleted)
+    socket.on('alignment:progress', handleAlignmentProgress)
     socket.on('transcription:error', handleTranscriptionError)
 
     if (socket.connected) {
@@ -4260,10 +4276,18 @@ const ControlPage = () => {
       setStatus({ kind: 'error', message: '請先貼上目標語言文字' })
       return
     }
+    if (!lines.some(line => line.type !== 'direction' && line.text?.trim())) {
+      setStatus({ kind: 'error', message: '請先準備第一語言字幕格，再貼上完整譯文' })
+      return
+    }
 
+    const alignmentRequestId = window.crypto?.randomUUID?.() ||
+      `alignment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
     try {
       setParsingLanguageId(languageId)
-      setStatus({ kind: 'info', message: '正在解析文本並審核字幕分段…' })
+      alignmentRequestRef.current = alignmentRequestId
+      setAlignmentPhase('全文分配')
+      setStatus({ kind: 'info', message: '正在依原文字幕格做全文分配與覆核…' })
       const data = await performSessionMutation(
         () =>
           fetch(
@@ -4275,10 +4299,11 @@ const ControlPage = () => {
                 apiKey,
                 scriptText,
                 scriptParseModel,
+                alignmentRequestId,
               }),
             },
           ),
-        { successMessage: '多語語意段落已更新', keepStatus: true },
+        { successMessage: '譯文已依原文字幕格對齊', keepStatus: true },
       )
       const segmentCount = Number.isInteger(
         data?.languageSources?.[languageId]?.segmentCount,
@@ -4293,12 +4318,33 @@ const ControlPage = () => {
         message:
           data?.warning ||
           (parsedLineCount && parsedLineCount > 0
-            ? `${languageName} 字幕清單已更新（${parsedLineCount} 行）`
-            : `${languageName} 字幕清單已更新`),
+            ? `${languageName} 全文對齊與覆核完成（${parsedLineCount} 格）`
+            : `${languageName} 全文對齊與覆核完成`),
       })
+      setComparisonLanguageId(value => value === ALL_LANGUAGES_OPTION_ID ? value : languageId)
       setActivePanel((panel) => panel === 'script' ? null : panel)
+    } catch {
+      // performSessionMutation reports the error; preserve the pasted draft and dialog.
     } finally {
       setParsingLanguageId('')
+      if (alignmentRequestRef.current === alignmentRequestId) alignmentRequestRef.current = null
+      setAlignmentPhase('')
+    }
+  }
+
+  const handleConfirmAlignment = async (event, line, language) => {
+    event.stopPropagation()
+    const key = `${line.id}:${language.id}`
+    try {
+      setConfirmingAlignmentKey(key)
+      await performSessionMutation(() => fetch(`/api/session/${sessionId}/lines/${encodeURIComponent(line.id)}/languages/${encodeURIComponent(language.id)}/alignment/confirm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedText: getLineLanguageText(line, language.id), expectedPrimaryText: line.text }),
+      }), { successMessage: `${language.name} 此格對齊已人工確認` })
+    } catch {
+      // Keep the marker when the text changed or confirmation could not be saved.
+    } finally {
+      setConfirmingAlignmentKey('')
     }
   }
 
@@ -5191,9 +5237,10 @@ const ControlPage = () => {
             </ControlSection>
 <ControlSection panel="script" activePanel={activePanel} title="貼上與解析" defaultOpen>
             <div className="input-group script-parse-model-card">
-              <label htmlFor="script-parse-model">劇本拆解模型</label>
+              <label htmlFor="script-parse-model">劇本解析／全文對齊模型</label>
               <select
                 id="script-parse-model"
+                disabled={parsingPrimary || Boolean(parsingLanguageId)}
                 value={scriptParseModel}
                 onChange={(event) => setScriptParseModel(event.target.value)}
               >
@@ -5204,7 +5251,7 @@ const ControlPage = () => {
                 ))}
               </select>
               <span className="input-note">
-                {selectedScriptParseModel.description}
+                {selectedScriptParseModel.description}；全文對齊會使用此模型進行分配與覆核。
               </span>
             </div>
 
@@ -5224,7 +5271,7 @@ const ControlPage = () => {
               </span>
               <button
                 type="submit"
-                disabled={parsingPrimary || clearingSubtitles || !selectedCellId}
+                disabled={parsingPrimary || Boolean(parsingLanguageId) || clearingSubtitles || !selectedCellId}
               >
                 {parsingPrimary ? '解析中…' : `解析 ${primaryLanguageName}`}
               </button>
@@ -5242,26 +5289,27 @@ const ControlPage = () => {
                 <textarea
                   id={`language-input-${language.id}`}
                   rows={5}
-                  placeholder={`貼上 ${language.name} 全文，系統會用和第一語言相同的方式拆解，並依序寫入右側字幕清單。`}
+                  placeholder={`貼上 ${language.name} 完整譯文，系統會參考整篇原文與譯文，分配到既有字幕格並覆核。`}
+                  disabled={parsingPrimary || Boolean(parsingLanguageId)}
                   value={getDraftInputValue(selectedCellId, language.id)}
                   onChange={(event) =>
                     setDraftInputValue(selectedCellId, language.id, event.target.value)
                   }
                 />
                 <span className="input-note">
-                  系統會審核分段並合併連續舞台指示；左邊保留原始輸入，右側顯示更新結果。
+                  保留原文格子與譯文語序，允許相鄰多格合起來語意一致；只分配既有譯文，不重新翻譯。
                 </span>
                 <button
                   type="submit"
                   disabled={
-                    parsingLanguageId === language.id ||
+                    Boolean(parsingLanguageId) || parsingPrimary ||
                     clearingSubtitles ||
-                    !selectedCellId
+                    !selectedCellId || !lines.some(line => line.type !== 'direction' && line.text?.trim())
                   }
                 >
                   {parsingLanguageId === language.id
-                    ? '處理中…'
-                    : `更新 ${language.name} 字幕清單`}
+                    ? `${alignmentPhase || '全文對齊'}中…`
+                    : `${language.name} 依原文字幕格全文對齊`}
                 </button>
               </form>
             ))}
@@ -5947,6 +5995,8 @@ const ControlPage = () => {
             const translatedCount = extraLanguages.filter(
               (language) => line?.translations?.[language.id]?.trim(),
             ).length
+            const pendingAlignments = extraLanguages.filter(language =>
+              ['review', 'stale'].includes(line.alignmentReviews?.[language.id]?.status))
             const musicBoundaryLabel = musicActive
               ? !previousSameMusicCue && !nextSameMusicCue
                 ? '音樂'
@@ -5994,6 +6044,11 @@ const ControlPage = () => {
                     {translatedCount > 0 && (
                       <span className="script-line-type type-language">
                         {translatedCount} 語已填入
+                      </span>
+                    )}
+                    {pendingAlignments.length > 0 && (
+                      <span className="script-line-type type-alignment" title={pendingAlignments.map(language => language.name).join('、')}>
+                        譯文待確認
                       </span>
                     )}
                     {liveCurrentIndex === index && (
@@ -6084,6 +6139,7 @@ const ControlPage = () => {
                 >
                   {visibleLanguages.map((language) => {
                     const text = getLineLanguageText(line, language.id)
+                    const alignmentReview = line.alignmentReviews?.[language.id]
                     const isEditing =
                       editingCell &&
                       (editingCell.lineId
@@ -6155,6 +6211,15 @@ const ControlPage = () => {
                             handleLineKeyDown(event, index, language.id)
                           }
                         />
+                        {['review', 'stale'].includes(alignmentReview?.status) && (
+                          <div className="alignment-review-note" onClick={event => event.stopPropagation()}>
+                            <span>{alignmentReview.status === 'stale' ? '文字已更動，請重新核對。' : '對齊待確認。'} {alignmentReview.reason}</span>
+                            <button type="button" className="subtle-button" disabled={Boolean(confirmingAlignmentKey) || Boolean(parsingLanguageId) || parsingPrimary}
+                              onClick={event => handleConfirmAlignment(event, line, language)}>
+                              {confirmingAlignmentKey === `${line.id}:${language.id}` ? '保存中…' : '已檢查，確認此格'}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )
                   })}

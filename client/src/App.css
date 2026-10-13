@@ -777,6 +777,27 @@
   border: 1px solid rgba(244, 114, 182, 0.35);
 }
 
+.script-line-type.type-alignment {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fde68a;
+}
+
+.alignment-review-note {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding-top: 0.4rem;
+  color: #fde68a;
+  font-size: 0.8rem;
+}
+
+.alignment-review-note .subtle-button {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
 .script-line-actions {
   display: flex;
   gap: 0.4rem;
