@@ -112,7 +112,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     event.target.value = ''
     if (!file) return
     void act('正在解碼與上傳…', async () => {
-      if (file.size > 64 * 1024 * 1024) throw new Error('音檔最多 64 MB，請壓縮音檔後再匯入')
+      if (file.size > 128 * 1024 * 1024) throw new Error('音檔最多 128 MB，請壓縮音檔後再匯入')
       const pcm = await decodeRecording(file)
       const form = new FormData()
       form.append('audio', new Blob([file], {type: recordingMime(file)}), file.name)
@@ -170,7 +170,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         {busy === '正在解碼與上傳…' ? busy : '匯入錄音並自動切段'}
       </button>
       <input ref={inputRef} type="file" accept="audio/*,.wav,.mp3,.m4a,.flac" hidden onChange={handleImport}/>
-      <small>錄音時長不限；每份最多 64 MB，每個節目最多 5 份。</small>
+      <small>錄音時長不限；每份最多 128 MB，每個節目最多 5 份。</small>
     </div>
     {!canTranscribe && <p className="recording-note">尚未設定 Deepgram 金鑰，匯入後可先手動標記片段。</p>}
     {scopeRecordings.length > 0 && <>

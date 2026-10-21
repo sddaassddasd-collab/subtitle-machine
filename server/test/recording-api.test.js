@@ -170,7 +170,7 @@ test('multipart accepts decoded PCM beyond one hour and scales analysis deadline
 
 test('the source audio byte limit is enforced while streaming independently of decoded PCM size',async t=>{
   const f=fixture();t.after(()=>f.dispose());
-  const response=await request(f,`/api/session/${f.session.id}/recordings`,streamedUpload(Buffer.alloc(2),{audioBytes:64*1024*1024+1}));
+  const response=await request(f,`/api/session/${f.session.id}/recordings`,streamedUpload(Buffer.alloc(2),{audioBytes:128*1024*1024+1}));
   assert.equal(response.status,400);assert.equal(f.session.recordings.length,0);
 });
 

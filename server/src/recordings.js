@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const { normalizeText } = require('./auto-follow');
 const {FRAME_MS, DIMENSIONS, decodeFeatures} = require('./acoustic-follow');
 const {normalizePerformanceLanguage, getFollowingLines, describeFollowingScript, isRecordingCompatible} = require('./performance-language');
-const MAX_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_RECORDINGS = 5;
 const hashText = line => crypto.createHash('sha256').update(`${line?.type || 'dialogue'}\n${line?.text || ''}`).digest('hex').slice(0, 24);
 const isUsableSegment = (segment, line) => Boolean(line && line.type !== 'direction' &&
