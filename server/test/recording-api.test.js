@@ -15,6 +15,7 @@ const {phrasePcm, phrases} = require('./helpers/reference-audio');
 const {hashText} = require('../src/recordings');
 const {extractFeatures} = require('../src/acoustic-follow');
 const {runRecordingTask} = require('../src/recording-runtime');
+const {pack, unpack, CHUNK_SECONDS} = require('../src/local-recording-routes');
 
 function wav(pcm, sampleRate = 16000) {
   const header = Buffer.alloc(44); header.write('RIFF'); header.writeUInt32LE(pcm.length + 36,4);
@@ -87,7 +88,8 @@ async function request(f, route, {method='GET', body, bodyStream, cookie=f.cooki
   if(body instanceof FormData) {
     const encoded=new Request('http://test.invalid/',{method:'POST',body});
     bytes=Buffer.from(await encoded.arrayBuffer());headers['content-type']=encoded.headers.get('content-type');
-  } else if(body) {bytes=Buffer.from(JSON.stringify(body));headers['content-type']='application/json';}
+  } else if(body instanceof Uint8Array) {bytes=Buffer.from(body);}
+  else if(body) {bytes=Buffer.from(JSON.stringify(body));headers['content-type']='application/json';}
   const req=Readable.from(bodyStream || (bytes.length?[bytes]:[]));Object.assign(req,{method,url:route,originalUrl:route,headers:{...headers,cookie,'content-length':headers['content-length'] || String(bytes.length)},httpVersion:'1.0',httpVersionMajor:1,httpVersionMinor:0});
   const chunks=[];
   const socket=new Duplex({read(){},write(chunk,_encoding,callback){chunks.push(Buffer.from(chunk));callback();}});
@@ -344,4 +346,121 @@ test('import language can be selected independently and missing language text is
   f.transcript('可是我答應過你',{language:'en',streamId:'recording-live',itemId:'wrong-column',startMs:0,endMs:1000,isFinal:true});
   assert.equal(f.session.currentIndex,0);
   await persistence.deleteRecordingAssets(f.session.id);
+});
+
+async function createLocal(f, duration=1.44, extra={}) {
+  const response=await request(f,`/api/session/${f.session.id}/recordings/local`,{method:'POST',body:{
+    name:'local.mp3',mime:'audio/mpeg',duration,byteLength:173000000,fingerprint:'a'.repeat(64),...extra}});
+  assert.ok([200,201].includes(response.status),response.bytes.toString());
+  return response.json().recording;
+}
+function localChunk(recording,index,{words=[],transcribed=true,revision=recording.localRevision}={}) {
+  const start=index*CHUNK_SECONDS,end=Math.min(recording.duration,start+CHUNK_SECONDS);
+  const samples=Math.round((end-start)*16000),count=Math.max(0,Math.floor((samples-400)/640)+1);
+  const features=Buffer.alloc(24+count*100);features.write('RFA1');
+  [1,16000,40,24,count].forEach((value,i)=>features.writeUInt32LE(value,4+i*4));
+  return pack({fingerprint:recording.fingerprint,language:recording.language,localRevision:revision,
+    words,transcribed,peaks:new Array(Math.ceil(samples/1600)).fill(0.25)},features);
+}
+const chunkRequest = body => ({method:'PUT',body,headers:{'content-type':'application/octet-stream'}});
+
+test('over three hours of local analysis resumes by chunk, restores from a portable backup and follows without a source audio asset',async t=>{
+  const f=fixture();t.after(()=>f.dispose());
+  const r=await createLocal(f,10801.44),base=`/api/session/${f.session.id}/recordings/${r.id}`;
+  const total=Math.ceil(r.duration/CHUNK_SECONDS);
+  for(let i=0;i<total;i++) {
+    const words=i===0?[{word:'我們今晚開始演出',start:0,end:1.44,confidence:.99}]
+      :i===total-1?[{word:'可是我答應過你',start:r.duration-1.44,end:r.duration,confidence:.99}]:[];
+    const response=await request(f,`${base}/local/chunks/${i}`,chunkRequest(localChunk(r,i,{words})));
+    assert.equal(response.status,200,response.bytes.toString());
+    if(i===0) {
+      const state=(await request(f,`${base}/local/state`)).json();
+      assert.deepEqual(state.completed,[{index:0,transcribed:true}]);
+      assert.equal((await request(f,`${base}/local/chunks/0`,chunkRequest(localChunk(r,0,{words})))).status,200);
+    }
+  }
+  assert.equal((await request(f,`${base}/local/state`)).json().completed.length,total);
+  assert.equal((await request(f,`${base}/local/finish`,{method:'POST'})).status,202);
+  await waitFor(()=>f.session.recordings[0].status==='ready');
+  const asset=await persistence.getRecordingAsset(f.session.id,r.id,{audio:true,pcm:true});
+  assert.equal(asset.audio,null);assert.equal(asset.pcm,null);
+  assert.ok(asset.features.length>27e6);assert.equal(asset.analysis.words.length,2);
+  assert.ok(f.session.recordings[0].segments.find(s=>s.lineId==='b').start>=10800);
+  assert.equal((await request(f,`${base}/audio`)).status,404);
+  const waveform=(await request(f,`${base}/waveform?start=10800&end=10801.44`)).json();
+  assert.equal(waveform.peakSeconds,.1);assert.ok(waveform.peaks.length<20);
+  const active=await request(f,`/api/session/${f.session.id}/recordings/active`,{method:'PUT',body:{recordingId:r.id}});
+  assert.equal(active.status,200);await f.runtime.ensure(f.session);await waitFor(()=>f.runtime.sessions.get(f.session.id)?.ready);
+  const backup=await request(f,`${base}/local/export`);assert.equal(backup.status,200);
+  assert.equal(unpack(backup.bytes,20*1024*1024).metadata.kind,'subtitle-local-recording');
+  assert.equal((await request(f,base,{method:'DELETE'})).status,200);
+  assert.equal((await persistence.getRecordingChunks(f.session.id,r.id)).length,0);
+  const imported=await request(f,`/api/session/${f.session.id}/recordings/local/import`,{
+    method:'POST',body:backup.bytes,headers:{'content-type':'application/octet-stream'}});
+  assert.equal(imported.status,201,imported.bytes.toString());assert.equal(imported.json().recording.mappedCount,2);
+  const restored=await persistence.getRecordingAsset(f.session.id,imported.json().recording.id,{audio:true});
+  assert.equal(restored.audio,null);assert.equal(restored.features.length,asset.features.length);
+});
+
+test('local chunks reject foreign, malformed and stale data; language correction fences old uploads',async t=>{
+  const f=fixture();t.after(()=>f.dispose());const r=await createLocal(f);
+  const base=`/api/session/${f.session.id}/recordings/${r.id}`;
+  assert.equal((await request(f,base+'/local/chunks/0',{...chunkRequest(localChunk(r,0)),cookie:''})).status,401);
+  f.session.ownerUserId='other';assert.equal((await request(f,base+'/local/state')).status,404);f.session.ownerUserId='reference-api-owner';
+  assert.equal((await request(f,base+'/local/chunks/1',chunkRequest(localChunk(r,0)))).status,400);
+  const corrupt=localChunk(r,0);corrupt.writeFloatLE(NaN,corrupt.length-4);
+  assert.equal((await request(f,base+'/local/chunks/0',chunkRequest(corrupt))).status,400);
+  assert.equal((await request(f,base+'/local/chunks/0',chunkRequest(localChunk(r,0,{revision:999})))).status,400);
+  assert.equal((await request(f,base+'/local/chunks/0',chunkRequest(localChunk(r,0)))).status,200);
+  const language=await request(f,base+'/language',{method:'PUT',body:{language:'en'}});
+  assert.equal(language.status,200);assert.equal(language.json().recording.localRevision,2);
+  assert.equal((await request(f,base+'/local/state')).json().completed.length,0);
+  assert.equal((await request(f,base+'/local/chunks/0',chunkRequest(localChunk(r,0)))).status,400);
+  assert.equal((await persistence.getRecordingAsset(f.session.id,r.id,{audio:true})).audio,null);
+});
+
+test('local token grants remain server-authenticated, short-lived, rate-limited and never expose the provider key',async t=>{
+  let calls=0;
+  const f=fixture({recordingRequest:async(url,options)=>{
+    calls++;assert.equal(url,'https://api.deepgram.com/v1/auth/grant');
+    assert.equal(JSON.parse(options.body).ttl_seconds,120);
+    assert.equal(options.headers.Authorization,'Token test-only-not-a-real-key');
+    return {ok:true,json:async()=>({access_token:'temporary-test-token',expires_in:120})};
+  }});t.after(()=>f.dispose());const r=await createLocal(f),base=`/api/session/${f.session.id}/recordings/${r.id}`;
+  for(let i=0;i<12;i++) {
+    const response=await request(f,base+'/local/token',{method:'POST'});
+    assert.equal(response.status,200);assert.equal(response.json().token,'temporary-test-token');
+    assert.equal(response.headers['cache-control'],'no-store');assert.ok(!response.bytes.includes('test-only-not-a-real-key'));
+  }
+  assert.equal((await request(f,base+'/local/token',{method:'POST'})).status,400);assert.equal(calls,12);
+});
+
+test('browser and server feature extractors produce identical bytes including chunk boundaries',async()=>{
+  const {extractFeatures:browserExtract}=await import('../../client/src/lib/recording-features.js');
+  const samples=Buffer.concat([phrasePcm(phrases[0]),phrasePcm(phrases[1])]);
+  const typed=new Int16Array(samples.buffer,samples.byteOffset,samples.length/2);
+  assert.deepEqual(Buffer.from(browserExtract(typed).features),extractFeatures(samples).features);
+  const split=640*30;
+  const first=Buffer.from(browserExtract(typed.subarray(0,split)).features);
+  const last=Buffer.from(browserExtract(typed.subarray(split)).features);
+  const header=Buffer.from(first.subarray(0,24));header.writeUInt32LE(first.readUInt32LE(20)+last.readUInt32LE(20),20);
+  assert.deepEqual(Buffer.concat([header,first.subarray(24),last.subarray(24)]),extractFeatures(samples).features);
+});
+
+test('a local recording realigns cached results without contacting Deepgram; a corrupt backup cannot replace its asset',async t=>{
+  let calls=0;const f=fixture({recordingRequest:async()=>{calls++;throw new Error('must not call provider');}});
+  t.after(()=>f.dispose());const r=await createLocal(f),base=`/api/session/${f.session.id}/recordings/${r.id}`;
+  const words=[{word:'我們今晚開始演出',start:0,end:1.44,confidence:.99}];
+  assert.equal((await request(f,base+'/local/chunks/0',chunkRequest(localChunk(r,0,{words})))).status,200);
+  await request(f,base+'/local/finish',{method:'POST'});await waitFor(()=>f.session.recordings[0].status==='ready');
+  const revision=f.session.recordings[0].revision;
+  assert.equal((await request(f,base+'/align',{method:'POST'})).status,202);
+  await waitFor(()=>f.session.recordings[0].status==='ready'&&f.session.recordings[0].revision>revision+1);
+  assert.equal(calls,0);
+  const backup=unpack((await request(f,base+'/local/export')).bytes,20*1024*1024);
+  backup.metadata.recording.segments.find(segment=>segment.lineId==='a').end=-1;
+  const response=await request(f,`/api/session/${f.session.id}/recordings/local/import`,{
+    method:'POST',body:pack(backup.metadata,backup.features),headers:{'content-type':'application/octet-stream'}});
+  assert.equal(response.status,400);assert.equal(f.session.recordings[0].segments.find(segment=>segment.lineId==='a').end,1.44);
+  assert.equal((await persistence.getRecordingAsset(f.session.id,r.id)).analysis.words[0].word,words[0].word);
 });

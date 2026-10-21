@@ -5401,7 +5401,7 @@ const ControlPage = () => {
                 />
               </div>
               <span className="input-note">
-                可直接在控制端匯入或匯出整個節目的語言、所有場次、字幕內容與投影設定。
+                可直接在控制端匯入或匯出整個節目的語言、所有場次、字幕內容與投影設定。錄音分析資料請另外在「參考錄音」匯出，音檔請自行備份。
               </span>
             </div>
             </ControlSection>

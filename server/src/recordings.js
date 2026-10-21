@@ -60,6 +60,8 @@ function validSegments(session, recording) {
 function publicRecording(recording, {details = false, session} = {}) {
   const {id, name, originalName, duration, byteLength, mime, cellId, status, progress, error, createdAt, revision, language, scriptLanguageId} = recording;
   return {id, name, originalName, duration, byteLength, mime, cellId, status, progress, error, createdAt, revision, language, scriptLanguageId,
+    ...(recording.source === 'local' ? {source: 'local', fingerprint: recording.fingerprint,
+      chunkSeconds: recording.chunkSeconds, localRevision: recording.localRevision} : {}),
     mappedCount: recording.segments.filter(s => ['auto','manual'].includes(s.status)).length,
     reviewCount: recording.segments.filter(s => ['review','unmatched','stale'].includes(s.status)).length,
     ...(details ? {segments: recording.segments} : {}),

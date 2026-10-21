@@ -1,31 +1,14 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
+import {pickRecording, recallRecording, forgetRecording} from '../lib/local-recordings'
+import {prepareLocalRecording, linkLocalRecording, localKey, recordingJSON} from '../lib/local-recording-client'
 
-const labels = {analysing: '分析聲音', transcribing: '辨識並對齊', ready: '已完成', error: '處理失敗', interrupted: '處理中斷', missing: '需重新匯入音檔'}
+const labels = {local: '待完成本機準備', analysing: '分析聲音', transcribing: '辨識並對齊', ready: '已完成', error: '處理失敗', interrupted: '處理中斷', missing: '需重新匯入音檔'}
 const segmentLabels = {auto: '自動對齊', manual: '已校正', review: '待確認', unmatched: '未對齊', stale: '字幕已修改', direction: '舞台指示'}
-const timeLabel = seconds => `${Math.floor((seconds || 0) / 60)}:${((seconds || 0) % 60).toFixed(2).padStart(5, '0')}`
-
-async function decodeRecording(file) {
-  const Context = window.AudioContext || window.webkitAudioContext
-  if (!Context) throw new Error('此瀏覽器無法解碼錄音，請使用新版 Chrome 或 Edge')
-  const context = new Context({sampleRate: 16000})
-  try {
-    const audio = await context.decodeAudioData(await file.arrayBuffer())
-    if (!Number.isFinite(audio.duration) || audio.duration <= 0) throw new Error('音檔沒有可讀取的錄音內容')
-    const worker = new Worker(new URL('../lib/recording-decode-worker.js', import.meta.url), {type: 'module'})
-    const channels = Array.from({length: audio.numberOfChannels}, (_, i) => audio.getChannelData(i).slice())
-    const pcm = await new Promise((resolve, reject) => {
-      worker.onmessage = ({data}) => { worker.terminate(); data.error ? reject(new Error(data.error)) : resolve(data.pcm) }
-      worker.onerror = () => { worker.terminate(); reject(new Error('無法分析音訊，請重試')) }
-      worker.postMessage({channels, sampleRate: audio.sampleRate, duration: audio.duration}, channels.map(channel => channel.buffer))
-    })
-    return new Blob([pcm], {type: 'application/octet-stream'})
-  } catch (error) {
-    if (error.name === 'EncodingError') throw new Error('無法解碼此錄音，請改用 WAV、MP3 或 M4A')
-    throw error
-  } finally { await context.close() }
+const timeLabel = seconds => {
+  const ticks = Math.max(0, Math.round((seconds || 0) * 100)), hours = Math.floor(ticks / 360000)
+  const minutes = Math.floor(ticks / 6000) % 60, tail = ((ticks % 6000) / 100).toFixed(2).padStart(5, '0')
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
 }
-
-const recordingMime = file => file.type || ({wav:'audio/wav', mp3:'audio/mpeg', m4a:'audio/mp4', flac:'audio/flac', ogg:'audio/ogg', webm:'audio/webm', aac:'audio/aac'}[file.name.split('.').at(-1)?.toLowerCase()] || 'application/octet-stream')
 
 export default function RecordingsPanel({sessionId, cellId, lines, referenceAudio, microphoneActive,
   performanceLanguage, sourceLanguages, followingScript, languages, visible = true}) {
@@ -35,6 +18,11 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const [lineId, setLineId] = useState(lines[0]?.id || '')
   const [canTranscribe, setCanTranscribe] = useState(false)
   const [peaks, setPeaks] = useState([])
+  const [waveInfo, setWaveInfo] = useState({from: 0, peakSeconds: 1})
+  const [localFile, setLocalFile] = useState(null)
+  const [audioSource, setAudioSource] = useState('')
+  const [fileNotice, setFileNotice] = useState('')
+  const jobRef = useRef(null), pickIntent = useRef('import'), backupRef = useRef(null)
   const [start, setStart] = useState(0), [end, setEnd] = useState(1)
   const [viewport, setViewport] = useState(null)
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
@@ -75,6 +63,29 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     const interval = window.setInterval(refresh, 2000)
     return () => { disposed = true; window.clearInterval(interval) }
   }, [load, cellId, scriptSignature, performanceLanguage, followingScript?.languageId, visible])
+  useEffect(() => () => jobRef.current?.abort(), [])
+  useEffect(() => () => jobRef.current?.abort(), [sessionId, cellId])
+  useEffect(() => {
+    let disposed = false
+    setFileNotice('')
+    if (recording?.source === 'local') {
+      recallRecording(localKey(sessionId, selectedId)).then(entry => {
+        if (disposed) return
+        if (entry?.file && entry.fingerprint === recording.fingerprint && entry.file.size === recording.byteLength &&
+          (entry.lastModified === undefined || entry.lastModified === entry.file.lastModified)) {
+          setLocalFile({id: selectedId, entry})
+        } else setFileNotice('原音檔尚未連結。已完成的跟戲資料仍可使用；試聽或繼續辨識時再連結。')
+      }).catch(() => { if (!disposed) setFileNotice('無法恢復本機檔案，請重新連結；已完成的跟戲資料仍可使用。') })
+    }
+    return () => { disposed = true }
+  }, [sessionId, selectedId, recording?.source, recording?.fingerprint, recording?.byteLength])
+  useEffect(() => {
+    if (recording?.source !== 'local') { setAudioSource(selectedId ? `${base}/${selectedId}/audio` : ''); return }
+    if (localFile?.id !== selectedId) { setAudioSource(''); return }
+    const url = URL.createObjectURL(localFile.entry.file)
+    setAudioSource(url)
+    return () => URL.revokeObjectURL(url)
+  }, [base, selectedId, recording?.source, localFile])
   useEffect(() => { setRecordingLanguage(recording?.language || '') }, [selectedId, recording?.language])
   useEffect(() => {
     if (!lines.some(line => line.id === lineId)) setLineId(lines[0]?.id || '')
@@ -88,13 +99,13 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     let disposed = false
     const audio = audioRef.current
     setPeaks([]); setPlayTime(0); clipEndRef.current = null
-    if (selectedId) fetch(`${base}/${encodeURIComponent(selectedId)}/waveform`).then(async response => {
+    if (selectedId && (recording?.source !== 'local' || recording?.status === 'ready')) fetch(`${base}/${encodeURIComponent(selectedId)}/waveform${recording?.source === 'local' && viewport ? `?start=${viewport.start}&end=${viewport.end}` : ''}`).then(async response => {
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || '無法載入波形')
-      if (!disposed) setPeaks(data.peaks || [])
+      if (!disposed) { setPeaks(data.peaks || []); setWaveInfo({from: data.from || 0, peakSeconds: data.peakSeconds || data.duration / Math.max(1, data.peaks?.length || 0)}) }
     }).catch(error => { if (!disposed) setError(error.message) })
     return () => { disposed = true; audio?.pause() }
-  }, [base, selectedId, recording?.status])
+  }, [base, selectedId, recording?.status, recording?.source, viewport])
 
   const mutation = async (path, options) => {
     const response = await fetch(base + path, options)
@@ -105,23 +116,59 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const act = async (label, callback) => {
     if (busy) return
     setBusy(label); setError(''); setNotice('')
-    try { await callback() } catch (error) { setError(error.message) } finally { setBusy('') }
+    try { await callback() } catch (error) { if (error.name === 'AbortError') setNotice('準備已停止，已保存的片段可稍後繼續。'); else setError(error.message) } finally { setBusy('') }
+  }
+  const processEntry = (entry, intent) => act('正在核對本機音檔…', async () => {
+    const abort = new AbortController()
+    jobRef.current = abort
+    const scope = scopeRef.current
+    try {
+      if (intent === 'link') {
+        const linked = await linkLocalRecording({entry, sessionId, recording, signal: abort.signal, onProgress: setBusy})
+        if (scope === scopeRef.current) {
+          setLocalFile({id: selectedId, entry: linked}); setFileNotice('')
+          setNotice(linked.remembered ? '已連結原音檔，可直接試聽。' : '已連結原音檔；瀏覽器無法保存連結，重開時需再選取。')
+        }
+      } else {
+        await prepareLocalRecording({entry, sessionId, cellId, language: importLanguage === 'performance' ? performanceLanguage : importLanguage,
+          existing: intent === 'resume' ? recording : null, signal: abort.signal, onProgress: setBusy, onNotice: setNotice,
+          onRecording: (value, linked) => {
+            if (scope === scopeRef.current) {
+              setRecordings(previous => [...previous.filter(item => item.id !== value.id), value])
+              setSelectedId(value.id); setLocalFile({id: value.id, entry: linked}); setFileNotice('')
+            }
+          }})
+        await load()
+      }
+    } finally { jobRef.current = null }
+  })
+  const chooseFile = async (intent = 'import') => {
+    if (busy) return
+    pickIntent.current = intent
+    try {
+      if (intent !== 'import') {
+        const entry = await recallRecording(localKey(sessionId, selectedId), true).catch(() => null)
+        if (entry) { await processEntry(entry, intent); return }
+      }
+      const entry = await pickRecording()
+      if (entry) await processEntry(entry, intent)
+      else inputRef.current?.click()
+    } catch (error) { if (error.name !== 'AbortError') setError(error.message) }
   }
   const handleImport = event => {
     const file = event.target.files?.[0]
     event.target.value = ''
+    if (file) void processEntry({file}, pickIntent.current)
+  }
+  const importBackup = event => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
     if (!file) return
-    void act('正在解碼與上傳…', async () => {
-      if (file.size > 128 * 1024 * 1024) throw new Error('音檔最多 128 MB，請壓縮音檔後再匯入')
-      const pcm = await decodeRecording(file)
-      const form = new FormData()
-      form.append('audio', new Blob([file], {type: recordingMime(file)}), file.name)
-      form.append('pcm', pcm, 'reference.pcm')
-      form.append('cellId', cellId)
-      form.append('name', file.name)
-      form.append('language', importLanguage === 'performance' ? performanceLanguage : importLanguage)
-      const data = await mutation('', {method: 'POST', body: form})
-      setSelectedId(data.recording.id); setNotice('錄音已匯入，背景分析進度會自動更新')
+    void act('匯入錄音分析備份…', async () => {
+      const data = await recordingJSON(`${base}/local/import?cellId=${encodeURIComponent(cellId)}`, {method: 'POST',
+        headers: {'Content-Type': 'application/octet-stream'}, body: file})
+      await load(); setSelectedId(data.recording.id)
+      setNotice('分析資料已還原；若台詞標記不符目前劇本，請重新自動切段。試聽時再連結原音檔。')
     })
   }
   const handleSave = () => act('保存中…', async () => {
@@ -142,13 +189,13 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     if (!peaks.length || !recording?.duration) return ''
     const points = []
     for (let i = 0; i < peaks.length; i++) {
-      const seconds = i / peaks.length * recording.duration
+      const seconds = waveInfo.from + i * waveInfo.peakSeconds
       if (seconds < viewStart || seconds > viewEnd) continue
       const x = (seconds - viewStart) / (viewEnd - viewStart) * 1000
       points.push(`${x.toFixed(1)},${(50 - peaks[i] * 44).toFixed(1)}`)
     }
     return points.join(' ')
-  }, [peaks, recording?.duration, viewStart, viewEnd])
+  }, [peaks, recording?.duration, viewStart, viewEnd, waveInfo])
   const moveHandle = (type, seconds) => {
     if (type === 'start') setStart(Math.max(0, Math.min(Number(end) - 0.12, seconds)))
     else setEnd(Math.min(recording.duration, Math.max(Number(start) + 0.12, seconds)))
@@ -166,16 +213,19 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
       </select>
     </label>
     <div className="recording-actions">
-      <button type="button" onClick={() => inputRef.current?.click()} disabled={Boolean(busy) || recordings.length >= 5}>
-        {busy === '正在解碼與上傳…' ? busy : '匯入錄音並自動切段'}
+      <button type="button" onClick={() => void chooseFile()} disabled={Boolean(busy)}>
+        {busy || '連結本機錄音並自動切段'}
       </button>
       <input ref={inputRef} type="file" accept="audio/*,.wav,.mp3,.m4a,.flac" hidden onChange={handleImport}/>
-      <small>錄音時長不限；每份最多 128 MB，每個節目最多 5 份。</small>
+      <small>原音檔留在本機，辨識片段直接送至 Deepgram；網站只保存分析資料。支援超過三小時錄音，單份最長 12 小時，每個節目最多 5 份。</small>
+      <button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={() => backupRef.current?.click()}>匯入分析備份</button>
+      <input ref={backupRef} type="file" accept=".subtitle-audio" hidden onChange={importBackup}/>
+      {busy && jobRef.current && <button type="button" className="subtle-button" onClick={() => jobRef.current?.abort()}>停止準備</button>}
     </div>
     {!canTranscribe && <p className="recording-note">尚未設定 Deepgram 金鑰，匯入後可先手動標記片段。</p>}
     {scopeRecordings.length > 0 && <>
       <label className="recording-select">目前場次的錄音
-        <select value={scopeRecordings.some(r => r.id === selectedId) ? selectedId : ''} onChange={event => setSelectedId(event.target.value)}>
+        <select disabled={Boolean(busy)} value={scopeRecordings.some(r => r.id === selectedId) ? selectedId : ''} onChange={event => setSelectedId(event.target.value)}>
           <option value="" disabled>選擇錄音</option>
           {scopeRecordings.map(r => <option key={r.id} value={r.id}>{r.name} · {languageName(r.language)} · {labels[r.status] || r.status}</option>)}
         </select>
@@ -187,6 +237,19 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           <span>{languageName(recording.language)} · 劇本欄：{languages.find(language => language.id === recording.scriptLanguageId)?.name || '尚未對應'}</span>
           {processing && <progress max="100" value={recording.progress || 0} aria-label="錄音處理進度"/>}
         </div>
+        {recording.source === 'local' && <div className="recording-actions">
+          <button type="button" className="subtle-button" disabled={Boolean(busy) || processing} onClick={() => void chooseFile('link')}>連結原音檔供試聽</button>
+          <button type="button" className="subtle-button" disabled={Boolean(busy) || processing} onClick={() => {
+            if (recording.segments.some(segment => segment.status === 'manual') && !window.confirm('補做辨識可能更新已校正的片段，確定繼續？')) return
+            void chooseFile('resume')
+          }}>繼續準備／補做辨識</button>
+          {recording.status === 'ready' && <button type="button" className="subtle-button" onClick={() => {
+            const link = document.createElement('a')
+            link.href = `${base}/${selectedId}/local/export`; link.download = `${recording.name}.subtitle-audio`; link.click()
+          }}>匯出分析備份</button>}
+          {audioSource && <small>本機音檔已連結</small>}
+          {fileNotice && <small>{fileNotice}</small>}
+        </div>}
         {recording.error && <p className="recording-note">{recording.error}</p>}
         {recording.followingScript?.message && <p className="recording-note">{recording.followingScript.message}</p>}
         <label className="recording-select">錄音辨識語言
@@ -215,7 +278,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           <button type="button" className="subtle-button danger-button" disabled={Boolean(busy)}
             onClick={() => {
               if (!window.confirm(`確定移除錄音「${recording.name}」與對齊標記？字幕劇本會保留。`)) return
-              void act('移除中…', () => mutation(`/${selectedId}`, {method: 'DELETE'}))
+              void act('移除中…', async () => { await mutation(`/${selectedId}`, {method: 'DELETE'}); await forgetRecording(localKey(sessionId, selectedId)).catch(() => {}); setLocalFile(null) })
             }}>移除錄音</button>
         </div>
         <p className="recording-note">{activeId === selectedId ? '此錄音已啟用；未確認的片段仍由文字跟戲。' : '此錄音尚未啟用，現場仍由文字跟戲。'}</p>
@@ -226,7 +289,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           {Number.isFinite(referenceAudio.confidence) && ` · 聲音相似度 ${Math.round(referenceAudio.confidence * 100)}%`}
           {referenceAudio.error && ` · ${referenceAudio.error}`}
         </p>}
-        <audio ref={audioRef} controls preload="metadata" src={`${base}/${selectedId}/audio`}
+        <audio ref={audioRef} controls preload="metadata" src={audioSource || undefined}
           onTimeUpdate={event => {
             setPlayTime(event.currentTarget.currentTime)
             if (clipEndRef.current !== null && event.currentTarget.currentTime >= clipEndRef.current) {

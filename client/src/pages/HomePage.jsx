@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { forgetLocalSession } from '../lib/local-recordings'
 
 const HomePage = () => {
   const navigate = useNavigate()
@@ -168,6 +169,7 @@ const HomePage = () => {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.error || '刪除節目失敗')
+      await forgetLocalSession(session.id).catch(() => {})
       setSessions((previous) => previous.filter((entry) => entry.id !== session.id))
       setNotice(`已刪除節目「${title}」`)
     } catch (deleteError) {

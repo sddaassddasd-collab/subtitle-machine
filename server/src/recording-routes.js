@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const multer = require('multer');
 const persistence = require('./persistence');
+const {registerLocalRecordingRoutes} = require('./local-recording-routes');
 const {runRecordingTask} = require('./recording-runtime');
 const {MAX_FILE_BYTES, MAX_RECORDINGS, normalizeRecordings, refreshMappings,
   recordingLines, publicRecording, validateSegmentEdit, hashText} = require('./recordings');
@@ -56,6 +57,9 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     return recording;
   };
   const save = async session => { refreshMappings(session); await persist(session); broadcast(session.id); };
+  const localRecordings = registerLocalRecordingRoutes(app, {
+    requireAuth, sessionFor, wrap, save, find, jobs, storage, task, request, invalidate, sessions,
+  });
 
   async function processRecording(sessionId, recordingId, uploadedAsset = null) {
     const session = sessions.get(sessionId), recording = session?.recordings.find(r => r.id === recordingId);
@@ -90,7 +94,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
         }
         recording.status = 'transcribing'; await save(session);
         const query = new URLSearchParams({model: 'nova-3', language: recording.language || session.transcriptionLanguage || 'zh-TW',
-          punctuate: 'true', smart_format: 'true'});
+          punctuate: 'true', smart_format: 'true', mip_opt_out: 'true'});
         const timeout = setTimeout(() => job.abort.abort(), transcriptionTimeoutMs);
         let result;
         try {
@@ -173,6 +177,12 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
   }));
   app.post('/api/session/:sessionId/recordings/:recordingId/align', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
+    if (recording.source === 'local') {
+      if (jobs.size || localRecordings.writing(recording.id)) throw new Error('錄音正在處理中');
+      recording.scriptLanguageId = resolveFollowingLanguage(req.recordingSession, recording.language).languageId;
+      recording.revision++; invalidate(req.recordingSession.id);
+      res.status(202).json({ok: true}); void localRecordings.align(req.recordingSession, recording); return;
+    }
     if (jobs.size + uploading >= 1 || jobs.has(recording.id)) return res.status(409).json({error: '錄音正在處理中'});
     recording.scriptLanguageId = resolveFollowingLanguage(req.recordingSession, recording.language).languageId;
     recording.revision++; invalidate(req.recordingSession.id);
@@ -185,6 +195,10 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     if (jobs.size + uploading >= 1) return res.status(409).json({error: '錄音正在處理中，完成後再修改語言'});
     const session = req.recordingSession;
     if (language === recording.language) return res.json({recording: publicRecording(recording, {details: true, session})});
+    if (recording.source === 'local') {
+      await localRecordings.changeLanguage(session, recording, language);
+      return res.json({recording: publicRecording(recording, {details: true, session})});
+    }
     const previous = {...recording}, active = session.activeRecordingId;
     recording.transcriptCacheLanguage ||= recording.language;
     recording.language = language; recording.scriptLanguageId = resolveFollowingLanguage(session, language).languageId;
@@ -226,12 +240,17 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
   }));
   app.get('/api/session/:sessionId/recordings/:recordingId/waveform', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
-    const asset = await storage.getRecordingAsset(req.recordingSession.id, recording.id);
+    const asset = await storage.getRecordingAsset(req.recordingSession.id, recording.id, {features: false});
     if (!asset) return res.status(404).json({error: '音檔不存在，請重新匯入'});
-    res.json({peaks: asset.analysis.peaks || [], duration: recording.duration, featuresReady: Boolean(asset.features)});
+    if (recording.source === 'local' && asset.analysis.finePeaks) {
+      return res.json({...localRecordings.waveform(asset.analysis.finePeaks, recording.duration, req.query.start, req.query.end),
+        featuresReady: asset.featuresReady});
+    }
+    res.json({peaks: asset.analysis.peaks || [], duration: recording.duration, featuresReady: asset.featuresReady});
   }));
   app.get('/api/session/:sessionId/recordings/:recordingId/audio', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
+    if (recording.source === 'local') return res.status(404).json({error: '此錄音保留在本機，請在控制端連結原音檔後試聽'});
     let start = 0, end = recording.byteLength - 1;
     if (req.headers.range) {
       const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
@@ -248,6 +267,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
   }));
   app.delete('/api/session/:sessionId/recordings/:recordingId', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
+    if (localRecordings.writing(recording.id)) throw new Error('錄音片段正在保存，請稍後再移除');
     const session = req.recordingSession, previous = session.recordings, active = session.activeRecordingId;
     session.recordings = previous.filter(r => r.id !== recording.id);
     if (active === recording.id) session.activeRecordingId = null;

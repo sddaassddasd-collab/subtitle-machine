@@ -4215,7 +4215,9 @@ function createImportedSessionFromBackup(payload, authUser) {
   session.activeRecordingId = null;
   for (const recording of session.recordings) {
     recording.status = 'missing';
-    recording.error = '字幕 JSON 備份不包含音檔，請重新匯入參考錄音。';
+    recording.error = recording.source === 'local'
+      ? '節目 JSON 不包含錄音分析資料，請匯入錄音分析備份；若無備份，連結原音檔重新準備。'
+      : '字幕 JSON 備份不包含音檔，請重新匯入參考錄音。';
   }
   session.history = { past: [], future: [] };
   session.transcription = defaultTranscriptionState();

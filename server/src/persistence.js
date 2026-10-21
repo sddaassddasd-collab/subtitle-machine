@@ -134,13 +134,28 @@ function initializeSqliteDatabase(db) {
     CREATE TABLE IF NOT EXISTS recording_assets (
       session_id TEXT NOT NULL,
       recording_id TEXT NOT NULL,
-      audio BLOB NOT NULL,
+      audio BLOB,
       pcm BLOB,
       features BLOB,
       analysis TEXT NOT NULL DEFAULT '{}',
       PRIMARY KEY (session_id, recording_id)
     );
   `);
+  if (db.prepare('PRAGMA table_info(recording_assets)').all().find(column => column.name === 'audio')?.notnull) {
+    try { db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE recording_assets RENAME TO recording_assets_legacy;
+      CREATE TABLE recording_assets (session_id TEXT NOT NULL, recording_id TEXT NOT NULL,
+        audio BLOB, pcm BLOB, features BLOB, analysis TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (session_id, recording_id));
+      INSERT INTO recording_assets SELECT * FROM recording_assets_legacy;
+      DROP TABLE recording_assets_legacy;
+      COMMIT;`); }
+    catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS recording_chunks (
+    session_id TEXT NOT NULL, recording_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+    features BLOB NOT NULL, analysis TEXT NOT NULL,
+    PRIMARY KEY (session_id, recording_id, chunk_index))`);
 }
 
 function getSqliteDatabase() {
@@ -164,10 +179,15 @@ async function initializePostgresDatabase(pool) {
     )
   `);
   await pool.query(`CREATE TABLE IF NOT EXISTS recording_assets (
-    session_id TEXT NOT NULL, recording_id TEXT NOT NULL, audio BYTEA NOT NULL,
+    session_id TEXT NOT NULL, recording_id TEXT NOT NULL, audio BYTEA,
     pcm BYTEA, features BYTEA, analysis JSONB NOT NULL DEFAULT '{}',
     PRIMARY KEY (session_id, recording_id)
   )`);
+  await pool.query('ALTER TABLE recording_assets ALTER COLUMN audio DROP NOT NULL');
+  await pool.query(`CREATE TABLE IF NOT EXISTS recording_chunks (
+    session_id TEXT NOT NULL, recording_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+    features BYTEA NOT NULL, analysis JSONB NOT NULL,
+    PRIMARY KEY (session_id, recording_id, chunk_index))`);
 }
 
 async function getPostgresPool() {
@@ -310,16 +330,24 @@ async function writeRecordingAssetsToPostgres(client, filePath, sessions) {
   const db = new DatabaseSync(filePath, { readOnly: true });
   try {
     if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='recording_assets'").get()) return;
+    const bytes = value => value ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : null;
     const retained = new Set(sessions.flatMap(session => Array.isArray(session?.recordings)
       ? session.recordings.filter(recording => recording?.id).map(recording => JSON.stringify([session.id, recording.id])) : []));
     // Copy one asset at a time within the same transaction as its manifest.
     // A failed migration leaves PostgreSQL empty and can safely be retried.
     for (const asset of db.prepare('SELECT * FROM recording_assets').iterate()) {
       if (!retained.has(JSON.stringify([asset.session_id, asset.recording_id]))) continue;
-      const bytes = value => value ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : null;
       await client.query(`INSERT INTO recording_assets (session_id, recording_id, audio, pcm, features, analysis)
         VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (session_id, recording_id) DO NOTHING`,
       [asset.session_id, asset.recording_id, bytes(asset.audio), bytes(asset.pcm), bytes(asset.features), asset.analysis]);
+    }
+    if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='recording_chunks'").get()) {
+      for (const chunk of db.prepare('SELECT * FROM recording_chunks').iterate()) {
+        if (!retained.has(JSON.stringify([chunk.session_id, chunk.recording_id]))) continue;
+        await client.query(`INSERT INTO recording_chunks (session_id,recording_id,chunk_index,features,analysis)
+          VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING`,
+        [chunk.session_id, chunk.recording_id, chunk.chunk_index, bytes(chunk.features), chunk.analysis]);
+      }
     }
   } finally { db.close(); }
 }
@@ -498,16 +526,16 @@ async function putRecordingAsset(sessionId, recordingId, asset) {
       (session_id, recording_id, audio, pcm, features, analysis) VALUES ($1,$2,$3,$4,$5,$6)
       ON CONFLICT (session_id, recording_id) DO UPDATE SET
       audio=EXCLUDED.audio, pcm=EXCLUDED.pcm, features=EXCLUDED.features, analysis=EXCLUDED.analysis`,
-    [sessionId, recordingId, asset.audio, asset.pcm || null, asset.features || null, JSON.stringify(asset.analysis || {})]);
+    [sessionId, recordingId, asset.audio || null, asset.pcm || null, asset.features || null, JSON.stringify(asset.analysis || {})]);
   } else {
     getSqliteDatabase().prepare(`INSERT OR REPLACE INTO recording_assets
       (session_id, recording_id, audio, pcm, features, analysis) VALUES (?,?,?,?,?,?)`)
-      .run(sessionId, recordingId, asset.audio, asset.pcm || null, asset.features || null, JSON.stringify(asset.analysis || {}));
+      .run(sessionId, recordingId, asset.audio || null, asset.pcm || null, asset.features || null, JSON.stringify(asset.analysis || {}));
   }
 }
 
-async function getRecordingAsset(sessionId, recordingId, { audio = false, pcm = false } = {}) {
-  const columns = `features, analysis${audio ? ', audio' : ''}${pcm ? ', pcm' : ''}`;
+async function getRecordingAsset(sessionId, recordingId, { audio = false, pcm = false, features = true } = {}) {
+  const columns = `${features ? 'features' : '(features IS NOT NULL) AS features_ready'}, analysis${audio ? ', audio' : ''}${pcm ? ', pcm' : ''}`;
   let row;
   if (PERSISTENCE_BACKEND === 'postgres') {
     row = (await (await getPostgresPool()).query(`SELECT ${columns} FROM recording_assets
@@ -519,6 +547,7 @@ async function getRecordingAsset(sessionId, recordingId, { audio = false, pcm = 
   if (!row) return null;
   const bytes = value => value ? (Buffer.isBuffer(value) ? value : Buffer.from(value.buffer, value.byteOffset, value.byteLength)) : null;
   return { ...row, analysis: typeof row.analysis === 'string' ? JSON.parse(row.analysis) : row.analysis,
+    featuresReady: features ? Boolean(row.features) : Boolean(row.features_ready),
     features: bytes(row.features), audio: bytes(row.audio), pcm: bytes(row.pcm) };
 }
 
@@ -546,12 +575,44 @@ async function getRecordingAudioRange(sessionId, recordingId, start, length) {
 }
 
 async function deleteRecordingAssets(sessionId, recordingId = null) {
+  await deleteRecordingChunks(sessionId, recordingId);
   if (PERSISTENCE_BACKEND === 'postgres') {
     await (await getPostgresPool()).query(`DELETE FROM recording_assets WHERE session_id=$1${recordingId ? ' AND recording_id=$2' : ''}`,
       recordingId ? [sessionId, recordingId] : [sessionId]);
   } else {
     getSqliteDatabase().prepare(`DELETE FROM recording_assets WHERE session_id=?${recordingId ? ' AND recording_id=?' : ''}`)
       .run(...(recordingId ? [sessionId, recordingId] : [sessionId]));
+  }
+}
+
+async function putRecordingChunk(sessionId, recordingId, index, features, analysis) {
+  const values = [sessionId, recordingId, index, features, JSON.stringify(analysis)];
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    await (await getPostgresPool()).query(`INSERT INTO recording_chunks
+      (session_id,recording_id,chunk_index,features,analysis) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (session_id,recording_id,chunk_index) DO UPDATE SET features=EXCLUDED.features,analysis=EXCLUDED.analysis`, values);
+  } else {
+    getSqliteDatabase().prepare(`INSERT OR REPLACE INTO recording_chunks
+      (session_id,recording_id,chunk_index,features,analysis) VALUES (?,?,?,?,?)`).run(...values);
+  }
+}
+
+async function getRecordingChunks(sessionId, recordingId, {features = false} = {}) {
+  const columns = `chunk_index,analysis${features ? ',features' : ''}`;
+  const rows = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query(`SELECT ${columns} FROM recording_chunks WHERE session_id=$1 AND recording_id=$2 ORDER BY chunk_index`, [sessionId, recordingId])).rows
+    : getSqliteDatabase().prepare(`SELECT ${columns} FROM recording_chunks WHERE session_id=? AND recording_id=? ORDER BY chunk_index`).all(sessionId, recordingId);
+  return rows.map(row => ({index: row.chunk_index,
+    analysis: typeof row.analysis === 'string' ? JSON.parse(row.analysis) : row.analysis,
+    ...(features ? {features: Buffer.from(row.features)} : {})}));
+}
+
+async function deleteRecordingChunks(sessionId, recordingId = null) {
+  const values = recordingId ? [sessionId, recordingId] : [sessionId];
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    await (await getPostgresPool()).query(`DELETE FROM recording_chunks WHERE session_id=$1${recordingId ? ' AND recording_id=$2' : ''}`, values);
+  } else {
+    getSqliteDatabase().prepare(`DELETE FROM recording_chunks WHERE session_id=?${recordingId ? ' AND recording_id=?' : ''}`).run(...values);
   }
 }
 
@@ -612,5 +673,8 @@ module.exports = {
   updateRecordingAnalysis,
   getRecordingAudioRange,
   deleteRecordingAssets,
+  putRecordingChunk,
+  getRecordingChunks,
+  deleteRecordingChunks,
   verifyPassword,
 };
