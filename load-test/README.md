@@ -1,5 +1,17 @@
 # 字幕機壓力測試
 
+## 80 人觀眾連線測試
+
+已安裝 `client` 的依賴套件時，可執行：
+
+```bash
+node load-test/watch-viewers.cjs
+```
+
+約 20 秒逐步建立 80 位觀眾，全部連線並收到初始字幕後，再共同保持 5 分鐘。使用與觀眾頁相同的 Socket.IO 預設傳輸設定，每 5 秒檢查 `/healthz`，記錄斷線、初始載入時間及各字幕版本的接收人數。結果存於 `load-test/reports/80-watch-時間.json`。
+
+可用 `TARGET`、`VIEWER_TOKEN`、`ARRIVAL_COUNT`、`RAMP_SECONDS`、`HOLD_SECONDS` 覆寫設定。程式只讀取觀眾資料，不操作播放位置；若期間沒有切換字幕，結果只驗證連線維持與初始字幕接收。健康檢查時間不代表字幕顯示延遲，CPU 與記憶體需另外查看 Render Metrics。
+
 這組測試針對正式站的公開觀眾端，模擬 Socket.IO 觀眾載入目前字幕、加入場次房間及保持長連線。預設使用：
 
 - 正式站：`https://subtitle-machine.onrender.com`
