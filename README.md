@@ -145,6 +145,8 @@ npm run test:audio-load --prefix server
 - `DEEPGRAM_API_KEY`：Deepgram Project API Key，只可存在伺服器環境變數，不可提交至 Git 或傳到瀏覽器。
 - `OPENAI_API_KEY`（選填）：使用 Deepgram 時，可在後端設定此金鑰，將每個 Deepgram final 段落送交 OpenAI 文字精修一次。若控制端已填入 OpenAI API Key，則會優先使用該金鑰；兩者都沒有時保留 Deepgram 原文。
 
+若本機錄音出現「無法取得 Deepgram 短期授權」，先檢查新版本提示中的 HTTP 狀態：401 表示需要檢查後端金鑰是否有效；403 表示 Deepgram 拒絕核發 token，請依[官方說明](https://developers.deepgram.com/guides/fundamentals/token-based-authentication#why-do-i-get-a-forbidden-error)在同一個專案的 API Keys → Create Key → Advanced 建立 Member 或以上權限的金鑰。Member 是 API Key 的權限設定；能做即時辨識的金鑰不一定能核發短期 token。在 Render 的後端服務 Environment 更新 `DEEPGRAM_API_KEY`，儲存並重新部署，完成後在「參考錄音」按「繼續準備／補做辨識」，已保存的片段會重用。429 是授權頻率限制，5xx 或連線逾時則應稍後重試，不應一律更換金鑰。
+
 Deepgram 與 OpenAI Realtime 的 interim 原文會直接顯示，不等待二次精修；若已有觀眾選擇翻譯語言，後端會將最新草稿節流送交 OpenAI 串流翻譯，讓觀眾先看到暫定譯文。暫定譯文採穩定遞增顯示：新結果只會延長相容的既有文字，不會用較短或內容矛盾的串流片段反覆清空、倒退或覆寫畫面。final 原文仍沿用原本的二次精修流程，精修完成後才另外產生正式譯文，並一次取代暫定譯文。草稿翻譯與原文資料完全分開，不會寫回、覆蓋或延遲原文字幕；翻譯超時、失敗或沒有 OpenAI 金鑰時，原文仍照常顯示。「辨識主題 / 術語提示」會同時提供給草稿翻譯及原文精修。
 
 即時語音模式下，檢視端會改用獨立的即時翻譯語言選單（原文、English、日本語、한국어、Español、Français、Deutsch）。後端只會將已有觀眾需求的語言送交 OpenAI 翻譯，且每個 final 段落、每種語言只產生一份共用結果。新加入的觀眾可補齊最近 10 個段落；控制端會顯示各翻譯語言的即時需求人數。選擇翻譯語言後，檢視端只顯示該語言已成功產生的譯文；尚未翻出、處理中或失敗時不顯示原文及狀態文案。只有觀眾明確選擇「原文」才顯示原文。離開即時模式後，檢視端會恢復原本的劇本語言選擇。

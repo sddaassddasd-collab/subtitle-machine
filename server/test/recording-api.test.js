@@ -464,3 +464,37 @@ test('a local recording realigns cached results without contacting Deepgram; a c
   assert.equal(response.status,400);assert.equal(f.session.recordings[0].segments.find(segment=>segment.lineId==='a').end,1.44);
   assert.equal((await persistence.getRecordingAsset(f.session.id,r.id)).analysis.words[0].word,words[0].word);
 });
+
+test('token failures distinguish upstream credentials, permissions, rate limits and service errors without leaking secrets',async t=>{
+  const requestId='12345678-abcd-1234-abcd-123456789abc';
+  for(const [status,expected,httpStatus] of [[401,/HTTP 401.*是否有效/,502],[403,/HTTP 403.*Member/,502],
+    [429,/HTTP 429.*稍後/,429],[503,/HTTP 503.*稍後/,502],[400,/HTTP 400.*設定/,502]]) {
+    await t.test(String(status),async t=>{
+      const f=fixture({recordingRequest:async()=>({ok:false,status,json:async()=>({
+        err_code:'UPSTREAM_ERROR',err_msg:'test-only-not-a-real-key',request_id:requestId,
+      })})});t.after(()=>f.dispose());const r=await createLocal(f);
+      const response=await request(f,`/api/session/${f.session.id}/recordings/${r.id}/local/token`,{method:'POST'});
+      assert.equal(response.status,httpStatus);assert.match(response.json().error,expected);
+      assert.equal(response.json().providerStatus,status);assert.equal(response.json().requestId,requestId);
+      assert.equal(response.headers['cache-control'],'no-store');assert.ok(!response.bytes.includes('test-only-not-a-real-key'));
+      if(status!==403)assert.ok(!response.json().error.includes('Member'));
+      assert.equal((await request(f,`/api/session/${f.session.id}/recordings/${r.id}/local/state`)).json().completed.length,0);
+    });
+  }
+});
+
+test('token transport failures and malformed responses remain actionable and never expose raw provider errors',async t=>{
+  for(const [name,transport,expected,status] of [
+    ['timeout',async()=>{throw Object.assign(new Error('test-only-not-a-real-key'),{name:'TimeoutError'});},/逾時/,504],
+    ['network',async()=>{throw new Error('test-only-not-a-real-key');},/網路/,502],
+    ['malformed',async()=>({ok:true,json:async()=>{throw new Error('invalid response');}}),/未回傳有效/,502],
+    ['non-json denial',async()=>({ok:false,status:403,json:async()=>{throw new Error('invalid response');}}),/HTTP 403.*Member/,502],
+  ]) {
+    await t.test(name,async t=>{
+      const f=fixture({recordingRequest:transport});t.after(()=>f.dispose());const r=await createLocal(f);
+      const reply=await request(f,`/api/session/${f.session.id}/recordings/${r.id}/local/token`,{method:'POST'});
+      assert.equal(reply.status,status);assert.match(reply.json().error,expected);
+      assert.ok(!reply.bytes.includes('test-only-not-a-real-key'));assert.equal(reply.headers['cache-control'],'no-store');
+    });
+  }
+});

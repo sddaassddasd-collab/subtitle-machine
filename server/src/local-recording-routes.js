@@ -163,6 +163,7 @@ function registerLocalRecordingRoutes(app, context) {
   }));
   app.post(`${prefix}/:recordingId/local/token`, requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = local(req, res); if (!recording) return;
+    res.set('Cache-Control', 'no-store');
     const key = String(process.env.DEEPGRAM_API_KEY || '').trim();
     if (!key) fail('尚未設定 Deepgram 金鑰');
     const now = Date.now(), owner = req.recordingSession.ownerUserId;
@@ -170,13 +171,36 @@ function registerLocalRecordingRoutes(app, context) {
     const bucket = tokens.get(owner) || {at: now, count: 0};
     if (++bucket.count > 12) fail('辨識授權要求過於頻繁，請稍後再試');
     tokens.set(owner, bucket);
-    const response = await request('https://api.deepgram.com/v1/auth/grant', {method: 'POST',
-      headers: {Authorization: `Token ${key}`, 'Content-Type': 'application/json'}, body: JSON.stringify({ttl_seconds: 120}),
-      signal: AbortSignal.timeout(20000)});
-    if (!response.ok) fail('無法取得 Deepgram 短期授權，請確認後端金鑰具備 Member 權限');
-    const result = await response.json();
-    if (!result.access_token || !finite(result.expires_in, 1, 3600)) fail('Deepgram 未回傳有效授權');
-    res.set('Cache-Control', 'no-store').json({token: result.access_token, expiresIn: result.expires_in});
+    let response;
+    try {
+      response = await request('https://api.deepgram.com/v1/auth/grant', {method: 'POST',
+        headers: {Authorization: `Token ${key}`, 'Content-Type': 'application/json'}, body: JSON.stringify({ttl_seconds: 120}),
+        signal: AbortSignal.timeout(20000)});
+    } catch (error) {
+      const timeout = ['TimeoutError', 'AbortError'].includes(error.name);
+      return res.status(timeout ? 504 : 502).json({error: timeout
+        ? '連線至 Deepgram 授權服務逾時，請稍後再試。'
+        : '後端無法連線至 Deepgram 授權服務，請檢查伺服器網路或稍後再試。'});
+    }
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      const status = response.status;
+      let message;
+      if (status === 401) message = 'Deepgram 未接受後端金鑰（HTTP 401），請確認後端 DEEPGRAM_API_KEY 是否有效、已過期或已撤銷。';
+      else if (status === 403) message = 'Deepgram 拒絕核發短期授權（HTTP 403）。請由管理員在 Deepgram API Keys → Create Key → Advanced 建立 Member 或以上權限的金鑰，更新後端 DEEPGRAM_API_KEY 並重新部署。';
+      else if (status === 429) message = 'Deepgram 授權請求過於頻繁（HTTP 429），請稍後再試。';
+      else if (status >= 500) message = `Deepgram 授權服務暫時異常（HTTP ${status}），請稍後再試。`;
+      else message = `Deepgram 未接受短期授權請求（HTTP ${status}），請檢查後端授權設定。`;
+      // Only expose a provider correlation ID. Upstream error text or headers
+      // can echo credentials and must never be returned to the browser.
+      const requestId = typeof result?.request_id === 'string' &&
+        /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(result.request_id)
+        ? result.request_id : undefined;
+      return res.status(status === 429 ? 429 : 502).json({error: message, providerStatus: status, requestId});
+    }
+    if (typeof result?.access_token !== 'string' || !result.access_token || !finite(result.expires_in, 1, 3600))
+      return res.status(502).json({error: 'Deepgram 未回傳有效的短期授權，請稍後再試。'});
+    res.json({token: result.access_token, expiresIn: result.expires_in});
   }));
   app.put(`${prefix}/:recordingId/local/chunks/:index`, requireAuth, sessionFor,
     express.raw({type: 'application/octet-stream', limit: MAX_CHUNK_BYTES}), wrap(async (req, res) => {
