@@ -1,4 +1,5 @@
 import {openRecordingWorker, rememberRecording, checkpoint, clearCheckpoint, wavBlob, analysisBlob} from './local-recordings.js'
+import {absoluteWords} from './recording-clock.js'
 
 export const localKey = (sessionId, recordingId) => `${sessionId}:${recordingId}`
 export async function recordingJSON(url, options = {}) {
@@ -23,7 +24,8 @@ export async function linkLocalRecording({entry, sessionId, recording, signal, o
   } finally { worker.close() }
 }
 
-async function transcribe(base, recording, pcm, from, signal, auth, retry = true) {
+async function transcribe(base, recording, pcm, clock, signal, auth, retry = true) {
+  if (pcm.byteLength !== clock.sampleCount * 2) throw new Error('片段樣本數與實際音訊不符，請重新準備')
   if (!auth.token || auth.expiresAt < Date.now() + 15000) {
     const grant = await post(`${base}/${recording.id}/local/token`, {}, signal)
     auth.token = grant.token; auth.expiresAt = Date.now() + grant.expiresIn * 1000
@@ -35,13 +37,15 @@ async function transcribe(base, recording, pcm, from, signal, auth, retry = true
     body: wavBlob(pcm), signal: AbortSignal.any([signal, AbortSignal.timeout(600000)])})
   if (response.status === 401 && retry) {
     auth.token = null
-    return transcribe(base, recording, pcm, from, signal, auth, false)
+    return transcribe(base, recording, pcm, clock, signal, auth, false)
   }
   if (!response.ok) throw new Error(`Deepgram 片段辨識失敗（${response.status}），已保存的片段不必重跑，請稍後繼續`)
   const result = await response.json()
   const alternative = result.results?.channels?.[0]?.alternatives?.[0]
   if (!alternative || !Array.isArray(alternative.words)) throw new Error('Deepgram 未回傳有效片段結果，請稍後繼續')
-  return alternative.words.map(word => ({word: word.word, start: word.start + from, end: word.end + from, confidence: word.confidence}))
+  const providerDuration = result.metadata?.duration
+  const words = absoluteWords(alternative.words, clock, providerDuration)
+  return {words, clock: {...clock, ...(Number.isFinite(providerDuration) ? {providerDuration} : {})}}
 }
 
 export async function prepareLocalRecording({entry, sessionId, cellId, language, existing,
@@ -54,7 +58,8 @@ export async function prepareLocalRecording({entry, sessionId, cellId, language,
     if (existing && (existing.fingerprint !== info.fingerprint || existing.byteLength !== entry.file.size))
       throw new Error('選取的音檔與此份分析資料不同，請連結原音檔，或另外匯入新版錄音')
     const recording = existing || (await post(`${base}/local`, {name: entry.file.name, originalName: entry.file.name,
-      mime: entry.file.type, byteLength: entry.file.size, duration: info.duration, fingerprint: info.fingerprint, cellId, language}, signal)).recording
+      mime: entry.file.type, byteLength: entry.file.size, duration: info.duration, fingerprint: info.fingerprint,
+      decoderClock: info.decoderClock, cellId, language}, signal)).recording
     const key = localKey(sessionId, recording.id)
     try { await rememberRecording(key, {...entry, fingerprint: info.fingerprint}) }
     catch { onNotice('本機儲存空間不足或權限受限；本次仍可使用，重開網站時可能需要重新連結音檔。') }
@@ -76,13 +81,14 @@ export async function prepareLocalRecording({entry, sessionId, cellId, language,
       if (pending && (pending.metadata.fingerprint !== recording.fingerprint || (state.canTranscribe && !pending.metadata.transcribed))) pending = null
       if (!pending) {
         const chunk = await worker.chunk(start, end)
-        let words = []
+        let words = [], clock = chunk.clock
         if (state.canTranscribe) {
           onProgress(`辨識片段 ${index + 1}／${state.total}`)
-          words = await transcribe(base, recording, chunk.pcm, chunk.from, signal, auth)
+          const result = await transcribe(base, recording, chunk.pcm, chunk.clock, signal, auth)
+          words = result.words; clock = result.clock
         }
         pending = {features: chunk.features, metadata: {fingerprint: recording.fingerprint, language: recording.language,
-          localRevision: state.localRevision, transcribed: state.canTranscribe, words, peaks: chunk.peaks}}
+          localRevision: state.localRevision, transcribed: state.canTranscribe, words, peaks: chunk.peaks, clock}}
         await checkpoint(cacheKey, index, pending).catch(() => {})
       }
       onProgress(`保存片段 ${index + 1}／${state.total}`)

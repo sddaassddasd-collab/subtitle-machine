@@ -1,5 +1,6 @@
 import {Input, ALL_FORMATS, BlobSource, AudioSampleSink} from 'mediabunny'
 import {extractFeatures} from './recording-features.js'
+import {chunkClock} from './recording-clock.js'
 
 let input, track, duration
 async function fingerprint(file) {
@@ -16,8 +17,9 @@ async function fingerprint(file) {
 }
 
 async function decodeChunk(start, end) {
-  const from = Math.max(0, start - 2), to = Math.min(duration, end + 2)
-  const first = Math.round(from * 16000), length = Math.round(to * 16000) - first
+  const clock = chunkClock(duration, start, end)
+  const first = clock.fromSample, length = clock.sampleCount
+  const from = first / 16000, to = (first + length) / 16000
   const pcm = new Int16Array(length)
   let decoded = false
   const sink = new AudioSampleSink(track)
@@ -55,7 +57,7 @@ async function decodeChunk(start, end) {
     for (let i = offset; i < Math.min(core.length, offset + 1600); i++) peak = Math.max(peak, Math.abs(core[i]) / 32768)
     peaks.push(Math.round(peak * 10000) / 10000)
   }
-  return {pcm: pcm.buffer, features: result.features, peaks, from, start, end}
+  return {pcm: pcm.buffer, features: result.features, peaks, from, start, end, clock}
 }
 
 self.onmessage = async ({data}) => {
@@ -67,7 +69,8 @@ self.onmessage = async ({data}) => {
       if (!track || !await track.canDecode()) throw new Error('此瀏覽器無法逐段解碼此格式，請使用新版 Chrome／Edge，或轉成 PCM WAV')
       duration = await track.computeDuration()
       if (!Number.isFinite(duration) || duration <= 0) throw new Error('錄音沒有可讀取的內容')
-      self.postMessage({id: data.id, duration: Math.round(duration * 16000) / 16000, fingerprint: await fingerprint(data.file)})
+      self.postMessage({id: data.id, duration: Math.round(duration * 16000) / 16000, fingerprint: await fingerprint(data.file),
+        decoderClock: {sourceSampleRate: await track.getSampleRate(), firstTimestamp: await track.getFirstTimestamp()}})
     } else if (data.type === 'chunk') {
       const result = await decodeChunk(data.start, data.end)
       self.postMessage({id: data.id, ...result}, [result.pcm, result.features])

@@ -10,7 +10,7 @@ parentPort.on('message', message => {
       parentPort.postMessage({type: 'extracted', ...result});
     } else if (message.type === 'align') {
       parentPort.postMessage({type: 'aligned', segments: alignSegments(message.lines, message.words,
-        message.duration, bytes(message.features))});
+        message.duration, message.features ? bytes(message.features) : null, message.options)});
     } else if (message.type === 'configure') {
       frontend = new StreamingFeatures();
       follower = new AcousticFollower(bytes(message.features), message.segments);

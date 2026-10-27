@@ -1,4 +1,5 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
+import RecordingTranscript from './RecordingTranscript'
 import {pickRecording, recallRecording, forgetRecording} from '../lib/local-recordings'
 import {prepareLocalRecording, linkLocalRecording, localKey, recordingJSON} from '../lib/local-recording-client'
 
@@ -11,12 +12,14 @@ const timeLabel = seconds => {
 }
 
 export default function RecordingsPanel({sessionId, cellId, lines, referenceAudio, microphoneActive,
-  performanceLanguage, sourceLanguages, followingScript, languages, visible = true}) {
+  performanceLanguage, sourceLanguages, followingScript, languages, apiKey, visible = true}) {
   const [recordings, setRecordings] = useState([])
   const [selectedId, setSelectedId] = useState('')
   const [activeId, setActiveId] = useState(null)
   const [lineId, setLineId] = useState(lines[0]?.id || '')
   const [canTranscribe, setCanTranscribe] = useState(false)
+  const [canAlignWithAI, setCanAlignWithAI] = useState(false)
+  const [playerDuration, setPlayerDuration] = useState(null)
   const [peaks, setPeaks] = useState([])
   const [waveInfo, setWaveInfo] = useState({from: 0, peakSeconds: 1})
   const [localFile, setLocalFile] = useState(null)
@@ -49,7 +52,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     if (!response.ok) throw new Error(data.error || '無法載入錄音')
     if (scope !== scopeRef.current) return
     setRecordings(data.recordings || []); setActiveId(data.activeRecordingId)
-    setCanTranscribe(data.canTranscribe)
+    setCanTranscribe(data.canTranscribe); setCanAlignWithAI(data.canAlignWithAI)
     const candidates = data.recordings.filter(r => r.cellId === cellId)
     setSelectedId(previous => candidates.some(r => r.id === previous)
       ? previous : candidates.find(r => r.id === data.activeRecordingId)?.id || candidates[0]?.id || '')
@@ -80,6 +83,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     return () => { disposed = true }
   }, [sessionId, selectedId, recording?.source, recording?.fingerprint, recording?.byteLength])
   useEffect(() => {
+    setPlayerDuration(null)
     if (recording?.source !== 'local') { setAudioSource(selectedId ? `${base}/${selectedId}/audio` : ''); return }
     if (localFile?.id !== selectedId) { setAudioSource(''); return }
     const url = URL.createObjectURL(localFile.entry.file)
@@ -179,11 +183,12 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const playClip = async () => {
     const audio = audioRef.current
     const from = Number(start), to = Number(end)
-    if (!audio || !Number.isFinite(from) || !Number.isFinite(to) || to <= from || from < 0 || to > recording.duration) return
+    if (!audio || !Number.isFinite(from) || !Number.isFinite(to) || to <= from || from < 0 || to > (playerDuration || recording.playbackDuration || recording.duration)) return
     audio.currentTime = from; clipEndRef.current = to
     try { await audio.play() } catch { setError('無法播放錄音，請重新點擊試聽') }
   }
-  const viewStart = viewport?.start || 0, viewEnd = viewport?.end || recording?.duration || 1
+  const displayDuration = playerDuration || recording?.playbackDuration || recording?.duration || 1
+  const viewStart = viewport?.start || 0, viewEnd = viewport?.end || displayDuration
   const xAt = seconds => Math.max(0, Math.min(1000, (seconds - viewStart) / (viewEnd - viewStart) * 1000))
   const wavePoints = useMemo(() => {
     if (!peaks.length || !recording?.duration) return ''
@@ -198,7 +203,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   }, [peaks, recording?.duration, viewStart, viewEnd, waveInfo])
   const moveHandle = (type, seconds) => {
     if (type === 'start') setStart(Math.max(0, Math.min(Number(end) - 0.12, seconds)))
-    else setEnd(Math.min(recording.duration, Math.max(Number(start) + 0.12, seconds)))
+    else setEnd(Math.min(displayDuration, Math.max(Number(start) + 0.12, seconds)))
   }
   const processing = ['analysing','transcribing'].includes(recording?.status)
   const scopeRecordings = recordings.filter(r => r.cellId === cellId)
@@ -240,7 +245,6 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         {recording.source === 'local' && <div className="recording-actions">
           <button type="button" className="subtle-button" disabled={Boolean(busy) || processing} onClick={() => void chooseFile('link')}>連結原音檔供試聽</button>
           <button type="button" className="subtle-button" disabled={Boolean(busy) || processing} onClick={() => {
-            if (recording.segments.some(segment => segment.status === 'manual') && !window.confirm('補做辨識可能更新已校正的片段，確定繼續？')) return
             void chooseFile('resume')
           }}>繼續準備／補做辨識</button>
           {recording.status === 'ready' && <button type="button" className="subtle-button" onClick={() => {
@@ -250,6 +254,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           {audioSource && <small>本機音檔已連結</small>}
           {fileNotice && <small>{fileNotice}</small>}
         </div>}
+        {recording.alignmentNotice && <p className="recording-note">{recording.alignmentNotice}</p>}
         {recording.error && <p className="recording-note">{recording.error}</p>}
         {recording.followingScript?.message && <p className="recording-note">{recording.followingScript.message}</p>}
         <label className="recording-select">錄音辨識語言
@@ -264,6 +269,8 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
               headers: {'Content-Type': 'application/json'}, body: JSON.stringify({language: recordingLanguage})}))
           }}>套用語言並重新辨識</button>
         <div className="recording-actions">
+          {processing && <button type="button" className="subtle-button" onClick={() => act('正在停止對齊…', () =>
+            mutation(`/${selectedId}/cancel`, {method: 'POST'}))}>停止對齊</button>}
           <button type="button" className="subtle-button" disabled={Boolean(busy) || recording.status !== 'ready' ||
             (activeId !== selectedId && (!recording.mappedCount || !compatible))}
             onClick={() => act('切換中…', () => mutation('/active', {method: 'PUT', headers: {'Content-Type': 'application/json'},
@@ -272,7 +279,6 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           </button>
           <button type="button" className="subtle-button" disabled={Boolean(busy) || processing}
             onClick={() => {
-              if (recording.segments.some(s => s.status === 'manual') && !window.confirm('重新自動切段會更新已校正的片段範圍，確定繼續？')) return
               void act('重新切段…', () => mutation(`/${selectedId}/align`, {method: 'POST'}))
             }}>{canTranscribe ? '重新自動切段' : '重新分析錄音'}</button>
           <button type="button" className="subtle-button danger-button" disabled={Boolean(busy)}
@@ -281,6 +287,16 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
               void act('移除中…', async () => { await mutation(`/${selectedId}`, {method: 'DELETE'}); await forgetRecording(localKey(sessionId, selectedId)).catch(() => {}); setLocalFile(null) })
             }}>移除錄音</button>
         </div>
+        <div className="recording-actions">
+          <button type="button" className="subtle-button" disabled={Boolean(busy) || processing} onClick={() =>
+            act('重算這格附近…', () => mutation(`/${selectedId}/align`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({lineId})}))}>重算這格附近</button>
+          <button type="button" className="subtle-button" disabled={Boolean(busy) || processing || !(apiKey || canAlignWithAI)} onClick={() =>
+            act('AI 補對齊…', () => mutation(`/${selectedId}/align`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: 'ai', apiKey})}))}>AI 補對齊待確認片段</button>
+          <button type="button" className="subtle-button" disabled={Boolean(busy) || processing || !(apiKey || canAlignWithAI)} onClick={() =>
+            act('AI 核對這格附近…', () => mutation(`/${selectedId}/align`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: 'ai', apiKey, lineId})}))}>AI 核對這格附近</button>
+        </div>
+        <small>重新切段會保留人工校正。AI 使用設定中的 OpenAI 金鑰，僅送辨識文字及附近劇本，依用量計費。</small>
+        {!(apiKey || canAlignWithAI) && <small>如需 AI 補對齊，請先在設定填入 OpenAI 金鑰。</small>}
         <p className="recording-note">{activeId === selectedId ? '此錄音已啟用；未確認的片段仍由文字跟戲。' : '此錄音尚未啟用，現場仍由文字跟戲。'}</p>
         {!compatible && <p className="recording-note">此錄音的語言或劇本欄與目前演出設定不同，無法啟用；請選擇對應錄音，或確認劇本欄後重新自動切段。</p>}
         {referenceAudio?.recordingId === selectedId && <p className="recording-live-status">
@@ -290,6 +306,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           {referenceAudio.error && ` · ${referenceAudio.error}`}
         </p>}
         <audio ref={audioRef} controls preload="metadata" src={audioSource || undefined}
+          onLoadedMetadata={event => {if (Number.isFinite(event.currentTarget.duration)) setPlayerDuration(event.currentTarget.duration)}}
           onTimeUpdate={event => {
             setPlayTime(event.currentTarget.currentTime)
             if (clipEndRef.current !== null && event.currentTarget.currentTime >= clipEndRef.current) {
@@ -308,6 +325,11 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             <button type="button" className="subtle-button" disabled={lineIndex >= lines.length - 1} onClick={() => setLineId(lines[lineIndex + 1].id)}>下一格</button>
             <span className={`recording-segment-state ${segment?.status || 'unmatched'}`}>{segmentLabels[segment?.status] || '未對齊'}</span>
           </div>
+          {segment?.matchedText && <p className="recording-note">辨識對應：{segment.matchedText}</p>}
+          {segment?.reviewReason && <p className="recording-note">{segment.reviewReason}</p>}
+          {segment?.status === 'manual' && <div className="recording-actions"><small>此格已人工鎖定，重算時會保留。</small>
+            <button type="button" className="subtle-button" disabled={Boolean(busy) || processing} onClick={() => act('解除校正鎖定…', () =>
+              mutation(`/${selectedId}/segments/${encodeURIComponent(lineId)}/unlock`, {method: 'POST'}))}>解除校正鎖定</button></div>}
           <p className="recording-subtitle">{currentLine.text || '此語言缺少台詞，請先補齊對應劇本欄'}</p>
           {currentLine.type === 'direction' && <small>舞台指示保留在控制端；現場仍依句尾與靜默規則清屏。</small>}
           <svg viewBox="0 0 1000 100" className="recording-waveform" aria-label="錄音波形，可拖曳片段起點與終點"
@@ -323,7 +345,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             <line x1={xAt(playTime)} x2={xAt(playTime)} y1="0" y2="100" stroke="#fbbf24" strokeWidth="2"/>
             {['start','end'].map(type => <rect key={type} x={xAt(type === 'start' ? start : end) - 7} width="14" height="100"
               fill={type === 'start' ? '#22c55e' : '#f97316'} role="slider" tabIndex="0" aria-label={type === 'start' ? '片段起點' : '片段終點'}
-              aria-valuemin="0" aria-valuemax={recording.duration} aria-valuenow={Number(type === 'start' ? start : end)}
+              aria-valuemin="0" aria-valuemax={displayDuration} aria-valuenow={Number(type === 'start' ? start : end)}
               onPointerDown={event => {if (processing) return; dragRef.current = type; event.currentTarget.ownerSVGElement.setPointerCapture(event.pointerId)}}
               onKeyDown={event => {
                 if (!['ArrowLeft','ArrowRight'].includes(event.key)) return
@@ -333,13 +355,13 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           </svg>
           <div className="recording-actions">
             <span>{timeLabel(viewStart)} — {timeLabel(viewEnd)}</span>
-            <button type="button" className="subtle-button" onClick={() => setViewport(viewport ? null : {start: Math.max(0, Number(start) - 2), end: Math.min(recording.duration, Number(end) + 2)})}>
+            <button type="button" className="subtle-button" onClick={() => setViewport(viewport ? null : {start: Math.max(0, Number(start) - 2), end: Math.min(displayDuration, Number(end) + 2)})}>
               {viewport ? '整段錄音' : '放大片段'}
             </button>
           </div>
           <div className="recording-boundaries">
-            <label>起點（秒）<input type="number" disabled={processing} min="0" max={recording.duration} step="0.01" value={start} onChange={event => setStart(event.target.value)}/></label>
-            <label>終點（秒）<input type="number" disabled={processing} min="0" max={recording.duration} step="0.01" value={end} onChange={event => setEnd(event.target.value)}/></label>
+            <label>起點（秒）<input type="number" disabled={processing} min="0" max={displayDuration} step="0.01" value={start} onChange={event => setStart(event.target.value)}/></label>
+            <label>終點（秒）<input type="number" disabled={processing} min="0" max={displayDuration} step="0.01" value={end} onChange={event => setEnd(event.target.value)}/></label>
           </div>
           <div className="recording-actions">
             <button type="button" className="subtle-button" onClick={() => moveHandle('start', audioRef.current?.currentTime || 0)}>播放位置設為起點</button>
@@ -349,6 +371,8 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
               (currentLine.type !== 'direction' && !currentLine.text?.trim())}>確認並保存範圍</button>
           </div>
         </div>}
+        <RecordingTranscript recording={recording} base={base} lineId={lineId} segment={segment} audioRef={audioRef}
+          playerDuration={playerDuration} visible={visible} disabled={Boolean(busy) || processing} act={act} mutation={mutation}/>
       </>}
     </>}
     {!scopeRecordings.length && <p className="recording-note">目前場次尚無參考錄音，沿用文字辨識跟戲。</p>}

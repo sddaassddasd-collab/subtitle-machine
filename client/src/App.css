@@ -3003,3 +3003,14 @@ textarea.script-line-text.editing {
   .script-column-heading { grid-template-columns: 75px minmax(0, 1fr); }
   .workspace-live-heading { flex-wrap: wrap; }
 }
+
+.recording-transcript { display: grid; gap: .6rem; min-width: 0; border-top: 1px solid #334155; padding-top: .7rem; }
+.recording-transcript summary { cursor: pointer; font-size: .85rem; }
+.recording-transcript > * { margin-top: .6rem; }
+.recording-words { display: flex; flex-wrap: wrap; gap: .3rem; max-height: 280px; overflow: auto; }
+.recording-words button { display: grid; gap: .15rem; padding: .3rem .45rem; background: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; }
+.recording-words button.mapped { border-color: #2563eb; }
+.recording-words button.selected { background: #1e40af; border-color: #93c5fd; }
+.recording-words small { font-size: .65rem; }
+.recording-anchor { display: flex; align-items: end; flex-wrap: wrap; gap: .5rem; }
+.recording-anchor label { display: grid; gap: .25rem; font-size: .8rem; }

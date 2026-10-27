@@ -2,6 +2,7 @@ const {Worker} = require('node:worker_threads');
 const path = require('node:path');
 const {getRecordingAsset} = require('./persistence');
 const {validSegments} = require('./recordings');
+const {toAnalysis, toPlayback} = require('./recording-timing');
 const {getFollowingLines, isRecordingCompatible} = require('./performance-language');
 const workerPath = path.join(__dirname, 'recording-worker.js');
 const scriptSignature = session => JSON.stringify([session.transcriptionLanguage,
@@ -55,7 +56,9 @@ class RecordingRuntime {
     this.sessions.set(session.id, entry);
     this.onStatus?.(session.id, {status: 'loading', recordingId: recording.id, name: recording.name});
     try {
-      const segments = validSegments(session, recording);
+      const segments = validSegments(session, recording).map(segment => ({...segment,
+        start: Math.max(0, toAnalysis(segment.start, recording.featureCalibration)),
+        end: Math.min(recording.duration, toAnalysis(segment.end, recording.featureCalibration))})).filter(segment => segment.end > segment.start);
       if (!segments.length) throw new Error('尚無已確認的錄音片段，沿用文字跟戲');
       const asset = await this.loadAsset(session.id, recording.id);
       if (this.sessions.get(session.id) !== entry) return;
@@ -67,7 +70,9 @@ class RecordingRuntime {
         if (message.type === 'result') {
           if (message.generation === entry.generation) entry.pending = Math.max(0, entry.pending - 1);
           if (message.generation === entry.generation && message.result) this.onResult?.(session.id, {
-            ...message.result, recordingId: recording.id, revision: entry.revision, generation: entry.generation,
+            ...message.result,
+            ...(Number.isFinite(message.result.referenceSeconds) ? {referenceSeconds: toPlayback(message.result.referenceSeconds, recording.featureCalibration)} : {}),
+            recordingId: recording.id, revision: entry.revision, generation: entry.generation,
           });
         }
         if (message.type === 'error') this.fail(session.id, entry, message.error);

@@ -5,6 +5,8 @@ const {registerLocalRecordingRoutes} = require('./local-recording-routes');
 const {runRecordingTask} = require('./recording-runtime');
 const {MAX_FILE_BYTES, MAX_RECORDINGS, normalizeRecordings, refreshMappings,
   recordingLines, publicRecording, validateSegmentEdit, hashText} = require('./recordings');
+const {analyseAlignment, alignmentOptions} = require('./recording-analysis');
+const {timedWords, timingDiagnostics, fitCalibration, playbackDuration, toAnalysis, toPlayback} = require('./recording-timing');
 const {SOURCE_LANGUAGES, supportedLanguage, normalizePerformanceLanguage, resolveFollowingLanguage,
   describeFollowingScript, isRecordingCompatible} = require('./performance-language');
 
@@ -61,11 +63,11 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     requireAuth, sessionFor, wrap, save, find, jobs, storage, task, request, invalidate, sessions,
   });
 
-  async function processRecording(sessionId, recordingId, uploadedAsset = null) {
+  async function processRecording(sessionId, recordingId, uploadedAsset = null, options = {}) {
     const session = sessions.get(sessionId), recording = session?.recordings.find(r => r.id === recordingId);
     if (!recording || jobs.has(recordingId)) return;
     const job = {abort: new AbortController(), sessionId}; jobs.set(recordingId, job);
-    const current = () => sessions.get(sessionId)?.recordings.find(r => r.id === recordingId);
+    const current = () => sessions.get(sessionId) === session && session.recordings.includes(recording);
     const check = () => { if (job.abort.signal.aborted || !current()) throw new Error('錄音處理已取消'); };
     const analysisTimeoutMs = Math.max(180000, Math.ceil(recording.duration * 100));
     const transcriptionTimeoutMs = Math.max(600000, Math.ceil(recording.duration * 1000));
@@ -114,17 +116,16 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       }
       recording.transcriptCacheLanguage = recording.language;
       recording.progress = 75; await save(session);
-      const script = recordingLines(session, recording).map(line => ({id: line.id, text: line.text, type: line.type}));
-      const aligned = await task({type: 'align', lines: script, words, duration: recording.duration, features: asset.features}, analysisTimeoutMs, job.abort.signal); check();
-      const latestLines = new Map(recordingLines(session, recording).map(line => [line.id, line]));
-      recording.segments = aligned.segments.map(segment => segment.textHash === hashText(latestLines.get(segment.lineId))
-        ? segment : {...segment, status: 'stale'});
+      const segments = await analyseAlignment({session, recording, asset, options, task, storage, request,
+        signal: job.abort.signal, check}); check();
+      recording.segments = segments;
       recording.revision++; recording.status = 'ready'; recording.progress = 100;
       recording.error = ''; invalidate(sessionId);
       await save(session);
     } catch (error) {
       if (current()) {
-        recording.status = 'error'; recording.error = error.name === 'AbortError' ? '錄音辨識超時，請稍後再試或先手動標記片段' : error.message;
+        recording.status = job.abort.signal.aborted ? 'interrupted' : 'error';
+        recording.error = job.abort.signal.aborted ? '錄音處理已停止或逾時，原配對與校正已保留，可稍後重試' : error.message;
         recording.progress = 0; await save(session).catch(() => {});
       }
     } finally { jobs.delete(recordingId); }
@@ -133,7 +134,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
   app.get('/api/session/:sessionId/recordings', requireAuth, sessionFor, wrap(async (req, res) => {
     const session = req.recordingSession; refreshMappings(session);
     res.json({recordings: session.recordings.map(r => publicRecording(r, {details: true, session})),
-      activeRecordingId: session.activeRecordingId, canTranscribe: Boolean(String(process.env.DEEPGRAM_API_KEY || '').trim()),
+      activeRecordingId: session.activeRecordingId, canAlignWithAI: Boolean(String(process.env.OPENAI_API_KEY || '').trim()), canTranscribe: Boolean(String(process.env.DEEPGRAM_API_KEY || '').trim()),
       performanceLanguage: session.transcriptionLanguage, sourceLanguages: SOURCE_LANGUAGES,
       followingScript: describeFollowingScript(session),
       limits: {maxFileBytes: MAX_FILE_BYTES, maxDuration: null, maxRecordings: MAX_RECORDINGS}});
@@ -177,16 +178,17 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
   }));
   app.post('/api/session/:sessionId/recordings/:recordingId/align', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
+    const options = alignmentOptions(req.body, recordingLines(req.recordingSession, recording));
     if (recording.source === 'local') {
       if (jobs.size || localRecordings.writing(recording.id)) throw new Error('錄音正在處理中');
       recording.scriptLanguageId = resolveFollowingLanguage(req.recordingSession, recording.language).languageId;
       recording.revision++; invalidate(req.recordingSession.id);
-      res.status(202).json({ok: true}); void localRecordings.align(req.recordingSession, recording); return;
+      res.status(202).json({ok: true}); void localRecordings.align(req.recordingSession, recording, options); return;
     }
     if (jobs.size + uploading >= 1 || jobs.has(recording.id)) return res.status(409).json({error: '錄音正在處理中'});
     recording.scriptLanguageId = resolveFollowingLanguage(req.recordingSession, recording.language).languageId;
     recording.revision++; invalidate(req.recordingSession.id);
-    res.status(202).json({ok: true}); void processRecording(req.recordingSession.id, recording.id);
+    res.status(202).json({ok: true}); void processRecording(req.recordingSession.id, recording.id, null, options);
   }));
   app.put('/api/session/:sessionId/recordings/:recordingId/language', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
@@ -202,6 +204,7 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     const previous = {...recording}, active = session.activeRecordingId;
     recording.transcriptCacheLanguage ||= recording.language;
     recording.language = language; recording.scriptLanguageId = resolveFollowingLanguage(session, language).languageId;
+    if (recording.timeCalibration) recording.timeCalibration = {...recording.timeCalibration, anchors: []};
     recording.revision++; recording.status = 'analysing'; recording.progress = 0; recording.error = '';
     recording.segments = recordingLines(session, recording).map(line => ({lineId: line.id, textHash: hashText(line),
       start: null, end: null, confidence: 0, status: line.type === 'direction' ? 'direction' : 'unmatched'}));
@@ -238,15 +241,90 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
     try { await save(session); } catch (error) { recording.segments = previous; recording.revision = revision; throw error; }
     invalidate(session.id); res.json({segment});
   }));
+  app.post('/api/session/:sessionId/recordings/:recordingId/segments/:lineId/unlock', requireAuth, sessionFor, wrap(async (req, res) => {
+    const recording = find(req, res); if (!recording) return;
+    if (jobs.has(recording.id) || localRecordings.writing(recording.id)) return res.status(409).json({error: '錄音正在處理中'});
+    const segment = recording.segments.find(segment => segment.lineId === req.params.lineId);
+    if (!segment || segment.status !== 'manual') throw new Error('這格沒有人工校正鎖定');
+    const previous = recording.segments, revision = recording.revision;
+    const unlocked = {...segment, status: 'review', reviewReason: '已解除人工鎖定，可重新配對'};
+    recording.segments = previous.map(value => value === segment ? unlocked : value); recording.revision++;
+    try { await save(req.recordingSession); } catch (error) { recording.segments = previous; recording.revision = revision; throw error; }
+    invalidate(req.recordingSession.id); res.json({segment: unlocked});
+  }));
+  app.post('/api/session/:sessionId/recordings/:recordingId/cancel', requireAuth, sessionFor, wrap(async (req, res) => {
+    const recording = find(req, res); if (!recording) return;
+    jobs.get(recording.id)?.abort.abort();
+    res.json({ok: true});
+  }));
+  app.get('/api/session/:sessionId/recordings/:recordingId/transcript', requireAuth, sessionFor, wrap(async (req, res) => {
+    const recording = find(req, res); if (!recording) return;
+    const asset = await storage.getRecordingAsset(req.recordingSession.id, recording.id, {features: false});
+    if (!asset) return res.status(404).json({error: '錄音分析資料不存在'});
+    const words = timedWords(asset.analysis.words, recording.duration, recording.timeCalibration);
+    let offset = Math.max(0, Math.min(words.length, Math.floor(Number(req.query.offset) || 0)));
+    if (req.query.offset === undefined) {
+      const segment = recording.segments.find(segment => segment.lineId === req.query.lineId);
+      const at = req.query.at === undefined ? segment?.start : Number(req.query.at);
+      if (Number.isFinite(at)) offset = Math.max(0, words.findIndex(word => word.end >= at) - 8);
+    }
+    const selected = words.slice(offset, offset + 120);
+    res.set('Cache-Control', 'no-store').json({words: selected, offset, total: words.length,
+      previousOffset: offset > 0 ? Math.max(0, offset - 100) : null,
+      nextOffset: offset + 120 < words.length ? offset + 100 : null,
+      diagnostics: timingDiagnostics(recording, asset.analysis, Number(req.query.playerDuration) || undefined)});
+  }));
+  app.put('/api/session/:sessionId/recordings/:recordingId/timing', requireAuth, sessionFor, wrap(async (req, res) => {
+    const recording = find(req, res); if (!recording) return;
+    if (jobs.size + uploading || localRecordings.writing(recording.id)) return res.status(409).json({error: '錄音正在處理中'});
+    const session = req.recordingSession;
+    const reservation = {abort: new AbortController(), sessionId: session.id};
+    jobs.set(recording.id, reservation);
+    const check = () => {
+      reservation.abort.signal.throwIfAborted();
+      if (sessions.get(session.id) !== session || !session.recordings.includes(recording)) throw new Error('錄音已移除');
+    };
+    try {
+      const asset = await storage.getRecordingAsset(session.id, recording.id, {features: false}); check();
+      if (!asset?.analysis.words?.length) throw new Error('請先完成錄音辨識');
+      const duration = req.body.playerDuration || playbackDuration(recording);
+      const value = fitCalibration(req.body.anchors, asset.analysis.words, recording.duration, duration);
+      const previous = {timeCalibration: recording.timeCalibration, featureCalibration: recording.featureCalibration,
+        playbackDuration: recording.playbackDuration, segments: recording.segments, revision: recording.revision};
+      recording.segments = recording.segments.map(segment => {
+        if (segment.status === 'manual' || !Number.isFinite(segment.start) || !Number.isFinite(segment.end)) return segment;
+        const rawStart = segment.rawStart ?? toAnalysis(segment.start, previous.timeCalibration);
+        const rawEnd = segment.rawEnd ?? toAnalysis(segment.end, previous.timeCalibration);
+        const start = toPlayback(rawStart, value), end = toPlayback(rawEnd, value);
+        if (start < 0 || end > duration || end <= start) return {...segment, start: null, end: null, status: 'unmatched', reviewReason: '校正後超出原檔，請重新核對'};
+        return {...segment, start, end, rawStart, rawEnd};
+      });
+      recording.timeCalibration = value.anchors.length ? value : null;
+      recording.featureCalibration = req.body.applyToFeatures === true && value.anchors.length ? value : null;
+      recording.playbackDuration = duration; recording.revision++;
+      try { await save(session); } catch (error) { Object.assign(recording, previous); throw error; }
+      check(); invalidate(session.id);
+      jobs.delete(recording.id);
+      res.status(202).json({timeCalibration: value});
+      if (recording.source === 'local') void localRecordings.align(session, recording);
+      else void processRecording(session.id, recording.id);
+    } finally { if (jobs.get(recording.id) === reservation) jobs.delete(recording.id); }
+  }));
   app.get('/api/session/:sessionId/recordings/:recordingId/waveform', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;
     const asset = await storage.getRecordingAsset(req.recordingSession.id, recording.id, {features: false});
     if (!asset) return res.status(404).json({error: '音檔不存在，請重新匯入'});
     if (recording.source === 'local' && asset.analysis.finePeaks) {
-      return res.json({...localRecordings.waveform(asset.analysis.finePeaks, recording.duration, req.query.start, req.query.end),
-        featuresReady: asset.featuresReady});
+      const wave = localRecordings.waveform(asset.analysis.finePeaks, recording.duration,
+        req.query.start === undefined ? 0 : toAnalysis(Number(req.query.start), recording.featureCalibration),
+        req.query.end === undefined ? recording.duration : toAnalysis(Number(req.query.end), recording.featureCalibration));
+      return res.json({...wave, from: toPlayback(wave.from, recording.featureCalibration),
+        peakSeconds: wave.peakSeconds * (recording.featureCalibration?.scale || 1), duration: playbackDuration(recording), featuresReady: asset.featuresReady});
     }
-    res.json({peaks: asset.analysis.peaks || [], duration: recording.duration, featuresReady: asset.featuresReady});
+    const peaks = asset.analysis.peaks || [];
+    res.json({peaks, from: toPlayback(0, recording.featureCalibration),
+      peakSeconds: recording.duration / Math.max(1, peaks.length) * (recording.featureCalibration?.scale || 1),
+      duration: playbackDuration(recording), featuresReady: asset.featuresReady});
   }));
   app.get('/api/session/:sessionId/recordings/:recordingId/audio', requireAuth, sessionFor, wrap(async (req, res) => {
     const recording = find(req, res); if (!recording) return;

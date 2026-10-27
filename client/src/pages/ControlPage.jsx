@@ -5409,7 +5409,7 @@ const ControlPage = () => {
               <RecordingsPanel sessionId={sessionId} cellId={selectedCellId} lines={lines}
                 referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active} visible={activePanel === 'recordings'}
                 performanceLanguage={transcription.language || 'zh-TW'} sourceLanguages={transcription.sourceLanguages}
-                followingScript={transcription.followingScript || sessionMeta?.followingScript} languages={languages}/>
+                followingScript={transcription.followingScript || sessionMeta?.followingScript} languages={languages} apiKey={apiKey}/>
             </ControlSection>
 <ControlSection panel={['follow', 'live']} activePanel={activePanel} title={activePanel === 'live' ? '即時字幕與座談設定' : '自動跟戲與收音設定'} defaultOpen>
             <div className="input-group transcription-panel">

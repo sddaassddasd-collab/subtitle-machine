@@ -4,6 +4,9 @@ const {decodeFeatures} = require('./acoustic-follow');
 const {recordingLines, hashText, publicRecording, MAX_RECORDINGS} = require('./recordings');
 const {supportedLanguage, normalizePerformanceLanguage, resolveFollowingLanguage} = require('./performance-language');
 
+const {analyseAlignment} = require('./recording-analysis');
+const {calibration, fitCalibration} = require('./recording-timing');
+
 const CHUNK_SECONDS = 300;
 const MAX_DURATION = 12 * 3600;
 const MAX_CHUNK_BYTES = 2 * 1024 * 1024;
@@ -70,11 +73,17 @@ function registerLocalRecordingRoutes(app, context) {
     const cellId = body.cellId || session.selectedCellId;
     if (!session.cells.some(cell => cell.id === cellId)) fail('找不到指定場次');
     const language = normalizePerformanceLanguage(body.language || session.transcriptionLanguage);
+    let decoderClock;
+    if (body.decoderClock) {
+      if (!finite(body.decoderClock.sourceSampleRate, 1000, 768000) || !finite(body.decoderClock.firstTimestamp, -86400, 86400))
+        fail('音軌時間資料格式錯誤');
+      decoderClock = {sourceSampleRate: body.decoderClock.sourceSampleRate, firstTimestamp: body.decoderClock.firstTimestamp};
+    }
     return {source: 'local', fingerprint: body.fingerprint, duration: Math.round(body.duration * 16000) / 16000,
       byteLength: body.byteLength, mime: String(body.mime || 'audio/wav').slice(0, 100),
       name: String(body.name || '本機錄音').slice(0, 120), originalName: String(body.originalName || body.name || '本機錄音').slice(0, 160),
       cellId, language, scriptLanguageId: resolveFollowingLanguage(session, language).languageId,
-      chunkSeconds: CHUNK_SECONDS, localRevision: 1};
+      chunkSeconds: CHUNK_SECONDS, localRevision: 1, ...(decoderClock ? {decoderClock} : {})};
   };
   const counts = async (session, recording) => {
     const chunks = await storage.getRecordingChunks(session.id, recording.id);
@@ -85,7 +94,7 @@ function registerLocalRecordingRoutes(app, context) {
       fail('錄音已移除或辨識設定已更新，請重新操作');
   };
 
-  async function align(session, recording) {
+  async function align(session, recording, options = {}) {
     if (jobs.size || locks.has(recording.id)) fail('目前已有錄音正在處理，請稍後再試');
     const job = {abort: new AbortController(), sessionId: session.id};
     jobs.set(recording.id, job);
@@ -101,9 +110,10 @@ function registerLocalRecordingRoutes(app, context) {
         header.writeUInt32LE(chunks.reduce((sum, chunk) => sum + chunk.features.readUInt32LE(20), 0), 20);
         const features = Buffer.concat([header, ...chunks.map(chunk => chunk.features.subarray(24))]);
         validateFeatures(features, recording.duration);
-        const words = [], finePeaks = [];
+        const words = [], finePeaks = [], clocks = [];
         for (const chunk of chunks) {
           finePeaks.push(...chunk.analysis.peaks);
+          if (chunk.analysis.clock) clocks.push({index: chunk.index, ...chunk.analysis.clock});
           for (const word of chunk.analysis.words) {
             const last = words.at(-1);
             if (last && last.word === word.word && word.start < last.end && Math.abs(last.start - word.start) < 0.4) {
@@ -112,28 +122,27 @@ function registerLocalRecordingRoutes(app, context) {
           }
         }
         asset = {features, analysis: {words, finePeaks, frameMs: 40, transcriptionLanguage: recording.language,
-          transcribed: chunks.every(chunk => chunk.analysis.transcribed), localRevision: revision}};
+          transcribed: chunks.every(chunk => chunk.analysis.transcribed), localRevision: revision,
+          clockVersion: clocks.length === total ? 1 : 0, clocks}};
         asset.analysis.peaks = waveform(finePeaks, recording.duration).peaks;
         recheck(session, recording, revision);
         await storage.putRecordingAsset(session.id, recording.id, {...asset, audio: null});
       }
       recheck(session, recording, revision);
       recording.status = 'analysing'; recording.progress = 95; await save(session);
-      const script = recordingLines(session, recording).map(line => ({id: line.id, text: line.text, type: line.type}));
-      const result = await task({type: 'align', lines: script, words: asset.analysis.words || [],
-        duration: recording.duration, features: asset.features}, Math.max(180000, recording.duration * 100), job.abort.signal);
+      const segments = await analyseAlignment({session, recording, asset, options, task, storage, request,
+        signal: job.abort.signal, check: () => { recheck(session, recording, revision); job.abort.signal.throwIfAborted(); }});
       recheck(session, recording, revision);
-      if (job.abort.signal.aborted) fail('錄音處理已停止');
-      const latest = new Map(recordingLines(session, recording).map(line => [line.id, line]));
-      recording.segments = result.segments.map(segment => segment.textHash === hashText(latest.get(segment.lineId))
-        ? segment : {...segment, status: 'stale'});
+      recording.segments = segments;
       recording.status = 'ready'; recording.progress = 100; recording.revision++;
       recording.transcriptCacheLanguage = recording.language;
       recording.error = asset.analysis.words?.length ? '' : '尚無辨識台詞，可先試聽並手動標記；連結原音檔後可補做辨識。';
       invalidate(session.id); await save(session);
     } catch (error) {
       if (sessions.get(session.id) === session && session.recordings.includes(recording) && recording.localRevision === revision) {
-        recording.status = 'interrupted'; recording.error = error.message; await save(session).catch(() => {});
+        recording.status = 'interrupted'; recording.error = job.abort.signal.aborted
+          ? '錄音處理已停止，原配對與校正已保留，可稍後重試' : error.message;
+        await save(session).catch(() => {});
       }
       if (sessions.get(session.id) !== session || !session.recordings.includes(recording))
         await storage.deleteRecordingAssets(session.id, recording.id).catch(() => {});
@@ -220,7 +229,19 @@ function registerLocalRecordingRoutes(app, context) {
           return middle >= start && middle < end;
         });
         const peaks = peaksFor(body.peaks, Math.ceil(Math.round((end - start) * 16000) / 1600));
-        const analysis = {start, end, words, peaks, localRevision: revision, transcribed: body.transcribed === true};
+        let clock;
+        if (body.clock) {
+          const expectedFrom = Math.round(Math.max(0, start - 2) * 16000);
+          const expectedTo = Math.round(Math.min(recording.duration, end + 2) * 16000);
+          if (body.clock.sampleRate !== 16000 || body.clock.fromSample !== expectedFrom ||
+            body.clock.sampleCount !== expectedTo - expectedFrom ||
+            (body.clock.providerDuration !== undefined && (!finite(body.clock.providerDuration, 0, 310) ||
+              Math.abs(body.clock.providerDuration - body.clock.sampleCount / 16000) > 0.25))) fail('片段時間與實際音訊長度不符，請重新準備');
+          clock = {sampleRate: 16000, fromSample: expectedFrom, sampleCount: expectedTo - expectedFrom,
+            ...(body.clock.providerDuration !== undefined ? {providerDuration: body.clock.providerDuration} : {})};
+        }
+        const analysis = {start, end, words, peaks, localRevision: revision, transcribed: body.transcribed === true,
+          ...(clock ? {clock} : {})};
         await storage.putRecordingChunk(session.id, recording.id, index, features, analysis);
         recheck(session, recording, revision);
         // Any changed chunk invalidates the aggregate, but never stores PCM/audio.
@@ -263,6 +284,14 @@ function registerLocalRecordingRoutes(app, context) {
       if (recording && (jobs.has(recording.id) || locks.has(recording.id))) fail('錄音正在處理');
       if (!recording && session.recordings.length >= MAX_RECORDINGS) fail(`每個節目最多 ${MAX_RECORDINGS} 份錄音`);
       recording ||= {...values, id: crypto.randomUUID(), revision: 1, createdAt: Date.now(), segments: []};
+      const importedCalibration = body.recording.timeCalibration ? calibration(body.recording.timeCalibration) : null;
+      const importedFeatureCalibration = body.recording.featureCalibration ? calibration(body.recording.featureCalibration) : null;
+      const importedDuration = body.recording.playbackDuration || values.duration;
+      if (!finite(importedDuration, 0.025, 86400)) fail('備份播放時間格式錯誤');
+      if (importedCalibration && body.recording.timeCalibration.anchors) {
+        const checked = fitCalibration(body.recording.timeCalibration.anchors, words, values.duration, importedDuration);
+        importedCalibration.anchors = checked.anchors;
+      }
       locks.add(recording.id);
       try {
         if (!Array.isArray(body.recording.segments) || body.recording.segments.length > 100000) fail('片段標記格式錯誤');
@@ -270,21 +299,38 @@ function registerLocalRecordingRoutes(app, context) {
         const segments = body.recording.segments.filter(segment => segment && lines.has(segment.lineId) &&
           segment.textHash === hashText(lines.get(segment.lineId)) && ['auto', 'manual', 'review', 'stale', 'unmatched', 'direction'].includes(segment.status))
           .map(segment => {
-            const start = finite(segment.start, 0, values.duration) ? segment.start : null;
-            const end = finite(segment.end, 0, values.duration) ? segment.end : null;
+            const start = finite(segment.start, 0, importedDuration) ? segment.start : null;
+            const end = finite(segment.end, 0, importedDuration) ? segment.end : null;
             if (['auto', 'manual', 'review'].includes(segment.status) && (start === null || end === null || end <= start))
               fail('分析備份中的片段時間範圍錯誤');
             return {lineId: segment.lineId, textHash: segment.textHash, status: segment.status, start, end,
-              confidence: finite(segment.confidence, 0, 1) ? segment.confidence : 0};
+              confidence: finite(segment.confidence, 0, 1) ? segment.confidence : 0,
+              source: ['text', 'openai'].includes(segment.source) ? segment.source : undefined,
+              reviewReason: String(segment.reviewReason || '').slice(0, 500),
+              ...Object.fromEntries(['wordStart', 'wordEnd', 'startChar', 'endChar'].filter(key => Number.isSafeInteger(segment[key]) && segment[key] >= 0).map(key => [key, segment[key]]))};
           });
         const analysis = {words, finePeaks, peaks: waveform(finePeaks, values.duration).peaks, frameMs: 40,
           transcriptionLanguage: values.language, transcribed: body.analysis.transcribed === true, localRevision: recording.localRevision};
+        if (body.analysis.clockVersion === 1 && Array.isArray(body.analysis.clocks) &&
+          body.analysis.clocks.length === Math.ceil(values.duration / CHUNK_SECONDS)) {
+          analysis.clocks = body.analysis.clocks.map((clock, index) => {
+            const from = Math.round(Math.max(0, index * CHUNK_SECONDS - 2) * 16000);
+            const to = Math.round(Math.min(values.duration, (index + 1) * CHUNK_SECONDS + 2) * 16000);
+            if (clock.index !== index || clock.sampleRate !== 16000 || clock.fromSample !== from || clock.sampleCount !== to - from)
+              fail('備份片段時間格式錯誤');
+            return {index, sampleRate: 16000, fromSample: from, sampleCount: to - from,
+              ...(finite(clock.providerDuration, 0, 310) ? {providerDuration: clock.providerDuration} : {})};
+          });
+          analysis.clockVersion = 1;
+        }
         await storage.putRecordingAsset(session.id, recording.id, {audio: null, features, analysis});
         if (sessions.get(session.id) !== session) {
           await storage.deleteRecordingAssets(session.id, recording.id); fail('節目已移除');
         }
         if (!session.recordings.includes(recording)) session.recordings.push(recording);
         recording.segments = segments;
+        recording.timeCalibration = importedCalibration; recording.featureCalibration = importedFeatureCalibration;
+        recording.playbackDuration = importedDuration;
         recording.status = 'ready'; recording.progress = 100; recording.error = ''; recording.revision++;
         invalidate(session.id); await save(session);
         res.status(201).json({recording: publicRecording(recording, {details: true, session})});
@@ -299,6 +345,7 @@ function registerLocalRecordingRoutes(app, context) {
       await storage.putRecordingAsset(session.id, recording.id, {audio: null, analysis: {}});
       recheck(session, recording, recording.localRevision);
       recording.language = language; recording.scriptLanguageId = resolveFollowingLanguage(session, language).languageId;
+      if (recording.timeCalibration) recording.timeCalibration = {...recording.timeCalibration, anchors: []};
       recording.localRevision++; recording.revision++; recording.status = 'local'; recording.progress = 0;
       recording.segments = []; recording.error = '請連結原音檔後繼續辨識';
       if (session.activeRecordingId === recording.id) session.activeRecordingId = null;

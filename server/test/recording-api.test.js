@@ -249,7 +249,8 @@ test('cached transcription can be realigned without another provider key and und
     const response=await request(f,base+'/align',{method:'POST'});assert.equal(response.status,202);
     const revision=r.revision;
     await waitFor(()=>r.status==='ready'&&r.revision>revision);
-    assert.equal(r.error,'');assert.equal(r.segments.find(s=>s.lineId==='a').status,'auto');
+    assert.equal(r.error,'');assert.equal(r.segments.find(s=>s.lineId==='a').status,'manual');
+    assert.equal(r.segments.find(s=>s.lineId==='a').start,0.1);
   }finally{process.env.DEEPGRAM_API_KEY=key;}
   const original=f.session.lines[0].text;
   f.session.lines[0].text='修改台詞';
@@ -257,7 +258,7 @@ test('cached transcription can be realigned without another provider key and und
   assert.equal(r.segments.find(s=>s.lineId==='a').status,'stale');
   f.session.lines[0].text=original;
   await request(f,`/api/session/${f.session.id}/recordings`);
-  assert.equal(r.segments.find(s=>s.lineId==='a').status,'auto');
+  assert.equal(r.segments.find(s=>s.lineId==='a').status,'manual');
   await persistence.deleteRecordingAssets(f.session.id);
 });
 
@@ -463,6 +464,129 @@ test('a local recording realigns cached results without contacting Deepgram; a c
     method:'POST',body:pack(backup.metadata,backup.features),headers:{'content-type':'application/octet-stream'}});
   assert.equal(response.status,400);assert.equal(f.session.recordings[0].segments.find(segment=>segment.lineId==='a').end,1.44);
   assert.equal((await persistence.getRecordingAsset(f.session.id,r.id)).analysis.words[0].word,words[0].word);
+});
+
+test('word inspection and time correction preserve source timestamps and manually locked segments', async t => {
+  const f = fixture(); t.after(() => f.dispose()); const r = await importRecording(f);
+  const base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  assert.equal((await request(f, base + '/transcript', {cookie: ''})).status, 401);
+  const initial = (await request(f, base + '/transcript?lineId=a')).json();
+  assert.equal(initial.words[0].id, 0); assert.equal(initial.words[0].rawStart, 0);
+  await request(f, base + '/segments/a', {method: 'PUT', body: {start: 0.1, end: 1.3}});
+  const originalWords = (await persistence.getRecordingAsset(f.session.id, r.id)).analysis.words;
+  const revision = r.revision;
+  const response = await request(f, base + '/timing', {method: 'PUT', body: {anchors: [{wordId: 0, time: 0.2}], playerDuration: r.duration + .2}});
+  assert.equal(response.status, 202, response.bytes.toString());
+  await waitFor(() => r.status === 'ready' && r.revision >= revision + 2);
+  assert.equal(r.segments.find(s => s.lineId === 'a').start, 0.1);
+  assert.equal(r.segments.find(s => s.lineId === 'a').status, 'manual');
+  assert.equal(r.segments.find(s => s.lineId === 'b').start, 2.04);
+  assert.equal((await request(f, base + '/transcript')).json().words[0].start, 0.2);
+  assert.deepEqual((await persistence.getRecordingAsset(f.session.id, r.id)).analysis.words, originalWords);
+  assert.equal((await request(f, base + '/waveform')).json().from, 0); // ASR-only correction leaves the actual audio clock alone.
+  assert.equal(f.reload(JSON.parse(JSON.stringify(f.store()))).recordings[0].timeCalibration.offset, 0.2);
+  assert.equal((await request(f, base + '/segments/a/unlock', {method: 'POST'})).status, 200);
+  assert.equal(r.segments.find(s => s.lineId === 'a').status, 'review');
+  assert.equal((await request(f, base + '/timing', {method: 'PUT', body: {anchors: [{wordId: 999, time: 1}]}})).status, 400);
+  const featureRevision = r.revision;
+  assert.equal((await request(f, base + '/timing', {method: 'PUT', body: {anchors: [{wordId: 0, time: .2}], applyToFeatures: true}})).status, 202);
+  await waitFor(() => r.status === 'ready' && r.revision >= featureRevision + 2);
+  assert.equal(r.featureCalibration.offset, .2);
+  assert.equal((await request(f, base + '/waveform')).json().from, .2);
+  const resetRevision = r.revision;
+  await request(f, base + '/timing', {method: 'PUT', body: {anchors: [], applyToFeatures: true}});
+  await waitFor(() => r.status === 'ready' && r.revision >= resetRevision + 2);
+  assert.equal(r.timeCalibration, null); assert.equal(r.featureCalibration, null);
+});
+
+test('local clock metadata rejects mismatched samples and survives a calibrated portable backup', async t => {
+  const f = fixture(); t.after(() => f.dispose()); const r = await createLocal(f);
+  const base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  const words = [{word: '我們今晚開始演出', start: 0, end: 1.44, confidence: .99}];
+  const chunk = unpack(localChunk(r, 0, {words}));
+  chunk.metadata.clock = {sampleRate: 16000, fromSample: 0, sampleCount: Math.round(r.duration * 16000) + 1};
+  assert.equal((await request(f, base + '/local/chunks/0', chunkRequest(pack(chunk.metadata, chunk.features)))).status, 400);
+  chunk.metadata.clock.sampleCount--;
+  chunk.metadata.clock.providerDuration = r.duration;
+  assert.equal((await request(f, base + '/local/chunks/0', chunkRequest(pack(chunk.metadata, chunk.features)))).status, 200);
+  await request(f, base + '/local/finish', {method: 'POST'});
+  await waitFor(() => f.session.recordings[0].status === 'ready');
+  const record = f.session.recordings[0], revision = record.revision;
+  const updated = await request(f, base + '/timing', {method: 'PUT', body: {anchors: [{wordId: 0, time: .2}]}});
+  assert.equal(updated.status, 202);
+  await waitFor(() => record.status === 'ready' && record.revision >= revision + 2);
+  const diagnostic = (await request(f, base + '/transcript')).json().diagnostics;
+  assert.equal(diagnostic.clockVersion, 1); assert.equal(diagnostic.chunks, 1);
+  const backup = (await request(f, base + '/local/export')).bytes;
+  await request(f, base, {method: 'DELETE'});
+  const restored = await request(f, `/api/session/${f.session.id}/recordings/local/import`, {
+    method: 'POST', body: backup, headers: {'content-type': 'application/octet-stream'}});
+  assert.equal(restored.status, 201, restored.bytes.toString());
+  assert.equal(restored.json().recording.timeCalibration.offset, .2);
+  assert.deepEqual(restored.json().recording.timeCalibration.anchors, [{wordId: 0, edge: 'start', time: .2}]);
+  const restoredId = restored.json().recording.id;
+  assert.equal((await persistence.getRecordingAsset(f.session.id, restoredId)).analysis.clockVersion, 1);
+});
+
+test('AI recording alignment is authenticated, validates word IDs, caches results and never persists the API key', async t => {
+  let aiCalls = 0, deepgramCalls = 0;
+  const f = fixture({recordingRequest: async (url, options) => {
+    if (url.includes('api.openai.com')) {
+      aiCalls++;
+      const input = JSON.parse(JSON.parse(options.body).input);
+      assert.equal(input.targets.length, 1); assert.equal(input.targets[0].lineId, 'a');
+      return {ok: true, json: async () => ({status: 'completed', output_text: JSON.stringify({matches: [{
+        lineId: 'a', status: 'matched', startWordId: 0, endWordId: 0, startChar: null, endChar: null, reason: '台詞少一個字，前後文一致',
+      }]})})};
+    }
+    deepgramCalls++;
+    return {ok: true, json: async () => ({results: {channels: [{alternatives: [{words: [
+      {word: '我們今晚開始演出', start: 0, end: 1.44, confidence: .99},
+      {word: '可是我答應過你', start: 1.84, end: 3.28, confidence: .99},
+    ]}]}]}})};
+  }}); t.after(() => f.dispose());
+  const r = await importRecording(f), base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  f.session.lines[0].text = '我們今晚就開始演出';
+  await request(f, `/api/session/${f.session.id}/recordings`);
+  assert.equal((await request(f, base + '/align', {method: 'POST', body: {mode: 'ai'}, cookie: ''})).status, 401);
+  for (let i = 0; i < 2; i++) {
+    const revision = r.revision;
+    const response = await request(f, base + '/align', {method: 'POST', body: {mode: 'ai', apiKey: 'never-store-this-test-key'}});
+    assert.equal(response.status, 202, response.bytes.toString());
+    await waitFor(() => r.status === 'ready' && r.revision >= revision + 2);
+    assert.equal(r.segments.find(s => s.lineId === 'a').source, 'openai');
+    assert.equal(r.segments.find(s => s.lineId === 'a').status, 'review');
+  }
+  assert.equal(aiCalls, 1); assert.equal(deepgramCalls, 1);
+  assert.ok(!JSON.stringify(f.store()).includes('never-store-this-test-key'));
+  assert.ok(!JSON.stringify((await persistence.getRecordingAsset(f.session.id, r.id)).analysis).includes('never-store-this-test-key'));
+});
+
+test('a script edit while AI is running fences the response and cannot overwrite current cues', async t => {
+  let resolveAI, started = false;
+  const f = fixture({recordingRequest: async url => {
+    if (url.includes('api.openai.com')) {
+      started = true;
+      return new Promise(resolve => {resolveAI = resolve;});
+    }
+    return {ok: true, json: async () => ({results: {channels: [{alternatives: [{words: [
+      {word: '我們今晚開始演出', start: 0, end: 1.44, confidence: .99},
+      {word: '可是我答應過你', start: 1.84, end: 3.28, confidence: .99},
+    ]}]}]}})};
+  }}); t.after(() => f.dispose());
+  const r = await importRecording(f), base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  f.session.lines[0].text = '我們今晚就開始演出';
+  await request(f, `/api/session/${f.session.id}/recordings`);
+  await request(f, base + '/align', {method: 'POST', body: {mode: 'ai', apiKey: 'test-placeholder'}});
+  await waitFor(() => started);
+  f.session.lines[0].text = '這是另一個剛修改的台詞';
+  resolveAI({ok: true, json: async () => ({status: 'completed', output_text: JSON.stringify({matches: [{
+    lineId: 'a', status: 'matched', startWordId: 0, endWordId: 0, startChar: null, endChar: null, reason: '過期的配對',
+  }]})})});
+  await waitFor(() => r.status === 'error');
+  assert.match(r.error, /劇本已更新/);
+  assert.notEqual(r.segments.find(s => s.lineId === 'a').source, 'openai');
+  assert.equal(f.session.lines[0].text, '這是另一個剛修改的台詞');
 });
 
 test('token failures distinguish upstream credentials, permissions, rate limits and service errors without leaking secrets',async t=>{
