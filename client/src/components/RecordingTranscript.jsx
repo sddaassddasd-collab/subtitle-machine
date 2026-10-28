@@ -6,7 +6,7 @@ const time = seconds => {
   return `${Math.floor(value / 3600) ? `${Math.floor(value / 3600)}:` : ''}${String(Math.floor(value / 60) % 60).padStart(2, '0')}:${(value % 60).toFixed(2).padStart(5, '0')}`
 }
 
-export default function RecordingTranscript({recording, base, lineId, segment, audioRef, playerDuration, visible, disabled, act, mutation}) {
+export default function RecordingTranscript({recording, base, lineId, segment, onSeek, getPlaybackTime, canPlay, canMarkPosition, playerDuration, visible, disabled, act, mutation}) {
   const [open, setOpen] = useState(false), [data, setData] = useState(null), [error, setError] = useState('')
   const [location, setLocation] = useState({}), [selectedId, setSelectedId] = useState(null)
   const [anchors, setAnchors] = useState([])
@@ -32,13 +32,13 @@ export default function RecordingTranscript({recording, base, lineId, segment, a
   const selected = data?.words.find(word => word.id === selectedId)
   const seek = word => {
     setSelectedId(word.id)
-    if (audioRef.current?.src) audioRef.current.currentTime = Math.max(0, word.start)
+    if (canPlay) onSeek(Math.max(0, word.start))
   }
   const addAnchor = () => {
-    const audio = audioRef.current
-    if (!selected || !audio?.src || !Number.isFinite(audio.currentTime)) return
+    const seconds = getPlaybackTime()
+    if (!selected || !canMarkPosition || !Number.isFinite(seconds)) return
     setAnchors(previous => [...previous.filter(anchor => anchor.wordId !== selected.id || anchor.edge !== 'start'),
-      {wordId: selected.id, edge: 'start', time: Math.round(audio.currentTime * 1000) / 1000}].slice(-12))
+      {wordId: selected.id, edge: 'start', time: Math.round(seconds * 1000) / 1000}].slice(-12))
   }
   const apply = values => act('校正時間並重新對齊…', async () => {
     await mutation(`/${recording.id}/timing`, {method: 'PUT', headers: {'Content-Type': 'application/json'},
@@ -49,7 +49,7 @@ export default function RecordingTranscript({recording, base, lineId, segment, a
     <p className="recording-note">點辨識詞可定位原檔。先核對開頭、中間、結尾與五分鐘交界，再校正時間。</p>
     <div className="recording-actions">
       <button type="button" className="subtle-button" onClick={() => setLocation({})}>這格附近</button>
-      <button type="button" className="subtle-button" onClick={() => setLocation({at: audioRef.current?.currentTime || 0})}>目前播放位置</button>
+      <button type="button" className="subtle-button" disabled={!canPlay} onClick={() => setLocation({at: getPlaybackTime()})}>目前播放位置</button>
       <button type="button" className="subtle-button" disabled={data?.previousOffset == null} onClick={() => setLocation({offset: data.previousOffset})}>較早的辨識</button>
       <button type="button" className="subtle-button" disabled={data?.nextOffset == null} onClick={() => setLocation({offset: data.nextOffset})}>較晚的辨識</button>
     </div>
@@ -78,7 +78,7 @@ export default function RecordingTranscript({recording, base, lineId, segment, a
       {selected?.timingUncertain && <p className="recording-note">此詞沒有可靠的起終時間，相關字幕需試聽確認。</p>}
     </>}
     <p className="recording-note">一個定位點校正固定偏移；兩個以上校正時間比例，建議用第三點驗證。選好辨識詞後，在原檔聽到該詞起音的位置暫停，再加入定位點。</p>
-    <button type="button" className="subtle-button" disabled={disabled || !selected || !audioRef.current?.src} onClick={addAnchor}>以目前播放位置校正選定詞</button>
+    <button type="button" className="subtle-button" disabled={disabled || !selected || !canMarkPosition} onClick={addAnchor}>以目前播放位置校正選定詞</button>
     {anchors.map((anchor, index) => <div className="recording-anchor" key={`${anchor.wordId}:${anchor.edge}`}>
       <label>詞 {anchor.wordId} 的實際起點（秒）<input type="number" min="0" step="0.01" disabled={disabled} value={anchor.time}
         onChange={event => setAnchors(previous => previous.map((value, i) => i === index ? {...value, time: Number(event.target.value)} : value))}/></label>

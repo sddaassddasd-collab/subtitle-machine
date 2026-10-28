@@ -1,6 +1,7 @@
-import {Input, ALL_FORMATS, BlobSource, AudioSampleSink} from 'mediabunny'
+import {Input, ALL_FORMATS, BlobSource} from 'mediabunny'
 import {extractFeatures} from './recording-features.js'
 import {chunkClock} from './recording-clock.js'
+import {readRecordingPcm} from './recording-pcm.js'
 
 let input, track, duration
 async function fingerprint(file) {
@@ -18,35 +19,8 @@ async function fingerprint(file) {
 
 async function decodeChunk(start, end) {
   const clock = chunkClock(duration, start, end)
-  const first = clock.fromSample, length = clock.sampleCount
-  const from = first / 16000, to = (first + length) / 16000
-  const pcm = new Int16Array(length)
-  let decoded = false
-  const sink = new AudioSampleSink(track)
-  for await (const sample of sink.samples(from, to)) {
-    try {
-      if (sample.numberOfChannels > 8 || sample.numberOfFrames * sample.numberOfChannels > 8e6)
-        throw new Error('錄音聲道或解碼區塊過大，請先轉成單聲道 WAV')
-      const data = new Float32Array(sample.numberOfFrames * sample.numberOfChannels)
-      sample.copyTo(data, {format: 'f32', planeIndex: 0})
-      const begin = Math.max(first, Math.ceil(sample.timestamp * 16000 - 1e-5))
-      const last = Math.min(first + length, Math.ceil((sample.timestamp + sample.duration) * 16000 - 1e-5))
-      for (let i = begin; i < last; i++) {
-        const position = (i / 16000 - sample.timestamp) * sample.sampleRate
-        const a = Math.max(0, Math.min(sample.numberOfFrames - 1, Math.floor(position)))
-        const b = Math.min(sample.numberOfFrames - 1, a + 1), fraction = Math.max(0, position - a)
-        let value = 0
-        for (let channel = 0; channel < sample.numberOfChannels; channel++) {
-          const left = data[a * sample.numberOfChannels + channel]
-          value += left + (data[b * sample.numberOfChannels + channel] - left) * fraction
-        }
-        value = Math.max(-1, Math.min(1, value / sample.numberOfChannels))
-        pcm[i - first] = Math.round(value * (value < 0 ? 32768 : 32767))
-      }
-      decoded ||= last > begin
-    } finally { sample.close() }
-  }
-  if (!decoded) throw new Error('此片段無法解碼，請重新選取錄音或轉成 WAV')
+  const first = clock.fromSample, from = first / 16000
+  const [pcm] = await readRecordingPcm(track, clock)
   const core = pcm.subarray(Math.round(start * 16000) - first, Math.round(end * 16000) - first)
   const result = extractFeatures(core)
   // 100 ms peaks retain detail on long recordings; server returns a suitable

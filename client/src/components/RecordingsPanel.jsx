@@ -1,7 +1,9 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import RecordingTranscript from './RecordingTranscript'
+import RecordingPlaybackControls from './RecordingPlaybackControls'
 import {pickRecording, recallRecording, forgetRecording} from '../lib/local-recordings'
 import {prepareLocalRecording, linkLocalRecording, localKey, recordingJSON} from '../lib/local-recording-client'
+import {useRecordingPlayback} from '../lib/use-recording-playback'
 
 const labels = {local: '待完成本機準備', analysing: '分析聲音', transcribing: '辨識並對齊', ready: '已完成', error: '處理失敗', interrupted: '處理中斷', missing: '需重新匯入音檔'}
 const segmentLabels = {auto: '自動對齊', manual: '已校正', review: '待確認', unmatched: '未對齊', stale: '字幕已修改', direction: '舞台指示'}
@@ -19,23 +21,25 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const [lineId, setLineId] = useState(lines[0]?.id || '')
   const [canTranscribe, setCanTranscribe] = useState(false)
   const [canAlignWithAI, setCanAlignWithAI] = useState(false)
-  const [playerDuration, setPlayerDuration] = useState(null)
   const [peaks, setPeaks] = useState([])
   const [waveInfo, setWaveInfo] = useState({from: 0, peakSeconds: 1})
   const [localFile, setLocalFile] = useState(null)
-  const [audioSource, setAudioSource] = useState('')
   const [fileNotice, setFileNotice] = useState('')
   const jobRef = useRef(null), pickIntent = useRef('import'), backupRef = useRef(null)
   const [start, setStart] = useState(0), [end, setEnd] = useState(1)
   const [viewport, setViewport] = useState(null)
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
-  const [playTime, setPlayTime] = useState(0)
   const [importLanguage, setImportLanguage] = useState('performance')
   const [recordingLanguage, setRecordingLanguage] = useState('')
-  const audioRef = useRef(null), inputRef = useRef(null), dragRef = useRef(null), clipEndRef = useRef(null)
+  const inputRef = useRef(null), dragRef = useRef(null)
   const scopeRef = useRef(`${sessionId}:${cellId}`)
   scopeRef.current = `${sessionId}:${cellId}`
   const recording = recordings.find(r => r.id === selectedId)
+  const playbackFile = recording?.source === 'local' && localFile?.id === selectedId ? localFile.entry.file : null
+  const playbackUrl = recording && recording.source !== 'local'
+    ? `/api/session/${encodeURIComponent(sessionId)}/recordings/${encodeURIComponent(selectedId)}/audio` : null
+  const {playerRef, playback} = useRecordingPlayback({file: playbackFile, url: playbackUrl, visible})
+  const playerDuration = playback.duration || null, playTime = playback.currentTime
   const segment = recording?.segments.find(s => s.lineId === lineId)
   const recordingLines = useMemo(() => lines.map(line => ({...line, text: line.type === 'direction' ? line.text
     : recording?.scriptLanguageId === 'primary' ? line.text : line.translations?.[recording?.scriptLanguageId] || ''})), [lines, recording?.scriptLanguageId])
@@ -59,7 +63,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   }, [base, cellId])
 
   useEffect(() => {
-    if (!visible) { audioRef.current?.pause(); clipEndRef.current = null; return }
+    if (!visible) return
     let disposed = false
     const refresh = () => load().catch(error => { if (!disposed) setError(error.message) })
     void refresh()
@@ -82,33 +86,34 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
     }
     return () => { disposed = true }
   }, [sessionId, selectedId, recording?.source, recording?.fingerprint, recording?.byteLength])
-  useEffect(() => {
-    setPlayerDuration(null)
-    if (recording?.source !== 'local') { setAudioSource(selectedId ? `${base}/${selectedId}/audio` : ''); return }
-    if (localFile?.id !== selectedId) { setAudioSource(''); return }
-    const url = URL.createObjectURL(localFile.entry.file)
-    setAudioSource(url)
-    return () => URL.revokeObjectURL(url)
-  }, [base, selectedId, recording?.source, localFile])
   useEffect(() => { setRecordingLanguage(recording?.language || '') }, [selectedId, recording?.language])
   useEffect(() => {
     if (!lines.some(line => line.id === lineId)) setLineId(lines[0]?.id || '')
   }, [lines, lineId])
   const savedStart = segment?.start ?? 0
   const savedEnd = segment?.end ?? Math.min(1, recording?.duration || 1)
+  const hasRange = Number.isFinite(segment?.start) && Number.isFinite(segment?.end) && segment.end > segment.start
   useEffect(() => {
     setStart(savedStart); setEnd(savedEnd); setViewport(null)
   }, [selectedId, lineId, recording?.revision, savedStart, savedEnd])
   useEffect(() => {
+    const player = playerRef.current
+    if (!playback.available || !player) return
+    if (!hasRange) { player.pause(); return }
+    // Use saved boundaries directly: changing cues must not audition the previous
+    // render's editable start/end values, even during rapid navigation.
+    if (player.playing) void player.play(savedStart, savedEnd)
+    else void player.seek(savedStart, {autoplay: false})
+  }, [playerRef, playback.available, selectedId, lineId, hasRange, savedStart, savedEnd])
+  useEffect(() => {
     let disposed = false
-    const audio = audioRef.current
-    setPeaks([]); setPlayTime(0); clipEndRef.current = null
+    setPeaks([])
     if (selectedId && (recording?.source !== 'local' || recording?.status === 'ready')) fetch(`${base}/${encodeURIComponent(selectedId)}/waveform${recording?.source === 'local' && viewport ? `?start=${viewport.start}&end=${viewport.end}` : ''}`).then(async response => {
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || '無法載入波形')
       if (!disposed) { setPeaks(data.peaks || []); setWaveInfo({from: data.from || 0, peakSeconds: data.peakSeconds || data.duration / Math.max(1, data.peaks?.length || 0)}) }
     }).catch(error => { if (!disposed) setError(error.message) })
-    return () => { disposed = true; audio?.pause() }
+    return () => { disposed = true }
   }, [base, selectedId, recording?.status, recording?.source, viewport])
 
   const mutation = async (path, options) => {
@@ -180,13 +185,12 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({start: Number(start), end: Number(end)})})
     setNotice('片段範圍已保存，可用於音訊跟戲')
   })
-  const playClip = async () => {
-    const audio = audioRef.current
+  const playClip = () => {
     const from = Number(start), to = Number(end)
-    if (!audio || !Number.isFinite(from) || !Number.isFinite(to) || to <= from || from < 0 || to > (playerDuration || recording.playbackDuration || recording.duration)) return
-    audio.currentTime = from; clipEndRef.current = to
-    try { await audio.play() } catch { setError('無法播放錄音，請重新點擊試聽') }
+    if (!playback.available || !Number.isFinite(from) || !Number.isFinite(to) || to <= from || from < 0 || to > playerDuration) return
+    void playerRef.current?.play(from, to)
   }
+  const getPlaybackTime = () => playerRef.current?.currentTime ?? 0
   const displayDuration = playerDuration || recording?.playbackDuration || recording?.duration || 1
   const viewStart = viewport?.start || 0, viewEnd = viewport?.end || displayDuration
   const xAt = seconds => Math.max(0, Math.min(1000, (seconds - viewStart) / (viewEnd - viewStart) * 1000))
@@ -251,7 +255,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             const link = document.createElement('a')
             link.href = `${base}/${selectedId}/local/export`; link.download = `${recording.name}.subtitle-audio`; link.click()
           }}>匯出分析備份</button>}
-          {audioSource && <small>本機音檔已連結</small>}
+          {playbackFile && <small>本機音檔已連結</small>}
           {fileNotice && <small>{fileNotice}</small>}
         </div>}
         {recording.alignmentNotice && <p className="recording-note">{recording.alignmentNotice}</p>}
@@ -306,14 +310,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           {Number.isFinite(referenceAudio.confidence) && ` · 聲音相似度 ${Math.round(referenceAudio.confidence * 100)}%`}
           {referenceAudio.error && ` · ${referenceAudio.error}`}
         </p>}
-        <audio ref={audioRef} controls preload="metadata" src={audioSource || undefined}
-          onLoadedMetadata={event => {if (Number.isFinite(event.currentTarget.duration)) setPlayerDuration(event.currentTarget.duration)}}
-          onTimeUpdate={event => {
-            setPlayTime(event.currentTarget.currentTime)
-            if (clipEndRef.current !== null && event.currentTarget.currentTime >= clipEndRef.current) {
-              event.currentTarget.pause(); clipEndRef.current = null
-            }
-          }}/>
+        <RecordingPlaybackControls playerRef={playerRef} playback={playback} timeLabel={timeLabel}/>
         {microphoneActive && <small>收音中試聽請使用耳機，避免錄音進入現場麥克風。</small>}
         <label className="recording-select">對應字幕格
           <select value={lineId} onChange={event => setLineId(event.target.value)}>
@@ -365,14 +362,16 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             <label>終點（秒）<input type="number" disabled={processing} min="0" max={displayDuration} step="0.01" value={end} onChange={event => setEnd(event.target.value)}/></label>
           </div>
           <div className="recording-actions">
-            <button type="button" className="subtle-button" onClick={() => moveHandle('start', audioRef.current?.currentTime || 0)}>播放位置設為起點</button>
-            <button type="button" className="subtle-button" onClick={() => moveHandle('end', audioRef.current?.currentTime || 0)}>播放位置設為終點</button>
-            <button type="button" className="subtle-button" onClick={playClip} disabled={Number(end) <= Number(start)}>試聽片段</button>
+            <button type="button" className="subtle-button" disabled={!playback.available || playback.preparing} onClick={() => moveHandle('start', getPlaybackTime())}>播放位置設為起點</button>
+            <button type="button" className="subtle-button" disabled={!playback.available || playback.preparing} onClick={() => moveHandle('end', getPlaybackTime())}>播放位置設為終點</button>
+            <button type="button" className="subtle-button" onClick={playClip} disabled={!playback.available || Number(end) <= Number(start)}>試聽片段</button>
             <button type="button" onClick={handleSave} disabled={Boolean(busy) || processing || Number(end) - Number(start) < 0.12 ||
               (currentLine.type !== 'direction' && !currentLine.text?.trim())}>確認並保存範圍</button>
           </div>
         </div>}
-        <RecordingTranscript recording={recording} base={base} lineId={lineId} segment={segment} audioRef={audioRef}
+        <RecordingTranscript recording={recording} base={base} lineId={lineId} segment={segment}
+          onSeek={seconds => { void playerRef.current?.seek(seconds) }} getPlaybackTime={getPlaybackTime}
+          canPlay={playback.available} canMarkPosition={playback.available && !playback.preparing}
           playerDuration={playerDuration} visible={visible} disabled={Boolean(busy) || processing} act={act} mutation={mutation}/>
       </>}
     </>}

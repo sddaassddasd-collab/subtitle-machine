@@ -2896,7 +2896,10 @@ textarea.script-line-text.editing {
 .recordings-panel select, .recordings-panel input[type='number'] { width: 100%; min-width: 0; box-sizing: border-box; }
 .recording-meta { display: grid; gap: .3rem; font-size: .8rem; }
 .recording-meta progress { width: 100%; }
-.recordings-panel audio { display: block; width: 100%; height: 38px; }
+.recording-player { display: grid; gap: .6rem; padding: .75rem; border: 1px solid #334155; border-radius: 8px; min-width: 0; }
+.recording-player > input[type='range'] { width: 100%; min-width: 0; margin: 0; }
+.recording-volume { display: flex; align-items: center; gap: .6rem; font-size: .8rem; color: #94a3b8; }
+.recording-volume input { width: 120px; max-width: 60%; }
 .recording-segment-editor { display: grid; gap: .6rem; border-top: 1px solid #334155; padding-top: .75rem; }
 .recording-subtitle { white-space: pre-wrap; padding: .65rem; border-radius: 6px; background: #1e293b; }
 .recording-waveform { display: block; width: 100%; min-height: 88px; border-radius: 6px; touch-action: none; }
