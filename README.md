@@ -257,3 +257,12 @@ Deepgram 與 OpenAI Realtime 的 interim 原文會直接顯示，不等待二次
 聲音比對使用正規化頻譜特徵與有界的即時 subsequence DTW，在獨立 worker thread 中執行，不等待語音轉文字結果，也不按彩排的固定秒數播放。這是參考錄音的聲學比對，尚未用真實彩排驗證；演員聲音、環境、語速和即興內容的差異可能使音訊無法可靠定位，文字通道仍持續校正。狀態詳情會標示實際換格依據，錄音面板會顯示聲音相似度（不是經校準的辨識正確機率）。
 
 原始錄音、特徵和辨識時間戳分開存入目前使用的 SQLite／Postgres `recording_assets` 表；CUE 更新只保存小型節目資料，不重寫音檔。既有的 SQLite → 空白 Postgres 自動遷移會一起搬移錄音資產。請將該表一起納入資料庫備份。字幕 JSON 備份包含對齊標記，**不包含音檔**；跨環境匯入 JSON 後需重新匯入參考錄音。移除錄音或刪除節目會清除相關音訊資產。處理途中重啟會標示「處理中斷」，可重新切段接續；錄音分析與即時跟戲失敗不會停止文字辨識。
+
+## Node.js 安全更新與 Render 部署
+
+- 專案使用 Node.js `22.23.4`，根目錄及 `server/`、`client/` 的 `.node-version` 均指定相同版本，支援分別設定 Render Root Directory。前後端 `package.json` 的 `engines.node` 限制為 `>=22.23.4 <23`。
+- 本機開發、測試及負載測試也請使用此修補版；未來升級 22.x 修補版時，請同步更新三份 `.node-version`。
+- Render 的 `NODE_VERSION` 環境變數優先於專案設定。若後台已有此變數，請更新為 `22.23.4` 或移除以採用專案設定。
+- 這次更新對應 [Render eMudhra 公告](https://render.com/docs/advisory-emudhra) 與 [Node.js 2026-10-21 安全更新](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)。只更新 npm 套件不能取代 Node.js runtime 更新。
+- 所有相關 Render 原生服務（包括前端建置）都需重新建置及部署，才會更新 runtime 與系統憑證庫。若未啟用自動部署，請執行 Manual Deploy → Deploy latest commit。
+- 部署前確認資料使用 Postgres 或持久磁碟，並備份節目；避開演出時段。部署後從建置紀錄及服務 Shell 的 `node --version` 確認為 `v22.23.4`，再驗證登入、字幕同步及 OpenAI／Deepgram 功能。
