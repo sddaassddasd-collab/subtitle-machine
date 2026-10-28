@@ -74,10 +74,13 @@ function timingDiagnostics(recording, analysis, playerDuration) {
     if (Number.isFinite(chunk.providerDuration) && Math.abs(chunk.providerDuration - chunk.sampleCount / 16000) > 0.25)
       issues.push(`第 ${chunk.index + 1} 段辨識長度與送出的音訊不同`);
   }
+  const wordIssues = analysis?.wordIssues || [];
+  const pending = wordIssues.filter(issue => issue.status !== 'recovered');
+  if (pending.length) issues.push(`${pending.length} 個辨識詞尚未由相鄰片段補回，其他片段已完成，請核對下方紀錄`);
   return {analysisDuration: recording.duration, playerDuration: playerDuration || playbackDuration(recording),
     calibration: recording.timeCalibration || {scale: 1, offset: 0, anchors: []},
     wordCount: analysis?.words?.length || 0, invalidWords, unorderedWords, uncertainWords,
     decoderClock: recording.decoderClock || null,
-    clockVersion: analysis?.clockVersion || 0, chunks: analysis?.clocks?.length || 0, issues};
+    clockVersion: analysis?.clockVersion || 0, chunks: analysis?.clocks?.length || 0, wordIssues, issues};
 }
 module.exports = {calibration, toPlayback, toAnalysis, playbackDuration, timedWords, fitCalibration, timingDiagnostics};

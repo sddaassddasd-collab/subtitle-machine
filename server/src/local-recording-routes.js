@@ -6,6 +6,7 @@ const {supportedLanguage, normalizePerformanceLanguage, resolveFollowingLanguage
 
 const {analyseAlignment} = require('./recording-analysis');
 const {calibration, fitCalibration} = require('./recording-timing');
+const {wordIssuesFor, mergeChunkWords, restoreWordIssues, reviewWordIssues, requestIdFor} = require('./recording-word-merge');
 
 const CHUNK_SECONDS = 300;
 const MAX_DURATION = 12 * 3600;
@@ -38,6 +39,7 @@ function wordsFor(words, duration, maxWords = 20000) {
     const start = Math.min(duration, word.start), end = Math.min(duration, word.end);
     return {word: word.word, start, end,
       confidence: finite(word.confidence, 0, 1) ? word.confidence : 0,
+      ...(Number.isInteger(word.sourceChunk) && finite(word.sourceChunk, 0, Math.ceil(duration / CHUNK_SECONDS) - 1) ? {sourceChunk: word.sourceChunk} : {}),
       ...(word.timingUncertain === true || end === start || end !== word.end || start !== word.start ? {timingUncertain: true} : {})};
   });
 }
@@ -112,20 +114,13 @@ function registerLocalRecordingRoutes(app, context) {
         header.writeUInt32LE(chunks.reduce((sum, chunk) => sum + chunk.features.readUInt32LE(20), 0), 20);
         const features = Buffer.concat([header, ...chunks.map(chunk => chunk.features.subarray(24))]);
         validateFeatures(features, recording.duration);
-        const words = [], finePeaks = [], clocks = [];
+        const finePeaks = [], clocks = [];
         for (const chunk of chunks) {
           finePeaks.push(...chunk.analysis.peaks);
           if (chunk.analysis.clock) clocks.push({index: chunk.index, ...chunk.analysis.clock});
-          for (const word of chunk.analysis.words) {
-            const last = words.at(-1);
-            if (last && last.end > last.start && word.end > word.start && last.word === word.word &&
-              word.start < last.end && Math.abs(last.start - word.start) < 0.4) {
-              last.end = Math.max(last.end, word.end);
-              if (word.timingUncertain) last.timingUncertain = true;
-            } else words.push({...word});
-          }
         }
-        asset = {features, analysis: {words, finePeaks, frameMs: 40, transcriptionLanguage: recording.language,
+        const {words, wordIssues} = mergeChunkWords(chunks, recording.duration);
+        asset = {features, analysis: {words, wordIssues, finePeaks, frameMs: 40, transcriptionLanguage: recording.language,
           transcribed: chunks.every(chunk => chunk.analysis.transcribed), localRevision: revision,
           clockVersion: clocks.length === total ? 1 : 0, clocks}};
         asset.analysis.peaks = waveform(finePeaks, recording.duration).peaks;
@@ -137,7 +132,9 @@ function registerLocalRecordingRoutes(app, context) {
       const segments = await analyseAlignment({session, recording, asset, options, task, storage, request,
         signal: job.abort.signal, check: () => { recheck(session, recording, revision); job.abort.signal.throwIfAborted(); }});
       recheck(session, recording, revision);
-      recording.segments = segments;
+      recording.segments = reviewWordIssues(segments, asset.analysis.wordIssues, recording.timeCalibration);
+      const wordIssues = asset.analysis.wordIssues || [], recovered = wordIssues.filter(issue => issue.status === 'recovered').length;
+      recording.timingNotice = wordIssues.length ? `${recovered} 個異常詞已由相鄰片段補回；${wordIssues.length - recovered} 個仍待核對，其他片段已完成。` : '';
       recording.status = 'ready'; recording.progress = 100; recording.revision++;
       recording.transcriptCacheLanguage = recording.language;
       recording.error = asset.analysis.words?.length ? '' : '尚無辨識台詞，可先試聽並手動標記；連結原音檔後可補做辨識。';
@@ -228,7 +225,9 @@ function registerLocalRecordingRoutes(app, context) {
         if (body.localRevision !== revision || body.language !== recording.language || body.fingerprint !== recording.fingerprint)
           fail('錄音或辨識設定不一致，請重新連結原音檔');
         validateFeatures(features, end - start);
-        const words = wordsFor(body.words, recording.duration).filter(word => {
+        let words = wordsFor(body.words, recording.duration);
+        if (body.wordContextVersion !== undefined && body.wordContextVersion !== 1) fail('不支援的辨識交界資料版本');
+        if (body.wordContextVersion !== 1) words = words.filter(word => {
           const middle = (word.start + word.end) / 2;
           return middle >= start && (middle < end || (end === recording.duration && middle === end));
         });
@@ -244,8 +243,13 @@ function registerLocalRecordingRoutes(app, context) {
           clock = {sampleRate: 16000, fromSample: expectedFrom, sampleCount: expectedTo - expectedFrom,
             ...(body.clock.providerDuration !== undefined ? {providerDuration: body.clock.providerDuration} : {})};
         }
+        if (body.wordContextVersion === 1 && (!clock || words.some(word =>
+          word.start < clock.fromSample / 16000 - .1 || word.end > (clock.fromSample + clock.sampleCount) / 16000 + .1)))
+          fail('辨識詞時間超出實際送出的音訊範圍');
+        const wordIssues = wordIssuesFor(body.wordIssues), requestId = requestIdFor(body.requestId);
         const analysis = {start, end, words, peaks, localRevision: revision, transcribed: body.transcribed === true,
-          ...(clock ? {clock} : {})};
+          wordIssues, ...(body.wordContextVersion === 1 ? {wordContextVersion: 1} : {}),
+          ...(requestId ? {requestId} : {}), ...(clock ? {clock} : {})};
         await storage.putRecordingChunk(session.id, recording.id, index, features, analysis);
         recheck(session, recording, revision);
         // Any changed chunk invalidates the aggregate, but never stores PCM/audio.
@@ -313,7 +317,8 @@ function registerLocalRecordingRoutes(app, context) {
               reviewReason: String(segment.reviewReason || '').slice(0, 500),
               ...Object.fromEntries(['wordStart', 'wordEnd', 'startChar', 'endChar'].filter(key => Number.isSafeInteger(segment[key]) && segment[key] >= 0).map(key => [key, segment[key]]))};
           });
-        const analysis = {words, finePeaks, peaks: waveform(finePeaks, values.duration).peaks, frameMs: 40,
+        const wordIssues = restoreWordIssues(body.analysis.wordIssues, words, values.duration);
+        const analysis = {words, wordIssues, finePeaks, peaks: waveform(finePeaks, values.duration).peaks, frameMs: 40,
           transcriptionLanguage: values.language, transcribed: body.analysis.transcribed === true, localRevision: recording.localRevision};
         if (body.analysis.clockVersion === 1 && Array.isArray(body.analysis.clocks) &&
           body.analysis.clocks.length === Math.ceil(values.duration / CHUNK_SECONDS)) {
@@ -332,7 +337,9 @@ function registerLocalRecordingRoutes(app, context) {
           await storage.deleteRecordingAssets(session.id, recording.id); fail('節目已移除');
         }
         if (!session.recordings.includes(recording)) session.recordings.push(recording);
-        recording.segments = segments;
+        recording.segments = reviewWordIssues(segments, wordIssues, importedCalibration);
+        const recovered = wordIssues.filter(issue => issue.status === 'recovered').length;
+        recording.timingNotice = wordIssues.length ? `${recovered} 個異常詞已由相鄰片段補回；${wordIssues.length - recovered} 個仍待核對，其他片段已完成。` : '';
         recording.timeCalibration = importedCalibration; recording.featureCalibration = importedFeatureCalibration;
         recording.playbackDuration = importedDuration;
         recording.status = 'ready'; recording.progress = 100; recording.error = ''; recording.revision++;
@@ -351,6 +358,7 @@ function registerLocalRecordingRoutes(app, context) {
       recording.language = language; recording.scriptLanguageId = resolveFollowingLanguage(session, language).languageId;
       if (recording.timeCalibration) recording.timeCalibration = {...recording.timeCalibration, anchors: []};
       recording.localRevision++; recording.revision++; recording.status = 'local'; recording.progress = 0;
+      recording.timingNotice = '';
       recording.segments = []; recording.error = '請連結原音檔後繼續辨識';
       if (session.activeRecordingId === recording.id) session.activeRecordingId = null;
       invalidate(session.id); await save(session);

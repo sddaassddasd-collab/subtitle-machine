@@ -562,6 +562,71 @@ test('point-timed words survive local chunk storage, review and portable backup 
   assert.equal(asset.analysis.words.at(-1).timingUncertain, true);
 });
 
+test('all 12 batches complete despite the reported tail overrun and preserve its recovery through backup', async t => {
+  const {chunkClock, analyseChunkWords} = await import(require('node:url').pathToFileURL(path.resolve(__dirname, '../../client/src/lib/recording-clock.js')).href);
+  const f = fixture(); t.after(() => f.dispose()); const r = await createLocal(f, 3590);
+  const base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  // This legacy first batch represents progress already saved before updating.
+  await request(f, base + '/local/chunks/0', chunkRequest(localChunk(r, 0, {
+    words: [{word: '我們今晚開始演出', start: 1, end: 2.44, confidence: .99}]})));
+  assert.equal((await request(f, base + '/local/state')).json().completed.length, 1);
+  for (let index = 1; index < 12; index++) {
+    const start = index * 300, end = Math.min(r.duration, start + 300), clock = chunkClock(r.duration, start, end);
+    const raw = index === 1 ? [{word: '可是我答應過你', start: 303.705, end: 305.145, confidence: .99}]
+      : index === 2 ? [{word: '可是我答應過你', start: 3.705, end: 5.145, confidence: .99}] : [];
+    const result = analyseChunkWords(raw, clock, clock.sampleCount / 16000, {chunkIndex: index, chunkCount: 12});
+    if (index === 1) result.wordIssues[0].wordIndex = 604;
+    const data = unpack(localChunk(r, index, {words: result.words}));
+    Object.assign(data.metadata, {clock, wordIssues: result.wordIssues, wordContextVersion: 1,
+      requestId: '01a181fb-1fb6-7271-bf2b-92b55aecdff3'});
+    const response = await request(f, base + `/local/chunks/${index}`, chunkRequest(pack(data.metadata, data.features)));
+    assert.equal(response.status, 200, response.bytes.toString());
+  }
+  assert.equal((await request(f, base + '/local/state')).json().completed.length, 12);
+  await request(f, base + '/local/finish', {method: 'POST'});
+  await waitFor(() => f.session.recordings[0].status === 'ready');
+  const record = f.session.recordings[0], segment = record.segments.find(item => item.lineId === 'b');
+  assert.equal(segment.start, 601.705); assert.equal(segment.end, 603.145); assert.equal(segment.status, 'auto');
+  assert.match(record.timingNotice, /1 個異常詞已由相鄰片段補回；0 個仍待核對/);
+  const diagnostic = (await request(f, base + '/transcript')).json().diagnostics;
+  assert.equal(diagnostic.wordIssues[0].wordIndex, 604);
+  assert.equal(diagnostic.wordIssues[0].start, 303.705); assert.equal(diagnostic.wordIssues[0].end, 305.145);
+  assert.equal(diagnostic.wordIssues[0].status, 'recovered'); assert.deepEqual(diagnostic.wordIssues[0].recoveredBy, [2]);
+  assert.equal(diagnostic.wordIssues[0].requestId, '01a181fb-1fb6-7271-bf2b-92b55aecdff3');
+  const backup = (await request(f, base + '/local/export')).bytes;
+  await request(f, base, {method: 'DELETE'});
+  const restored = await request(f, `/api/session/${f.session.id}/recordings/local/import`, {
+    method: 'POST', body: backup, headers: {'content-type': 'application/octet-stream'}});
+  assert.equal(restored.status, 201, restored.bytes.toString());
+  const asset = await persistence.getRecordingAsset(f.session.id, restored.json().recording.id);
+  assert.equal(asset.analysis.wordIssues[0].status, 'recovered');
+  assert.deepEqual(asset.analysis.wordIssues[0].recoveredBy, [2]);
+});
+
+test('an unresolved boundary word leaves a review record while the rest of the recording completes', async t => {
+  const {chunkClock, analyseChunkWords} = await import(require('node:url').pathToFileURL(path.resolve(__dirname, '../../client/src/lib/recording-clock.js')).href);
+  const f = fixture(); t.after(() => f.dispose()); const r = await createLocal(f, 601.44);
+  const base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  for (let index = 0; index < 3; index++) {
+    const clock = chunkClock(r.duration, index * 300, Math.min(r.duration, (index + 1) * 300));
+    const raw = index === 1 ? [{word: '缺少的交界台詞', start: 303.3, end: 305, confidence: .99}]
+      : index === 2 ? [{word: '可是我答應過你', start: 2, end: 3.44, confidence: .99}] : [];
+    const result = analyseChunkWords(raw, clock, clock.sampleCount / 16000);
+    const data = unpack(localChunk(r, index, {words: result.words}));
+    Object.assign(data.metadata, {clock, wordContextVersion: 1, wordIssues: result.wordIssues});
+    const response = await request(f, base + `/local/chunks/${index}`, chunkRequest(pack(data.metadata, data.features)));
+    assert.equal(response.status, 200, response.bytes.toString());
+  }
+  await request(f, base + '/local/finish', {method: 'POST'});
+  await waitFor(() => f.session.recordings[0].status === 'ready');
+  const record = f.session.recordings[0];
+  assert.match(record.timingNotice, /1 個仍待核對/);
+  assert.equal(record.segments.find(item => item.lineId === 'b').status, 'review');
+  const diagnostic = (await request(f, base + '/transcript')).json().diagnostics;
+  assert.equal(diagnostic.wordIssues[0].status, 'review');
+  assert.match(diagnostic.issues.join('；'), /尚未由相鄰片段補回/);
+});
+
 test('AI recording alignment is authenticated, validates word IDs, caches results and never persists the API key', async t => {
   let aiCalls = 0, deepgramCalls = 0;
   const f = fixture({recordingRequest: async (url, options) => {

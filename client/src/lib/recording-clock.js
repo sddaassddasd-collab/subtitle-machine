@@ -14,6 +14,7 @@ export function absoluteWords(words, clock, providerDuration, context = {}) {
     const details = index === undefined ? '' : `，第 ${index + 1} 個詞（起點 ${seconds(word?.start)}、終點 ${seconds(word?.end)}）`
     const error = new Error(`${batch}${details}：${reason}。片段長度 ${seconds(duration)}，對應原音 ${seconds(from)}～${seconds(from + duration)}；已停止，未套用此段對齊結果`)
     error.code = 'RECORDING_WORD_TIMING'
+    error.reason = reason
     throw error
   }
   if (Number.isFinite(providerDuration) && Math.abs(providerDuration - duration) > 0.25)
@@ -30,4 +31,28 @@ export function absoluteWords(words, clock, providerDuration, context = {}) {
     return {word: word.word, start: start + from, end: end + from, confidence: word.confidence,
       ...(end === start || start !== word.start || end !== word.end ? {timingUncertain: true} : {})}
   })
+}
+
+// Keep valid overlap words until both neighbouring batches are available. A
+// malformed word is evidence to review, not a reason to discard a whole batch.
+export function analyseChunkWords(words, clock, providerDuration, context = {}) {
+  absoluteWords([], clock, providerDuration, context) // A different audio clock is still a batch-level error.
+  const result = [], wordIssues = []
+  const duration = clock.sampleCount / clock.sampleRate
+  const coreStart = (clock.coreStartSample - clock.fromSample) / clock.sampleRate
+  const coreEnd = (clock.coreEndSample - clock.fromSample) / clock.sampleRate
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex++) {
+    const word = words[wordIndex]
+    try { result.push(...absoluteWords([word], clock, undefined, context)) }
+    catch (error) {
+      if (error.code !== 'RECORDING_WORD_TIMING') throw error
+      let zone = 'core'
+      if (Number.isFinite(word?.start) && word.start >= coreEnd && word.start <= duration + 0.1 && coreEnd < duration) zone = 'next'
+      else if (Number.isFinite(word?.end) && word.end >= 0 && word.end <= coreStart && coreStart > 0) zone = 'previous'
+      wordIssues.push({wordIndex, word: typeof word?.word === 'string' ? word.word.slice(0, 512) : '',
+        start: Number.isFinite(word?.start) ? word.start : null, end: Number.isFinite(word?.end) ? word.end : null,
+        reason: error.reason, zone})
+    }
+  }
+  return {words: result, wordIssues}
 }

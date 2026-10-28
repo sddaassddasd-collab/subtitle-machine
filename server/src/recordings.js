@@ -66,6 +66,7 @@ function publicRecording(recording, {details = false, session} = {}) {
     featureCalibration: recording.featureCalibration || null,
     ...(recording.decoderClock ? {decoderClock: recording.decoderClock} : {}),
     alignmentNotice: recording.alignmentNotice || '',
+    timingNotice: recording.timingNotice || '',
     ...(details ? {segments: recording.segments} : {}),
     ...(session ? {compatible: isRecordingCompatible(session, recording),
       ...(details ? {followingScript: describeFollowingScript(session, language, recordingLines(session, recording), scriptLanguageId)} : {})} : {}),

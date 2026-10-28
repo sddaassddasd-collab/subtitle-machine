@@ -1,5 +1,5 @@
 import {openRecordingWorker, rememberRecording, checkpoint, clearCheckpoint, wavBlob, analysisBlob} from './local-recordings.js'
-import {absoluteWords} from './recording-clock.js'
+import {analyseChunkWords} from './recording-clock.js'
 
 export const localKey = (sessionId, recordingId) => `${sessionId}:${recordingId}`
 export async function recordingJSON(url, options = {}) {
@@ -44,8 +44,8 @@ async function transcribe(base, recording, pcm, clock, signal, auth, context, re
   const alternative = result.results?.channels?.[0]?.alternatives?.[0]
   if (!alternative || !Array.isArray(alternative.words)) throw new Error('Deepgram 未回傳有效片段結果，請稍後繼續')
   const providerDuration = result.metadata?.duration
-  let words
-  try { words = absoluteWords(alternative.words, clock, providerDuration, context) }
+  let analysed
+  try { analysed = analyseChunkWords(alternative.words, clock, providerDuration, context) }
   catch (error) {
     const requestId = result.metadata?.request_id
     if (error.code === 'RECORDING_WORD_TIMING' && typeof requestId === 'string' &&
@@ -53,7 +53,9 @@ async function transcribe(base, recording, pcm, clock, signal, auth, context, re
       error.message += `（Deepgram 查詢編號：${requestId}）`
     throw error
   }
-  return {words, clock: {...clock, ...(Number.isFinite(providerDuration) ? {providerDuration} : {})}}
+  const requestId = result.metadata?.request_id
+  return {...analysed, ...(typeof requestId === 'string' && /^[a-f0-9-]{36}$/i.test(requestId) ? {requestId} : {}),
+    clock: {...clock, ...(Number.isFinite(providerDuration) ? {providerDuration} : {})}}
 }
 
 export async function prepareLocalRecording({entry, sessionId, cellId, language, existing,
@@ -89,15 +91,17 @@ export async function prepareLocalRecording({entry, sessionId, cellId, language,
       if (pending && (pending.metadata.fingerprint !== recording.fingerprint || (state.canTranscribe && !pending.metadata.transcribed))) pending = null
       if (!pending) {
         const chunk = await worker.chunk(start, end)
-        let words = [], clock = chunk.clock
+        let words = [], wordIssues = [], requestId, clock = chunk.clock
         if (state.canTranscribe) {
           onProgress(`辨識片段 ${index + 1}／${state.total}`)
           const result = await transcribe(base, recording, chunk.pcm, chunk.clock, signal, auth,
             {chunkIndex: index, chunkCount: state.total})
-          words = result.words; clock = result.clock
+          words = result.words; wordIssues = result.wordIssues; requestId = result.requestId; clock = result.clock
+          if (wordIssues.length) onNotice(`第 ${index + 1}／${state.total} 段有 ${wordIssues.length} 個詞時間待核對，已保存紀錄並繼續處理。`)
         }
         pending = {features: chunk.features, metadata: {fingerprint: recording.fingerprint, language: recording.language,
-          localRevision: state.localRevision, transcribed: state.canTranscribe, words, peaks: chunk.peaks, clock}}
+          localRevision: state.localRevision, transcribed: state.canTranscribe, words, wordIssues, requestId,
+          wordContextVersion: 1, peaks: chunk.peaks, clock}}
         await checkpoint(cacheKey, index, pending).catch(() => {})
       }
       onProgress(`保存片段 ${index + 1}／${state.total}`)

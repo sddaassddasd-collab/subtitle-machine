@@ -57,6 +57,16 @@ export default function RecordingTranscript({recording, base, lineId, segment, a
       <p className="recording-note">分析總長 {time(data.diagnostics.analysisDuration)} · 原檔播放總長 {time(playerDuration || data.diagnostics.playerDuration)}
         {data.diagnostics.chunks > 0 && ` · 已核對 ${data.diagnostics.chunks} 段音訊長度`}</p>
       {data.diagnostics.issues.map(issue => <p className="recording-note" key={issue}>{issue}</p>)}
+      {data.diagnostics.wordIssues?.length > 0 && <details>
+        <summary>分批交界與異常詞紀錄（{data.diagnostics.wordIssues.length}）</summary>
+        {data.diagnostics.wordIssues.slice(0, 50).map((issue, index) => <p className="recording-note" key={index}>
+          第 {issue.chunkIndex + 1} 段、第 {issue.wordIndex + 1} 個詞「{issue.word || '無文字'}」：
+          {issue.status === 'recovered' ? `已由第 ${(issue.recoveredBy || []).map(value => value + 1).join('、')} 段補回` : '待確認'}。
+          {issue.reason}；原回傳起點 {issue.start ?? '無'} 秒、終點 {issue.end ?? '無'} 秒（相對該批音訊）。
+          {issue.requestId && `Deepgram 查詢編號：${issue.requestId}`}
+        </p>)}
+        {data.diagnostics.wordIssues.length > 50 && <p className="recording-note">另有 {data.diagnostics.wordIssues.length - 50} 筆，完整紀錄包含在分析備份中。</p>}
+      </details>}
       <div className="recording-words" aria-label="辨識原文">
         {data.words.map(word => <button type="button" key={word.id}
           className={`${selectedId === word.id ? 'selected' : ''} ${word.id >= segment?.wordStart && word.id <= segment?.wordEnd ? 'mapped' : ''}`}

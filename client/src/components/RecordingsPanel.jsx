@@ -255,6 +255,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           {fileNotice && <small>{fileNotice}</small>}
         </div>}
         {recording.alignmentNotice && <p className="recording-note">{recording.alignmentNotice}</p>}
+        {recording.timingNotice && <p className="recording-note">{recording.timingNotice}</p>}
         {recording.error && <p className="recording-note">{recording.error}</p>}
         {recording.followingScript?.message && <p className="recording-note">{recording.followingScript.message}</p>}
         <label className="recording-select">錄音辨識語言
