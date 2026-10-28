@@ -60,11 +60,12 @@ export default function RecordingTranscript({recording, base, lineId, segment, a
       <div className="recording-words" aria-label="辨識原文">
         {data.words.map(word => <button type="button" key={word.id}
           className={`${selectedId === word.id ? 'selected' : ''} ${word.id >= segment?.wordStart && word.id <= segment?.wordEnd ? 'mapped' : ''}`}
-          title={`詞 ${word.id} · ${time(word.start)}～${time(word.end)} · 原辨識 ${time(word.rawStart)}`}
+          title={`詞 ${word.id} · ${time(word.start)}～${time(word.end)} · 原辨識 ${time(word.rawStart)}${word.timingUncertain ? ' · 時間待確認' : ''}`}
           onClick={() => seek(word)}><span>{word.word}</span><small>{time(word.start)}</small></button>)}
         {!data.words.length && <p>這份錄音尚無辨識文字。</p>}
       </div>
       {selected && <p>詞 {selected.id}「{selected.word}」：原辨識 {time(selected.rawStart)}～{time(selected.rawEnd)}；播放位置 {time(selected.start)}～{time(selected.end)}</p>}
+      {selected?.timingUncertain && <p className="recording-note">此詞沒有可靠的起終時間，相關字幕需試聽確認。</p>}
     </>}
     <p className="recording-note">一個定位點校正固定偏移；兩個以上校正時間比例，建議用第三點驗證。選好辨識詞後，在原檔聽到該詞起音的位置暫停，再加入定位點。</p>
     <button type="button" className="subtle-button" disabled={disabled || !selected || !audioRef.current?.src} onClick={addAnchor}>以目前播放位置校正選定詞</button>

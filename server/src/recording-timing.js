@@ -15,10 +15,11 @@ function timedWords(words, duration, correction) {
   const c = calibration(correction);
   return (words || []).flatMap((word, id) => {
     if (typeof word?.word !== 'string' || !Number.isFinite(word.start) || !Number.isFinite(word.end) ||
-      word.start < 0 || word.end <= word.start || word.end > duration + 0.1) return [];
+      word.start < 0 || word.end < word.start || word.end > duration + 0.1) return [];
     return [{id, word: word.word, rawStart: word.start, rawEnd: word.end,
       start: round(word.start * c.scale + c.offset), end: round(word.end * c.scale + c.offset),
-      confidence: Number.isFinite(word.confidence) ? word.confidence : 0.8}];
+      confidence: Number.isFinite(word.confidence) ? word.confidence : 0.8,
+      ...(word.timingUncertain === true || word.end === word.start ? {timingUncertain: true} : {})}];
   }).sort((a, b) => a.start - b.start || a.id - b.id);
 }
 
@@ -55,13 +56,15 @@ function fitCalibration(anchors, words, duration, playerDuration = duration) {
 
 function timingDiagnostics(recording, analysis, playerDuration) {
   const issues = [];
-  let previous = -Infinity, invalidWords = 0, unorderedWords = 0;
+  let previous = -Infinity, invalidWords = 0, unorderedWords = 0, uncertainWords = 0;
   for (const word of analysis?.words || []) {
-    if (!Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end <= word.start || word.end > recording.duration + 0.1) invalidWords++;
+    if (!Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start || word.end > recording.duration + 0.1) invalidWords++;
+    if (word.timingUncertain === true || word.end === word.start) uncertainWords++;
     if (word.start < previous) unorderedWords++;
     previous = word.start;
   }
   if (invalidWords) issues.push(`${invalidWords} 個辨識詞的時間超出音訊範圍`);
+  if (uncertainWords) issues.push(`${uncertainWords} 個辨識詞缺少可靠的時間範圍，相關字幕需試聽確認`);
   if (unorderedWords) issues.push(`${unorderedWords} 個辨識詞的順序需要核對`);
   if (Number.isFinite(playerDuration) && Math.abs(playerDuration - recording.duration) > 0.25)
     issues.push('原檔播放長度與分析長度不同，請核對開頭、中間及結尾');
@@ -73,7 +76,7 @@ function timingDiagnostics(recording, analysis, playerDuration) {
   }
   return {analysisDuration: recording.duration, playerDuration: playerDuration || playbackDuration(recording),
     calibration: recording.timeCalibration || {scale: 1, offset: 0, anchors: []},
-    wordCount: analysis?.words?.length || 0, invalidWords, unorderedWords,
+    wordCount: analysis?.words?.length || 0, invalidWords, unorderedWords, uncertainWords,
     decoderClock: recording.decoderClock || null,
     clockVersion: analysis?.clockVersion || 0, chunks: analysis?.clocks?.length || 0, issues};
 }

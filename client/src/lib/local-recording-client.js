@@ -24,7 +24,7 @@ export async function linkLocalRecording({entry, sessionId, recording, signal, o
   } finally { worker.close() }
 }
 
-async function transcribe(base, recording, pcm, clock, signal, auth, retry = true) {
+async function transcribe(base, recording, pcm, clock, signal, auth, context, retry = true) {
   if (pcm.byteLength !== clock.sampleCount * 2) throw new Error('片段樣本數與實際音訊不符，請重新準備')
   if (!auth.token || auth.expiresAt < Date.now() + 15000) {
     const grant = await post(`${base}/${recording.id}/local/token`, {}, signal)
@@ -37,14 +37,22 @@ async function transcribe(base, recording, pcm, clock, signal, auth, retry = tru
     body: wavBlob(pcm), signal: AbortSignal.any([signal, AbortSignal.timeout(600000)])})
   if (response.status === 401 && retry) {
     auth.token = null
-    return transcribe(base, recording, pcm, clock, signal, auth, false)
+    return transcribe(base, recording, pcm, clock, signal, auth, context, false)
   }
   if (!response.ok) throw new Error(`Deepgram 片段辨識失敗（${response.status}），已保存的片段不必重跑，請稍後繼續`)
   const result = await response.json()
   const alternative = result.results?.channels?.[0]?.alternatives?.[0]
   if (!alternative || !Array.isArray(alternative.words)) throw new Error('Deepgram 未回傳有效片段結果，請稍後繼續')
   const providerDuration = result.metadata?.duration
-  const words = absoluteWords(alternative.words, clock, providerDuration)
+  let words
+  try { words = absoluteWords(alternative.words, clock, providerDuration, context) }
+  catch (error) {
+    const requestId = result.metadata?.request_id
+    if (error.code === 'RECORDING_WORD_TIMING' && typeof requestId === 'string' &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))
+      error.message += `（Deepgram 查詢編號：${requestId}）`
+    throw error
+  }
   return {words, clock: {...clock, ...(Number.isFinite(providerDuration) ? {providerDuration} : {})}}
 }
 
@@ -84,7 +92,8 @@ export async function prepareLocalRecording({entry, sessionId, cellId, language,
         let words = [], clock = chunk.clock
         if (state.canTranscribe) {
           onProgress(`辨識片段 ${index + 1}／${state.total}`)
-          const result = await transcribe(base, recording, chunk.pcm, chunk.clock, signal, auth)
+          const result = await transcribe(base, recording, chunk.pcm, chunk.clock, signal, auth,
+            {chunkIndex: index, chunkCount: state.total})
           words = result.words; clock = result.clock
         }
         pending = {features: chunk.features, metadata: {fingerprint: recording.fingerprint, language: recording.language,

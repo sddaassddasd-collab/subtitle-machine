@@ -528,6 +528,40 @@ test('local clock metadata rejects mismatched samples and survives a calibrated 
   assert.equal((await persistence.getRecordingAsset(f.session.id, restoredId)).analysis.clockVersion, 1);
 });
 
+test('point-timed words survive local chunk storage, review and portable backup without shifting other cues', async t => {
+  const f = fixture(); t.after(() => f.dispose()); const r = await createLocal(f, 6);
+  const base = `/api/session/${f.session.id}/recordings/${r.id}`;
+  const words = [...'我們今晚開始演出'.split('').map((word, i) => ({word, start: i * .2, end: (i + 1) * .2, confidence: .99})),
+    {word: '可是我答應過你', start: 4, end: 5.5, confidence: .99},
+    {word: '啊', start: 5.6, end: 5.9, confidence: .99},
+    {word: '啊', start: 5.7, end: 5.7, confidence: .99},
+    {word: '尾', start: 6, end: 6, confidence: .99}];
+  words[2].end = words[2].start;
+  const response = await request(f, base + '/local/chunks/0', chunkRequest(localChunk(r, 0, {words})));
+  assert.equal(response.status, 200, response.bytes.toString());
+  await request(f, base + '/local/finish', {method: 'POST'});
+  await waitFor(() => f.session.recordings[0].status === 'ready');
+  const record = f.session.recordings[0];
+  assert.equal(record.segments.find(s => s.lineId === 'a').status, 'review');
+  assert.match(record.segments.find(s => s.lineId === 'a').reviewReason, /時間範圍/);
+  assert.equal(record.segments.find(s => s.lineId === 'b').start, 4);
+  const transcript = (await request(f, base + '/transcript')).json();
+  assert.equal(transcript.words.length, words.length);
+  assert.equal(transcript.words[2].timingUncertain, true);
+  assert.equal(transcript.words.at(-1).start, 6);
+  assert.equal(transcript.diagnostics.uncertainWords, 3);
+  assert.equal(transcript.diagnostics.invalidWords, 0);
+  const backup = (await request(f, base + '/local/export')).bytes;
+  await request(f, base, {method: 'DELETE'});
+  const restored = await request(f, `/api/session/${f.session.id}/recordings/local/import`, {
+    method: 'POST', body: backup, headers: {'content-type': 'application/octet-stream'}});
+  assert.equal(restored.status, 201, restored.bytes.toString());
+  const asset = await persistence.getRecordingAsset(f.session.id, restored.json().recording.id);
+  assert.equal(asset.analysis.words.length, words.length);
+  assert.equal(asset.analysis.words[2].timingUncertain, true);
+  assert.equal(asset.analysis.words.at(-1).timingUncertain, true);
+});
+
 test('AI recording alignment is authenticated, validates word IDs, caches results and never persists the API key', async t => {
   let aiCalls = 0, deepgramCalls = 0;
   const f = fixture({recordingRequest: async (url, options) => {

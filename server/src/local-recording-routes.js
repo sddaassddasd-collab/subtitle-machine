@@ -34,9 +34,11 @@ function wordsFor(words, duration, maxWords = 20000) {
   if (!Array.isArray(words) || words.length > maxWords) fail('辨識結果過大或格式錯誤');
   return words.map(word => {
     if (typeof word.word !== 'string' || word.word.length > 512 || !finite(word.start, 0, duration + 0.1) ||
-      !finite(word.end, word.start, duration + 0.1) || word.end <= word.start) fail('辨識時間戳格式錯誤');
-    return {word: word.word, start: word.start, end: Math.min(duration, word.end),
-      confidence: finite(word.confidence, 0, 1) ? word.confidence : 0};
+      !finite(word.end, word.start, duration + 0.1)) fail('辨識時間戳格式錯誤');
+    const start = Math.min(duration, word.start), end = Math.min(duration, word.end);
+    return {word: word.word, start, end,
+      confidence: finite(word.confidence, 0, 1) ? word.confidence : 0,
+      ...(word.timingUncertain === true || end === start || end !== word.end || start !== word.start ? {timingUncertain: true} : {})};
   });
 }
 function peaksFor(peaks, count) {
@@ -116,8 +118,10 @@ function registerLocalRecordingRoutes(app, context) {
           if (chunk.analysis.clock) clocks.push({index: chunk.index, ...chunk.analysis.clock});
           for (const word of chunk.analysis.words) {
             const last = words.at(-1);
-            if (last && last.word === word.word && word.start < last.end && Math.abs(last.start - word.start) < 0.4) {
+            if (last && last.end > last.start && word.end > word.start && last.word === word.word &&
+              word.start < last.end && Math.abs(last.start - word.start) < 0.4) {
               last.end = Math.max(last.end, word.end);
+              if (word.timingUncertain) last.timingUncertain = true;
             } else words.push({...word});
           }
         }
@@ -226,7 +230,7 @@ function registerLocalRecordingRoutes(app, context) {
         validateFeatures(features, end - start);
         const words = wordsFor(body.words, recording.duration).filter(word => {
           const middle = (word.start + word.end) / 2;
-          return middle >= start && middle < end;
+          return middle >= start && (middle < end || (end === recording.duration && middle === end));
         });
         const peaks = peaksFor(body.peaks, Math.ceil(Math.round((end - start) * 16000) / 1600));
         let clock;

@@ -14,7 +14,8 @@ function wordTimeline(words, duration, correction) {
       start: word.start + char / text.length * (word.end - word.start),
       end: word.start + (char + 1) / text.length * (word.end - word.start),
       rawStart: word.rawStart + char / text.length * (word.rawEnd - word.rawStart),
-      rawEnd: word.rawStart + (char + 1) / text.length * (word.rawEnd - word.rawStart), confidence: word.confidence});
+      rawEnd: word.rawStart + (char + 1) / text.length * (word.rawEnd - word.rawStart), confidence: word.confidence,
+      timingUncertain: word.timingUncertain === true});
   }
   return {text: units.map(unit => unit.char).join(''), units, words: records};
 }
@@ -157,6 +158,8 @@ function segmentFromCandidate(line, candidate, timeline, {reference, correction,
   if (candidate.gap > 3) reasons.push('片段中有長停頓，請確認沒有跨過其他台詞');
   if (candidate.ambiguous) reasons.push('錄音中有相似或重複台詞，需要確認採用的位置');
   if (candidate.confidence < 0.76) reasons.push('語音辨識信心偏低');
+  if (timeline.units.slice(candidate.start, candidate.end).some(unit => unit.timingUncertain))
+    reasons.push('部分辨識詞缺少可靠的時間範圍，請試聽確認切點');
   if (first.offset || (last.offset + 1 < normalizeText(timeline.words.find(word => word.id === last.wordId)?.word || '').length))
     reasons.push('切點位於辨識詞內，逐字時間為估計值');
   const confidence = Math.min(candidate.ambiguous ? 0.65 : 1, candidate.similarity * Math.min(1, candidate.confidence + 0.1));

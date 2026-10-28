@@ -79,6 +79,62 @@ test('each chunk uses its absolute sample start including overlap, without cumul
   assert.throws(() => absoluteWords([{word: '錯誤', start: 305, end: 306}], clock), /超出片段/);
 });
 
+test('point timestamps preserve words and subsequent absolute times instead of aborting a whole batch', async () => {
+  const {chunkClock, absoluteWords} = await import(pathToFileURL(path.resolve(__dirname, '../../client/src/lib/recording-clock.js')).href);
+  const clock = chunkClock(3600, 300, 600);
+  const source = [{word: '前', start: 2, end: 2.3, confidence: .99},
+    {word: '中', start: 2.3, end: 2.3, confidence: .99},
+    {word: '後', start: 3, end: 3.4, confidence: .99}];
+  const original = structuredClone(source);
+  const result = absoluteWords(source, clock, 304, {chunkIndex: 1, chunkCount: 12});
+  assert.deepEqual(result.map(word => word.word), ['前', '中', '後']);
+  assert.equal(result[1].start, 300.3); assert.equal(result[1].end, 300.3);
+  assert.equal(result[1].timingUncertain, true);
+  assert.equal(result[2].start, 301); assert.equal(result[2].end, 301.4);
+  assert.equal(result[2].timingUncertain, undefined);
+  assert.deepEqual(source, original);
+  const [tail] = absoluteWords([{word: '尾', start: 303.98, end: 304.02}], clock, 304);
+  assert.equal(tail.end, 602); assert.equal(tail.timingUncertain, true);
+  const [point] = absoluteWords([{word: '尾', start: 304.02, end: 304.02}], clock, 304);
+  assert.equal(point.start, 602); assert.equal(point.end, 602); assert.equal(point.timingUncertain, true);
+});
+
+test('genuinely invalid ASR times stop with the batch, word and exact time values', async () => {
+  const {chunkClock, absoluteWords} = await import(pathToFileURL(path.resolve(__dirname, '../../client/src/lib/recording-clock.js')).href);
+  const clock = chunkClock(3600, 300, 600), context = {chunkIndex: 1, chunkCount: 12};
+  const check = (word, reason) => assert.throws(() => absoluteWords([word], clock, 304, context), error => {
+    assert.equal(error.code, 'RECORDING_WORD_TIMING');
+    assert.match(error.message, /第 2／12 段，第 1 個詞/);
+    assert.match(error.message, reason);
+    assert.match(error.message, /片段長度 304 秒，對應原音 298 秒～602 秒/);
+    return true;
+  });
+  check({word: '錯', start: 303, end: 305}, /終點 305 秒.*超出片段/);
+  check({word: '錯', start: 2, end: 1}, /終點早於起點/);
+  check({word: '錯', start: -1, end: 1}, /起點早於片段開頭/);
+  check({word: '錯', start: null, end: 1}, /缺少有效文字或時間/);
+  check(null, /缺少有效文字或時間/);
+  assert.throws(() => absoluteWords([], clock, 300, context), /第 2／12 段.*回報長度 300 秒/);
+});
+
+test('missing word durations remain visible and require review, never authorize automatic following', () => {
+  const script = lines(['今晚演出準備開始', '明天早上大家集合']);
+  const source = [...words(script[0].text, 1), ...words(script[1].text, 5)];
+  source[2].end = source[2].start;
+  const timeline = wordTimeline(source, 10);
+  assert.equal(timeline.words.length, source.length);
+  assert.equal(timeline.words[2].timingUncertain, true);
+  const result = alignSegments(script, source, 10);
+  assert.equal(result[0].status, 'review'); assert.match(result[0].reviewReason, /缺少可靠的時間範圍/);
+  assert.equal(result[1].start, 5); assert.equal(result[1].status, 'auto');
+  const diagnostic = timingDiagnostics({source: 'local', duration: 10}, {words: source, clockVersion: 1}, 10);
+  assert.equal(diagnostic.invalidWords, 0); assert.equal(diagnostic.uncertainWords, 1);
+  assert.match(diagnostic.issues[0], /1 個辨識詞缺少可靠的時間範圍/);
+  const onlyPoint = [{word: script[0].text, start: 1, end: 1, confidence: .99}];
+  assert.equal(wordTimeline(onlyPoint, 10).words.length, 1);
+  assert.equal(alignSegments(script.slice(0, 1), onlyPoint, 10)[0].status, 'unmatched');
+});
+
 function aiCase() {
   const script = lines(['你去哪裡']);
   const source = words('你去那裡', 600);
