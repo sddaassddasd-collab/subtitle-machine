@@ -32,6 +32,7 @@ function fixture(mode = 'auto') {
     LINE_TYPES: { DIRECTION: 'direction', DIALOGUE: 'dialogue' },
     sessions: new Map([[session.id, session]]),
     autoFollowStates: new Map(), transcriptionStreams: new Map(),
+    autoFollowHistory: {enter() {}, confirm() {}, sync() {}, diagnostic() {}, event() {}, status: () => ({})},
     referenceRuntime: {position() {}, invalidate() {}},
     getSession: () => session, getSessionRecord: () => session,
     ensureSessionLines: s => s.lines, sanitizeLineText: t => String(t).trim(),

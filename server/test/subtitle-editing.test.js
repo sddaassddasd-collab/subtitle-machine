@@ -14,6 +14,7 @@ function fixture() {
   assert.match(source, /startServer\(\);\s*$/);
   loaded._compile(source.replace(/startServer\(\);\s*$/, `
     module.exports = function() {
+      autoFollowHistory.remove = async () => {}; // This fixture deliberately replaces all persistence IO.
       const owner = { id: 'editing-owner', role: USER_ROLES.OPERATOR };
       const other = { id: 'editing-other', role: USER_ROLES.OPERATOR };
       const viewer = { id: 'editing-viewer', role: USER_ROLES.VIEWER };

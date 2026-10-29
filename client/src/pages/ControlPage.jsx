@@ -7,6 +7,7 @@ import WorkspaceDialog from '../components/WorkspaceDialog'
 import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
 import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
+import AutoFollowHistory from '../components/AutoFollowHistory'
 import {
   areProjectorLayoutsEqual,
   normalizeProjectorDisplayMode,
@@ -6359,7 +6360,7 @@ const ControlPage = () => {
               ? `第 ${autoFollow.progressIndex + 1} 格 · ${Math.round(autoFollow.progress * 100)}%`
               : ''}
             confidence={autoFollowConfidenceLabel}
-            hint={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+            hint={autoFollow.history?.error || (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
               ? transcription.error || (
                 Number.isInteger(autoFollow.predictedIndex)
                   ? `已預推第 ${autoFollow.predictedIndex + 1} 格，等待核對`
@@ -6367,8 +6368,8 @@ const ControlPage = () => {
                     ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
                     : autoFollow.message
               )
-              : ''}
-            error={(isLiveOutput || subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) && Boolean(transcription.error)}
+              : '')}
+            error={Boolean(autoFollow.history?.error) || ((isLiveOutput || subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) && Boolean(transcription.error))}
           />
           <div
             className={`status-bar ${
@@ -6382,6 +6383,7 @@ const ControlPage = () => {
             <span title={status.message}>{status.message}</span>
           </div>
           <ControlStatusDetails open={audioDiagnosticsOpen} onClose={() => setAudioDiagnosticsOpen(false)}>
+            <AutoFollowHistory key={sessionId} open={audioDiagnosticsOpen} sessionId={sessionId} historyStatus={autoFollow.history}/>
             <div className="control-status-messages">
               <p className={status.kind === 'error' ? 'control-status-error' : ''}>{status.message || '尚無操作訊息'}</p>
               {transcription.error && <p className="control-status-error">{transcription.error}</p>}

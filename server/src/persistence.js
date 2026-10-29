@@ -156,6 +156,14 @@ function initializeSqliteDatabase(db) {
     session_id TEXT NOT NULL, recording_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
     features BLOB NOT NULL, analysis TEXT NOT NULL,
     PRIMARY KEY (session_id, recording_id, chunk_index))`);
+  db.exec(`CREATE TABLE IF NOT EXISTS follow_runs (
+    session_id TEXT NOT NULL, run_id TEXT NOT NULL, started_at INTEGER NOT NULL,
+    ended_at INTEGER, data TEXT NOT NULL, PRIMARY KEY(session_id, run_id));
+    CREATE INDEX IF NOT EXISTS follow_runs_session ON follow_runs(session_id, started_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS follow_runs_open ON follow_runs(session_id) WHERE ended_at IS NULL;
+    CREATE TABLE IF NOT EXISTS follow_events (
+    session_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id, run_id, sequence));`);
 }
 
 function getSqliteDatabase() {
@@ -188,6 +196,14 @@ async function initializePostgresDatabase(pool) {
     session_id TEXT NOT NULL, recording_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
     features BYTEA NOT NULL, analysis JSONB NOT NULL,
     PRIMARY KEY (session_id, recording_id, chunk_index))`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS follow_runs (
+    session_id TEXT NOT NULL, run_id TEXT NOT NULL, started_at BIGINT NOT NULL,
+    ended_at BIGINT, data JSONB NOT NULL, PRIMARY KEY(session_id, run_id))`);
+  await pool.query('CREATE INDEX IF NOT EXISTS follow_runs_session ON follow_runs(session_id, started_at DESC)');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS follow_runs_open ON follow_runs(session_id) WHERE ended_at IS NULL');
+  await pool.query(`CREATE TABLE IF NOT EXISTS follow_events (
+    session_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL, data JSONB NOT NULL, PRIMARY KEY(session_id, run_id, sequence))`);
 }
 
 async function getPostgresPool() {
@@ -352,6 +368,25 @@ async function writeRecordingAssetsToPostgres(client, filePath, sessions) {
   } finally { db.close(); }
 }
 
+async function writeFollowHistoryToPostgres(client, filePath, sessions) {
+  const DatabaseSync = getSqliteDatabaseSync();
+  const db = new DatabaseSync(filePath, {readOnly: true});
+  try {
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='follow_runs'").get()) return;
+    const retained = new Set(sessions.map(session => session.id));
+    for (const row of db.prepare('SELECT * FROM follow_runs').iterate()) {
+      if (!retained.has(row.session_id)) continue;
+      await client.query(`INSERT INTO follow_runs VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING`,
+        [row.session_id, row.run_id, row.started_at, row.ended_at, row.data]);
+    }
+    for (const row of db.prepare('SELECT * FROM follow_events').iterate()) {
+      if (!retained.has(row.session_id)) continue;
+      await client.query(`INSERT INTO follow_events VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING`,
+        [row.session_id, row.run_id, row.sequence, row.event_type, row.data]);
+    }
+  } finally { db.close(); }
+}
+
 async function writeStoreToPostgres(pool, store, sqlitePath = null) {
   const normalized = normalizeStore(store);
   const now = Date.now();
@@ -371,7 +406,10 @@ async function writeStoreToPostgres(pool, store, sqlitePath = null) {
         [storeKey, JSON.stringify(normalized[storeKey]), now],
       );
     }
-    if (sqlitePath) await writeRecordingAssetsToPostgres(client, sqlitePath, normalized.sessions);
+    if (sqlitePath) {
+      await writeRecordingAssetsToPostgres(client, sqlitePath, normalized.sessions);
+      await writeFollowHistoryToPostgres(client, sqlitePath, normalized.sessions);
+    }
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -616,6 +654,97 @@ async function deleteRecordingChunks(sessionId, recordingId = null) {
   }
 }
 
+// History is independent of the frequently rewritten session store and audio assets.
+// A batch commits its append-only events and recovery cursor atomically. Retrying
+// the same batch is safe, including after a lost PostgreSQL acknowledgement.
+async function saveFollowHistory(run, events) {
+  const values = [run.sessionId, run.id, run.startedAt, run.endedAt, JSON.stringify(run)];
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    const client = await (await getPostgresPool()).connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`INSERT INTO follow_runs VALUES ($1,$2,$3,$4,$5::jsonb)
+        ON CONFLICT(session_id,run_id) DO UPDATE SET ended_at=EXCLUDED.ended_at,data=EXCLUDED.data`, values);
+      if (events.length) await client.query(`INSERT INTO follow_events(session_id,run_id,sequence,event_type,data)
+        SELECT $1,$2,(event->>'sequence')::int,event->>'type',event FROM jsonb_array_elements($3::jsonb) event
+        ON CONFLICT DO NOTHING`, [run.sessionId, run.id, JSON.stringify(events)]);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  } else {
+    const db = getSqliteDatabase();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`INSERT INTO follow_runs VALUES (?,?,?,?,?) ON CONFLICT(session_id,run_id)
+        DO UPDATE SET ended_at=excluded.ended_at,data=excluded.data`).run(...values);
+      const insert = db.prepare('INSERT OR IGNORE INTO follow_events VALUES (?,?,?,?,?)');
+      for (const event of events) insert.run(run.sessionId, run.id, event.sequence, event.type, JSON.stringify(event));
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
+}
+const followData = row => row ? (typeof row.data === 'string' ? JSON.parse(row.data) : row.data) : null;
+async function getOpenFollowRun(sessionId) {
+  const row = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query('SELECT data FROM follow_runs WHERE session_id=$1 AND ended_at IS NULL', [sessionId])).rows[0]
+    : getSqliteDatabase().prepare('SELECT data FROM follow_runs WHERE session_id=? AND ended_at IS NULL').get(sessionId);
+  const run = followData(row);
+  if (!run) return null;
+  const context = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query(`SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2
+      AND event_type='context' ORDER BY sequence DESC LIMIT 1`, [sessionId, run.id])).rows[0]
+    : getSqliteDatabase().prepare(`SELECT data FROM follow_events WHERE session_id=? AND run_id=?
+      AND event_type='context' ORDER BY sequence DESC LIMIT 1`).get(sessionId, run.id);
+  return {run, context: followData(context)};
+}
+async function listOpenFollowSessionIds() {
+  const rows = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query('SELECT session_id FROM follow_runs WHERE ended_at IS NULL')).rows
+    : getSqliteDatabase().prepare('SELECT session_id FROM follow_runs WHERE ended_at IS NULL').all();
+  return rows.map(row => row.session_id);
+}
+async function listFollowRuns(sessionId, limit = 20, offset = 0) {
+  const rows = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query(`SELECT data FROM follow_runs WHERE session_id=$1
+      ORDER BY started_at DESC,run_id DESC LIMIT $2 OFFSET $3`, [sessionId, limit, offset])).rows
+    : getSqliteDatabase().prepare(`SELECT data FROM follow_runs WHERE session_id=?
+      ORDER BY started_at DESC,run_id DESC LIMIT ? OFFSET ?`).all(sessionId, limit, offset);
+  return rows.map(followData);
+}
+async function getFollowRun(sessionId, runId) {
+  const row = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2', [sessionId, runId])).rows[0]
+    : getSqliteDatabase().prepare('SELECT data FROM follow_runs WHERE session_id=? AND run_id=?').get(sessionId, runId);
+  if (!row) return null;
+  const rows = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query('SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2 ORDER BY sequence', [sessionId, runId])).rows
+    : getSqliteDatabase().prepare('SELECT data FROM follow_events WHERE session_id=? AND run_id=? ORDER BY sequence').all(sessionId, runId);
+  return {run: followData(row), events: rows.map(followData)};
+}
+async function deleteFollowHistory(sessionId, runId = null) {
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    const client = await (await getPostgresPool()).connect();
+    const values = runId ? [sessionId, runId] : [sessionId];
+    const where = `session_id=$1${runId ? ' AND run_id=$2' : ''}`;
+    try {
+      await client.query('BEGIN');
+      await client.query(`DELETE FROM follow_events WHERE ${where}`, values);
+      await client.query(`DELETE FROM follow_runs WHERE ${where}`, values);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  } else {
+    const db = getSqliteDatabase(), values = runId ? [sessionId, runId] : [sessionId];
+    const where = `session_id=?${runId ? ' AND run_id=?' : ''}`;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`DELETE FROM follow_events WHERE ${where}`).run(...values);
+      db.prepare(`DELETE FROM follow_runs WHERE ${where}`).run(...values);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
+}
+
 function createOpaqueToken(byteLength = 18) {
   return crypto.randomBytes(byteLength).toString('base64url');
 }
@@ -676,5 +805,11 @@ module.exports = {
   putRecordingChunk,
   getRecordingChunks,
   deleteRecordingChunks,
+  saveFollowHistory,
+  getOpenFollowRun,
+  listOpenFollowSessionIds,
+  listFollowRuns,
+  getFollowRun,
+  deleteFollowHistory,
   verifyPassword,
 };

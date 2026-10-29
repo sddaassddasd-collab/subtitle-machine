@@ -52,7 +52,7 @@ function fixture({recordingTask, recordingStorage, recordingRequest} = {}) {
         liveTranslationStreamId:'recording-live', pendingAudioChunks:[], socket:{readyState:1,bufferedAmount:0,send(){},close(){this.readyState=3}}};
       transcriptionStreams.set(session.id,stream);
       const handlers=new Map();io.listeners('connection')[0]({id:stream.socketId,data:{},handshake:{headers:{cookie:AUTH_COOKIE_NAME+'='+cookieToken}},on:(event,handler)=>handlers.set(event,handler),emit(){}});
-      return {app,session,stream,cookie:AUTH_COOKIE_NAME+'='+cookieToken, runtime:referenceRuntime,
+      return {app,session,stream,cookie:AUTH_COOKIE_NAME+'='+cookieToken, runtime:referenceRuntime, history:autoFollowHistory,
         state:()=>getPublicAutoFollowState(session), viewer:()=>getViewerPayload(session),
         transcript:(text,options)=>handleAutoFollowTranscript(session.id,text,options),
         audioResult: result=>handleReferenceAudioResult(session.id,result),
@@ -228,15 +228,22 @@ test('text can advance immediately; delayed audio for the same/older cue cannot 
 
 test('real acoustic worker can lead cue changes while ASR stream remains active',async t=>{
   const f=fixture();t.after(()=>f.dispose());const r=await importRecording(f);f.session.subtitleControlMode='auto';
+  const historyId = await f.history.start(f.session);
+  t.after(() => f.history.end(f.session.id));
   await f.runtime.ensure(f.session);await waitFor(()=>f.runtime.sessions.get(f.session.id)?.ready);
   const take=Buffer.concat([phrasePcm(phrases[0],24000,{speed:0.85,amplitude:0.1,pitch:1.01,silence:.4}),phrasePcm(phrases[1],24000,{speed:0.85,amplitude:0.1,pitch:1.01})]);
   let sequence=0;
   for(let offset=0;offset+960<=take.length;offset+=960){
-    assert.equal(f.send({audio:take.subarray(offset,offset+960).toString('base64'),durationMs:20,level:.04,sequence:++sequence}).ok,true);
+    const reply = f.send({audio:take.subarray(offset,offset+960).toString('base64'),durationMs:20,level:.04,sequence:++sequence});
+    assert.equal(reply.ok,true,JSON.stringify(reply));
     await new Promise(resolve=>setTimeout(resolve,3));
   }
   await waitFor(()=>f.session.currentIndex===2);
   assert.equal(f.state().lastDecision.source,'audio');assert.equal(f.viewer().text,'可是我答應過你');
+  const traced = (await request(f, `/api/session/${f.session.id}/follow-history/${historyId}`)).json();
+  assert.equal(traced.rows[2].visits[0].source, 'audio');
+  assert.equal(traced.rows[2].visits[0].confirmations[0].source, 'audio');
+  assert.equal(traced.rows[2].reference.usable, true);
   assert.equal(f.stream.ready,true);assert.equal(f.stream.closing,false);
   await persistence.deleteRecordingAssets(f.session.id,r.id);
 });
@@ -704,6 +711,51 @@ test('token failures distinguish upstream credentials, permissions, rate limits 
       assert.equal((await request(f,`/api/session/${f.session.id}/recordings/${r.id}/local/state`)).json().completed.length,0);
     });
   }
+});
+
+test('follow history records real text/manual transitions, exports every visit and enforces authorization', async t => {
+  const f = fixture();
+  t.after(async () => { await f.history.end(f.session.id); f.dispose(); });
+  const root = `/api/session/${f.session.id}/follow-history`;
+  assert.equal((await request(f, root, {cookie: ''})).status, 401);
+  assert.equal((await request(f, root)).json().runs.length, 0);
+  f.socket('setSubtitleControlMode', {sessionId: f.session.id, mode: 'auto'});
+  f.transcript('我們今晚開始演出', {streamId: 'recording-live', itemId: 'first', startMs: 0, endMs: 1000, isFinal: true});
+  const list = (await request(f, root)).json();
+  assert.equal(list.runs.length, 1);
+  const id = list.runs[0].id;
+  f.socket('setCurrentIndex', {sessionId: f.session.id, index: 2});
+  f.transcript('可是我答應過你', {streamId: 'recording-live', itemId: 'second', startMs: 1100, endMs: 2000, isFinal: true});
+  const detail = (await request(f, `${root}/${id}`)).json();
+  assert.equal(detail.rows[0].visits[0].source, 'initial');
+  assert.equal(detail.rows[0].visits[0].confirmations[0]?.source, 'transcript', JSON.stringify(detail.recentEvents));
+  assert.equal(detail.rows[2].visits[0].source, 'manual');
+  assert.equal(detail.rows[2].visits[0].confirmations[0].source, 'transcript');
+  f.socket('setSubtitleControlMode', {sessionId: f.session.id, mode: 'manual'});
+  f.socket('setCurrentIndex', {sessionId: f.session.id, index: 2});
+  f.socket('setSubtitleControlMode', {sessionId: f.session.id, mode: 'auto'});
+  const resumed = (await request(f, `${root}/${id}`)).json();
+  assert.equal(resumed.run.endedAt, null);
+  assert.equal(resumed.rows[2].visits.length, 2);
+  assert.equal(resumed.rows[2].visits[1].source, 'manual');
+  const csv = await request(f, `${root}/${id}?format=csv`);
+  assert.equal(csv.status, 200); assert.match(csv.headers['content-type'], /text\/csv/);
+  assert.equal(csv.headers['cache-control'], 'no-store'); assert.match(csv.bytes.toString(), /人工操作/);
+  const json = await request(f, `${root}/${id}?format=json`);
+  assert.equal(json.status, 200); assert.ok(json.json().events.some(event => event.type === 'cue_confirm'));
+  assert.equal((await request(f, `${root}/${id}?format=html`)).status, 400);
+  assert.equal((await request(f, `${root}/${id}`, {method: 'DELETE'})).status, 409);
+  const originalOwner = f.session.ownerUserId;
+  f.session.ownerUserId = 'another-user';
+  assert.equal((await request(f, root)).status, 404);
+  assert.equal((await request(f, `${root}/${id}?format=json`)).status, 404);
+  f.session.ownerUserId = originalOwner;
+  assert.equal((await request(f, `${root}/${id}/end`, {method: 'POST'})).status, 200);
+  const next = (await request(f, `${root}/start`, {method: 'POST'})).json().id;
+  assert.notEqual(next, id);
+  assert.equal((await request(f, root)).json().runs.length, 2);
+  assert.equal((await request(f, `${root}/${id}`, {method: 'DELETE'})).status, 200);
+  assert.equal((await request(f, `${root}/${id}`)).status, 404);
 });
 
 test('token transport failures and malformed responses remain actionable and never expose raw provider errors',async t=>{
