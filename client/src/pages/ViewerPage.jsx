@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import FollowPrompter from '../components/FollowPrompter'
+import { PublicDisplayGate, publicViewMode, preventPrompterScroll } from '../lib/public-display'
 import { io } from 'socket.io-client'
 import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
 import {
@@ -11,6 +13,7 @@ import {
 } from '../lib/displayPayload'
 
 const VIEWER_FONT_STORAGE_KEY = 'subtitleMachineViewerFontPercent'
+const PROMPTER_FONT_STORAGE_KEY = 'subtitleMachinePrompterFontPercent'
 const VIEWER_LIVE_LANGUAGE_STORAGE_KEY = 'subtitleMachineViewerLiveLanguage'
 const DEFAULT_VIEWER_FONT_PERCENT = 100
 const MIN_VIEWER_FONT_PERCENT = 70
@@ -19,9 +22,10 @@ const VIEWER_FONT_STEP = 10
 const PUBLIC_RECOVERY_RETRY_DELAY_MS = 1200
 const PUBLIC_RECOVERY_JITTER_MS = 600
 
-const getInitialViewerFontPercent = () => {
+const getInitialViewerFontPercent = (key = VIEWER_FONT_STORAGE_KEY) => {
   if (typeof window === 'undefined') return DEFAULT_VIEWER_FONT_PERCENT
-  const stored = Number(window.localStorage.getItem(VIEWER_FONT_STORAGE_KEY))
+  const value = window.localStorage.getItem(key)
+  const stored = value === null ? DEFAULT_VIEWER_FONT_PERCENT : Number(value)
   if (!Number.isFinite(stored)) return DEFAULT_VIEWER_FONT_PERCENT
   return Math.min(
     Math.max(Math.round(stored), MIN_VIEWER_FONT_PERCENT),
@@ -32,6 +36,9 @@ const getInitialViewerFontPercent = () => {
 const ViewerPage = () => {
   const { viewerToken } = useParams()
   const location = useLocation()
+  const navigate = useNavigate()
+  const mode = publicViewMode(location.search)
+  const isPrompter = mode === 'prompter'
   const query = useMemo(
     () => new URLSearchParams(location.search),
     [location.search],
@@ -61,21 +68,27 @@ const ViewerPage = () => {
   const [hasLanguageOverride, setHasLanguageOverride] = useState(false)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [viewerFontPercent, setViewerFontPercent] = useState(
-    getInitialViewerFontPercent,
+    () => getInitialViewerFontPercent(),
   )
+  const [prompterFontPercent, setPrompterFontPercent] = useState(() => getInitialViewerFontPercent(PROMPTER_FONT_STORAGE_KEY))
+  const [cueWindow, setCueWindow] = useState(null)
+  const [currentIndex, setCurrentIndex] = useState(0)
+  const pageRef = useRef(null)
+  const gateRef = useRef(null)
+  if (!gateRef.current) gateRef.current = new PublicDisplayGate(mode)
+  const rejoinRef = useRef(null)
   const [fatalError, setFatalError] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
   const [hasLoadedState, setHasLoadedState] = useState(false)
   const liveFeedRef = useRef(null)
   const socketRef = useRef(null)
-  const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef)
+  const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef, `${resolvedViewerToken}:${mode}`)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
   const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
   const lineSourceRef = useRef(lineSource)
   const liveTranslationPatchRef = useRef({ streamId: '', revision: 0 })
   const liveTranscriptionPatchRef = useRef({ streamId: '', revision: 0 })
-  const viewerStateRevisionRef = useRef({ sessionId: '', revision: 0 })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -85,34 +98,49 @@ const ViewerPage = () => {
     )
   }, [viewerFontPercent])
 
+  useEffect(() => {
+    window.localStorage.setItem(PROMPTER_FONT_STORAGE_KEY, String(prompterFontPercent))
+  }, [prompterFontPercent])
+
+  useEffect(() => {
+    const gate = gateRef.current
+    if (gate.mode === mode) return
+    gate.select(mode)
+    setCueWindow(null)
+    observeAutoFollowDisplay(null)
+    rejoinRef.current?.()
+  }, [mode, observeAutoFollowDisplay])
+
+  useEffect(() => {
+    if (!isPrompter || fatalError) return
+    const page = pageRef.current
+    const htmlOverflow = document.documentElement.style.overflow
+    const bodyOverflow = document.body.style.overflow
+    document.documentElement.style.overflow = 'hidden'
+    document.body.style.overflow = 'hidden'
+    page?.addEventListener('wheel', preventPrompterScroll, { passive: false })
+    page?.addEventListener('touchmove', preventPrompterScroll, { passive: false })
+    document.addEventListener('keydown', preventPrompterScroll)
+    return () => {
+      document.documentElement.style.overflow = htmlOverflow
+      document.body.style.overflow = bodyOverflow
+      page?.removeEventListener('wheel', preventPrompterScroll)
+      page?.removeEventListener('touchmove', preventPrompterScroll)
+      document.removeEventListener('keydown', preventPrompterScroll)
+    }
+  }, [isPrompter, fatalError, hasLoadedState, connectionIssue])
+
   const clearRecoveryTimer = useCallback(() => {
     if (!recoveryTimerRef.current) return
     window.clearTimeout(recoveryTimerRef.current)
     recoveryTimerRef.current = null
   }, [])
 
-  const applyViewerPayload = useCallback((payload) => {
+  const applyViewerPayload = useCallback((payload, requestedMode, generation) => {
+    if (!gateRef.current.accepts(payload, requestedMode, generation)) return
     const next = normalizeDisplayPayload(payload)
-    const sessionId =
-      typeof payload?.sessionId === 'string' ? payload.sessionId : ''
-    const previousRevision = viewerStateRevisionRef.current
-    if (
-      sessionId &&
-      previousRevision.sessionId === sessionId &&
-      next.viewerRevision > 0 &&
-      next.viewerRevision <= previousRevision.revision
-    ) {
-      return
-    }
-    if (sessionId && next.viewerRevision > 0) {
-      viewerStateRevisionRef.current = {
-        sessionId,
-        revision:
-          previousRevision.sessionId === sessionId
-            ? Math.max(next.viewerRevision, previousRevision.revision)
-            : next.viewerRevision,
-      }
-    }
+    setCueWindow(next.cueWindow)
+    setCurrentIndex(next.currentIndex)
     setWaitingMessage(
       payload?.source === 'waiting'
         ? payload?.waitingMessage || '本場次尚未開始'
@@ -163,10 +191,19 @@ const ViewerPage = () => {
       return
     }
 
+    gateRef.current.reset()
+    hasLoadedStateRef.current = false
+    setHasLoadedState(false)
+    setCueWindow(null)
+    liveTranscriptionPatchRef.current = { streamId: '', revision: 0 }
+    liveTranslationPatchRef.current = { streamId: '', revision: 0 }
+    let active = true
     const socket = io()
     socketRef.current = socket
     const joinViewerSession = () => {
-      socket.emit('join', { viewerToken: resolvedViewerToken, role: 'viewer' })
+      if (!socket.connected) return
+      const role = gateRef.current.mode === 'prompter' ? 'prompter' : 'viewer'
+      socket.emit('join', { viewerToken: resolvedViewerToken, role, followOnly: role === 'prompter' })
       socket.emit('viewer:live-language', {
         languageCode:
           lineSourceRef.current === 'transcription'
@@ -175,12 +212,17 @@ const ViewerPage = () => {
       })
     }
 
+    rejoinRef.current = joinViewerSession
+
     const fetchViewerState = async () => {
+      const { mode: requestedMode, generation } = gateRef.current
+      const stillCurrent = () => active && requestedMode === gateRef.current.mode && generation === gateRef.current.generation
       try {
         const response = await fetch(
-          `/api/viewer/${encodeURIComponent(resolvedViewerToken)}`,
+          `/api/viewer/${encodeURIComponent(resolvedViewerToken)}${requestedMode === 'prompter' ? '?followOnly=1' : ''}`,
         )
         const data = await response.json().catch(() => ({}))
+        if (!stillCurrent()) return
         if (!response.ok) {
           const failure = classifyPublicFailure(response, data, '無法載入字幕')
           if (failure.fatal) {
@@ -190,8 +232,9 @@ const ViewerPage = () => {
           }
           return
         }
-        applyViewerPayload(data)
+        applyViewerPayload(data, requestedMode, generation)
       } catch (error) {
+        if (!stillCurrent()) return
         setConnectionIssue(error.message || '與伺服器重新同步失敗')
       }
     }
@@ -228,11 +271,11 @@ const ViewerPage = () => {
       scheduleRecoveryFetch()
     })
 
-    socket.on('viewer:update', (payload) => {
-      applyViewerPayload(payload)
-    })
+    socket.on('viewer:update', payload => applyViewerPayload(payload, 'viewer'))
+    socket.on('prompter:update', payload => applyViewerPayload(payload, 'prompter'))
 
-    socket.on('viewer:live-update', (payload) => {
+    const applyLiveUpdate = (payload, requestedMode) => {
+      if (requestedMode !== gateRef.current.mode) return
       const streamId =
         typeof payload?.streamId === 'string' ? payload.streamId : ''
       const revision = Number.isSafeInteger(payload?.revision)
@@ -247,6 +290,8 @@ const ViewerPage = () => {
 
       const next = normalizeDisplayPayload(payload)
       setDisplayEnabled(next.enabled)
+      setCueWindow(null)
+      setMusicActive(false)
       setLine(next.line)
       setLiveEntries(next.liveEntries)
       setLiveLines(next.liveLines)
@@ -260,7 +305,9 @@ const ViewerPage = () => {
       hasLoadedStateRef.current = true
       setHasLoadedState(true)
       setConnectionIssue('')
-    })
+    }
+    socket.on('viewer:live-update', payload => applyLiveUpdate(payload, 'viewer'))
+    socket.on('prompter:live-update', payload => applyLiveUpdate(payload, 'prompter'))
 
     socket.on('viewer:translation-patch', (payload) => {
       const patch = normalizeLiveTranslationPatch(payload)
@@ -323,6 +370,8 @@ const ViewerPage = () => {
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
+      active = false
+      rejoinRef.current = null
       clearRecoveryTimer()
       window.removeEventListener('online', recoverConnection)
       window.removeEventListener('pageshow', recoverConnection)
@@ -411,8 +460,10 @@ const ViewerPage = () => {
     return () => window.cancelAnimationFrame(frameId)
   }, [lineSource, liveEntries, liveLines])
 
+  const fontPercent = isPrompter ? prompterFontPercent : viewerFontPercent
   const adjustViewerFontSize = (delta) => {
-    setViewerFontPercent((prev) =>
+    const setFont = isPrompter ? setPrompterFontPercent : setViewerFontPercent
+    setFont((prev) =>
       Math.min(
         Math.max(prev + delta, MIN_VIEWER_FONT_PERCENT),
         MAX_VIEWER_FONT_PERCENT,
@@ -437,17 +488,6 @@ const ViewerPage = () => {
         <div className="no-session">
           <h2>正在重新連線</h2>
           <p>{connectionIssue}</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (waitingMessage) {
-    return (
-      <div className="viewer-page">
-        <div className="no-session">
-          <h2>{waitingMessage}</h2>
-          <p>控制端開始此場次後，字幕會自動顯示。</p>
         </div>
       </div>
     )
@@ -519,115 +559,136 @@ const ViewerPage = () => {
 
   return (
     <div
-      className="viewer-page"
+      ref={pageRef}
+      className={`viewer-page public-display${isPrompter ? ' viewer-page--prompter' : ''}`}
       style={{ '--viewer-font-scale': viewerFontScale }}
     >
-      <div className="viewer-toolbar">
-        <div className="viewer-toolbar-group viewer-font-controls">
-          <button
-            type="button"
-            className="viewer-toolbar-button"
-            onClick={() => adjustViewerFontSize(-VIEWER_FONT_STEP)}
-            disabled={viewerFontPercent <= MIN_VIEWER_FONT_PERCENT}
-            aria-label="縮小字體"
-          >
-            −
-          </button>
-          <button
-            type="button"
-            className="viewer-toolbar-button"
-            onClick={() => adjustViewerFontSize(VIEWER_FONT_STEP)}
-            disabled={viewerFontPercent >= MAX_VIEWER_FONT_PERCENT}
-            aria-label="放大字體"
-          >
-            +
-          </button>
-        </div>
+      <header className="public-display-header">
+        <div className="viewer-toolbar">
+          <div className="viewer-mode-switch" role="group" aria-label="顯示模式">
+            {['viewer', 'prompter'].map(nextMode => <button key={nextMode} type="button"
+              className="viewer-toolbar-button" aria-pressed={mode === nextMode}
+              onClick={() => {
+                const params = new URLSearchParams(location.search)
+                if (nextMode === 'prompter') params.set('mode', 'prompter')
+                else params.delete('mode')
+                navigate({ pathname: location.pathname, search: params.toString() }, { replace: true })
+              }}>{nextMode === 'viewer' ? '觀眾模式' : '提詞模式'}</button>)}
+          </div>
+          <div className="viewer-toolbar-group viewer-font-controls">
+            <button
+              type="button"
+              className="viewer-toolbar-button"
+              onClick={() => adjustViewerFontSize(-VIEWER_FONT_STEP)}
+              disabled={fontPercent <= MIN_VIEWER_FONT_PERCENT}
+              aria-label="縮小字體"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="viewer-toolbar-button"
+              onClick={() => adjustViewerFontSize(VIEWER_FONT_STEP)}
+              disabled={fontPercent >= MAX_VIEWER_FONT_PERCENT}
+              aria-label="放大字體"
+            >
+              +
+            </button>
+          </div>
 
-        {(lineSource === 'transcription' || languages.length > 1) && (
-          <label
-            className="viewer-language-menu"
-            title={
-              lineSource === 'transcription'
-                ? selectedLiveLanguageName
-                : selectedLanguageName
-            }
-            aria-label="切換語言"
-          >
-            <span aria-hidden="true">▾</span>
-            <select
-              value={
+          {(lineSource === 'transcription' || languages.length > 1) && (
+            <label
+              className="viewer-language-menu"
+              title={
                 lineSource === 'transcription'
-                  ? selectedLiveLanguage
-                  : selectedLanguageId
+                  ? selectedLiveLanguageName
+                  : selectedLanguageName
               }
-              onChange={(event) => {
-                if (lineSource === 'transcription') {
-                  setSelectedLiveLanguage(event.target.value)
-                } else {
-                  setSelectedLanguageId(event.target.value)
-                  setHasLanguageOverride(true)
-                }
-              }}
               aria-label="切換語言"
             >
-              {lineSource === 'transcription' ? (
-                <>
-                  <option value="source">{sourceLanguageLabel}</option>
-                  {availableLiveTranslationLanguages.map((language) => (
-                    <option key={language.code} value={language.code}>
-                      {language.name}
-                    </option>
-                  ))}
-                </>
-              ) : (
-                <>
-                  {languages.map((language) => (
-                    <option key={language.id} value={language.id}>
-                      {language.name}
-                    </option>
-                  ))}
-                </>
-              )}
-            </select>
-          </label>
+              <span aria-hidden="true">▾</span>
+              <select
+                value={
+                  lineSource === 'transcription'
+                    ? selectedLiveLanguage
+                    : selectedLanguageId
+                }
+                onChange={(event) => {
+                  if (lineSource === 'transcription') {
+                    setSelectedLiveLanguage(event.target.value)
+                  } else {
+                    setSelectedLanguageId(event.target.value)
+                    setHasLanguageOverride(true)
+                  }
+                }}
+                aria-label="切換語言"
+              >
+                {lineSource === 'transcription' ? (
+                  <>
+                    <option value="source">{sourceLanguageLabel}</option>
+                    {availableLiveTranslationLanguages.map((language) => (
+                      <option key={language.code} value={language.code}>
+                        {language.name}
+                      </option>
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    {languages.map((language) => (
+                      <option key={language.id} value={language.id}>
+                        {language.name}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+            </label>
+          )}
+
+        </div>
+
+        {displayEnabled && musicActive && (
+          <div
+            className="viewer-music-banner viewer-music-banner--music"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="viewer-music-banner-inner">
+              <span className="viewer-music-label">音樂提示</span>
+              <span className="viewer-music-text">{musicText}</span>
+            </div>
+          </div>
         )}
 
-      </div>
-
-      {displayEnabled && musicActive && (
-        <div
-          className="viewer-music-banner viewer-music-banner--music"
-          role="status"
-          aria-live="polite"
-        >
-          <div className="viewer-music-banner-inner">
-            <span className="viewer-music-label">音樂提示</span>
-            <span className="viewer-music-text">{musicText}</span>
+        {connectionIssue && hasLoadedState && (
+          <div className="viewer-music-banner" role="status" aria-live="polite">
+            <div className="viewer-music-banner-inner">
+              <span className="viewer-music-label">連線狀態</span>
+              <span className="viewer-music-text">{connectionIssue}</span>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {connectionIssue && hasLoadedState && (
-        <div className="viewer-music-banner" role="status" aria-live="polite">
-          <div className="viewer-music-banner-inner">
-            <span className="viewer-music-label">連線狀態</span>
-            <span className="viewer-music-text">{connectionIssue}</span>
+        {lineSource === 'transcription' && displayEnabled && (
+          <div className="viewer-live-badge">
+            {selectedLiveLanguage === 'source'
+              ? transcriptionIsFinal
+                ? '即時語音 最終稿'
+                : '即時語音 草稿'
+              : selectedLiveLanguageUi.live}
           </div>
-        </div>
-      )}
+        )}
 
-      {lineSource === 'transcription' && displayEnabled && (
-        <div className="viewer-live-badge">
-          {selectedLiveLanguage === 'source'
-            ? transcriptionIsFinal
-              ? '即時語音 最終稿'
-              : '即時語音 草稿'
-            : selectedLiveLanguageUi.live}
-        </div>
-      )}
+      </header>
 
-      {lineSource === 'transcription' && displayEnabled ? (
+      {waitingMessage ? (
+        <div className="no-session"><h2>{waitingMessage}</h2><p>控制端開始此場次後，字幕會自動顯示。</p></div>
+      ) : isPrompter ? (
+        <FollowPrompter enabled={hasLoadedState && displayEnabled} line={line} currentIndex={currentIndex}
+          cueWindow={cueWindow} languageId={resolveAvailableLanguageId(languages, selectedLanguageId)}
+          roleColorEnabled={roleColorEnabled} live={lineSource === 'transcription'}
+          liveEntries={visibleLiveEntries} fontPercent={prompterFontPercent} />
+      ) : lineSource === 'transcription' && displayEnabled ? (
         <div className={liveFeedClassName} ref={liveFeedRef}>
           {visibleLiveEntries.map((liveEntry, index, entries) => {
             const isLatest = index === entries.length - 1

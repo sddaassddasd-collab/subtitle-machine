@@ -1785,6 +1785,7 @@ function removeSession(session, reason = 'session deleted') {
   });
   io.to(`viewer:${session.id}`).emit('viewer:expired', viewerPayload);
   io.to(`prompter:${session.id}`).emit('viewer:expired', viewerPayload);
+  io.to(`prompter-follow:${session.id}`).emit('viewer:expired', viewerPayload);
   ensureSessionStructure(session).cells.forEach((cell) => {
     io.to(`viewer:${session.id}:${cell.id}`).emit(
       'viewer:expired',
@@ -1794,6 +1795,7 @@ function removeSession(session, reason = 'session deleted') {
       'viewer:expired',
       viewerPayload,
     );
+    io.to(`prompter-follow:${session.id}:${cell.id}`).emit('viewer:expired', viewerPayload);
   });
   io.to(`projector:${session.id}`).emit('projector:expired', projectorPayload);
   rememberPublicSessionTombstones(session, 'deleted');
@@ -8146,7 +8148,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     musicText,
     transcription,
   } = getSessionDisplayState(session);
-  const includeLines = options.includeLines !== false;
+  const includeLines = !options.followOnly && options.includeLines !== false;
   const sourceLines = ensureSessionLines(normalized);
   const publicLines = includeLines
     ? sourceLines.map((line) => toPublicLine(line))
@@ -8163,6 +8165,13 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
   const viewerRevision = Number.isSafeInteger(options.revision)
     ? options.revision
     : getViewerStateRevision(normalized.id);
+  // The locked public prompter only needs a small window around the live cue.
+  // Legacy prompter clients can continue requesting the full lines array.
+  const cueWindow = options.followOnly && isActiveCell && normalized.displayEnabled &&
+    getCaptionMode(normalized) !== 'live' ? {
+      startIndex: Math.max(0, currentIndex - 1), currentIndex, total: sourceLines.length,
+      lines: sourceLines.slice(Math.max(0, currentIndex - 1), currentIndex + 3).map(toPublicLine),
+    } : null;
 
   if (!isActiveCell) {
     return {
@@ -8284,6 +8293,7 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
     displayEnabled: true,
     roleColorEnabled: normalized.roleColorEnabled,
     source: 'script',
+    cueWindow: options.followOnly ? cueWindow : undefined,
     autoFollowDecision: getAutoFollowDisplayTiming(normalized),
     transcription,
   };
@@ -8643,6 +8653,8 @@ function clearLatestRoomStateKeyframesForSession(sessionId) {
     `viewer:${sessionId}:`,
     `prompter:${sessionId}\u0000`,
     `prompter:${sessionId}:`,
+    `prompter-follow:${sessionId}\u0000`,
+    `prompter-follow:${sessionId}:`,
     `viewer-live:${sessionId}:`,
   ];
   latestRoomStateKeyframes.forEach((timer, keyframeKey) => {
@@ -8748,12 +8760,14 @@ function broadcastLiveTranscriptionState(sessionId, stream) {
   if (selectedCell?.id) {
     const selectedViewerRoom = `viewer:${sessionId}:${selectedCell.id}`;
     const selectedPrompterRoom = `prompter:${sessionId}:${selectedCell.id}`;
+    const selectedFollowRoom = `prompter-follow:${sessionId}:${selectedCell.id}`;
     if (hasSocketRoomConnections(selectedViewerRoom)) {
       emitLatestRoomState(selectedViewerRoom, 'viewer:live-update', payload);
     }
     if (hasSocketRoomConnections(selectedPrompterRoom)) {
       emitLatestRoomState(selectedPrompterRoom, 'prompter:live-update', payload);
     }
+    if (hasSocketRoomConnections(selectedFollowRoom)) emitLatestRoomState(selectedFollowRoom, 'prompter:live-update', payload);
   }
   const viewerRoom = `viewer:${sessionId}`;
   const prompterRoom = `prompter:${sessionId}`;
@@ -8763,6 +8777,8 @@ function broadcastLiveTranscriptionState(sessionId, stream) {
   if (hasSocketRoomConnections(prompterRoom)) {
     emitLatestRoomState(prompterRoom, 'prompter:live-update', payload);
   }
+  if (hasSocketRoomConnections(`prompter-follow:${sessionId}`))
+    emitLatestRoomState(`prompter-follow:${sessionId}`, 'prompter:live-update', payload);
 
   if (
     normalizeProjectorDisplayMode(session.projectorDisplayMode) ===
@@ -8864,6 +8880,9 @@ function broadcastViewerState(sessionId) {
         }),
       );
     }
+    const followRoom = `prompter-follow:${sessionId}:${cell.id}`;
+    if (hasSocketRoomConnections(followRoom)) emitLatestRoomState(followRoom, 'prompter:update',
+      getViewerPayload(session, cell.id, {includeLines: false, followOnly: true, revision}));
   });
   const viewerRoom = `viewer:${sessionId}`;
   if (hasSocketRoomConnections(viewerRoom)) {
@@ -8881,6 +8900,8 @@ function broadcastViewerState(sessionId) {
       getViewerPayload(session, null, { includeLines: true, revision }),
     );
   }
+  if (hasSocketRoomConnections(`prompter-follow:${sessionId}`)) emitLatestRoomState(`prompter-follow:${sessionId}`, 'prompter:update',
+    getViewerPayload(session, null, {includeLines: false, followOnly: true, revision}));
   if (hasSocketRoomConnections(`projector:${sessionId}`)) {
     io.to(`projector:${sessionId}`).emit(
       'projector:update',
@@ -11032,7 +11053,8 @@ app.get('/api/viewer/:viewerToken', (req, res) => {
   }
   res.json(
     getViewerPayload(target.session, target.cell?.id, {
-      includeLines: req.query?.includeLines === '1',
+      includeLines: req.query?.followOnly !== '1' && req.query?.includeLines === '1',
+      followOnly: req.query?.followOnly === '1',
     }),
   );
 });
@@ -12619,7 +12641,7 @@ io.on('connection', (socket) => {
     return getOwnedSession(sessionId, socketUser.id, options);
   };
 
-  socket.on('join', ({ sessionId, role, viewerToken, projectorToken } = {}) => {
+  socket.on('join', ({ sessionId, role, viewerToken, projectorToken, followOnly = false } = {}) => {
     if (role === 'viewer' || role === 'prompter') {
       const viewerTarget = viewerToken ? getViewerTargetByToken(viewerToken) : null;
       const viewerSession = viewerTarget?.session || getSession(sessionId);
@@ -12634,7 +12656,8 @@ io.on('connection', (socket) => {
         return;
       }
       const viewerCell = viewerTarget?.cell || getSelectedCell(viewerSession);
-      const roomPrefix = role === 'prompter' ? 'prompter' : 'viewer';
+      const lockedPrompter = role === 'prompter' && followOnly === true;
+      const roomPrefix = role === 'prompter' ? lockedPrompter ? 'prompter-follow' : 'prompter' : 'viewer';
       const previousViewerSessionId =
         typeof socket.data.viewerSessionId === 'string'
           ? socket.data.viewerSessionId
@@ -12674,12 +12697,13 @@ io.on('connection', (socket) => {
       }
       socket.data.liveTranslationLanguage = 'source';
       socket.data.publicRole = role;
+      socket.data.followOnly = lockedPrompter;
       socket.data.viewerSessionId = viewerSession.id;
       if (role === 'prompter') {
         socket.emit(
           'prompter:update',
           getViewerPayload(viewerSession, viewerCell?.id, {
-            includeLines: true,
+            includeLines: !lockedPrompter, followOnly: lockedPrompter,
           }),
         );
       } else {
@@ -12749,7 +12773,7 @@ io.on('connection', (socket) => {
       typeof socket.data?.viewerSessionId === 'string'
         ? socket.data.viewerSessionId
         : '';
-    if (!sessionId || socket.data?.publicRole !== 'viewer') return;
+    if (!sessionId || !['viewer', 'prompter'].includes(socket.data?.publicRole)) return;
     const requestedLanguageCode =
       typeof languageCode === 'string' ? languageCode.trim() : '';
     const normalizedLanguageCode =
@@ -12813,9 +12837,10 @@ io.on('connection', (socket) => {
     const viewerSession = getSession(sessionId);
     if (viewerSession) {
       socket.emit(
-        'viewer:update',
+        socket.data.publicRole === 'prompter' ? 'prompter:update' : 'viewer:update',
         getViewerPayload(viewerSession, socket.data.viewerCellId || null, {
-          includeLines: false,
+          includeLines: socket.data.publicRole === 'prompter' && !socket.data.followOnly,
+          followOnly: socket.data.followOnly === true,
         }),
       );
     }
@@ -13275,9 +13300,10 @@ io.on('connection', (socket) => {
       broadcastViewerState(sessionId);
       affectedViewerSockets.forEach((viewerSocket) => {
         viewerSocket.emit(
-          'viewer:update',
+          viewerSocket.data.publicRole === 'prompter' ? 'prompter:update' : 'viewer:update',
           getViewerPayload(session, viewerSocket.data.viewerCellId || null, {
-            includeLines: false,
+            includeLines: viewerSocket.data.publicRole === 'prompter' && !viewerSocket.data.followOnly,
+            followOnly: viewerSocket.data.followOnly === true,
           }),
         );
       });
@@ -14321,7 +14347,7 @@ io.on('connection', (socket) => {
       typeof socket.data?.viewerSessionId === 'string'
         ? socket.data.viewerSessionId
         : '';
-    if (viewerSessionId && socket.data?.publicRole === 'viewer') {
+    if (viewerSessionId && ['viewer', 'prompter'].includes(socket.data?.publicRole)) {
       setImmediate(() => scheduleViewerDemandBroadcast(viewerSessionId));
     }
     const projectorSessionId =

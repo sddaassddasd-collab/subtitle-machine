@@ -145,6 +145,13 @@ export const normalizeDisplayPayload = (payload) => {
   const transcriptionIsFinal = transcription.isFinal !== false
   const source =
     typeof payload?.source === 'string' ? payload.source : 'script'
+  const window = payload?.cueWindow
+  const startIndex = normalizeInt(window?.startIndex, 0, 0, Number.MAX_SAFE_INTEGER)
+  const windowLines = Array.isArray(window?.lines) ? window.lines.slice(0, 4).map(normalizeLine).filter(Boolean) : []
+  const cueWindow = enabled && source === 'script' && window && window.currentIndex === currentIndex &&
+    currentIndex >= startIndex && currentIndex < startIndex + windowLines.length &&
+    (!nextLine?.id || windowLines[currentIndex - startIndex]?.id === nextLine.id)
+    ? {startIndex, currentIndex, total: normalizeInt(window.total, startIndex + windowLines.length, 0), lines: windowLines} : null
   const liveEntries = Array.isArray(payload?.liveEntries)
     ? payload.liveEntries
         .map((entry) => ({
@@ -179,6 +186,7 @@ export const normalizeDisplayPayload = (payload) => {
     line: nextLine,
     lines,
     currentIndex,
+    cueWindow,
     liveEntries,
     liveLines,
     musicActive,

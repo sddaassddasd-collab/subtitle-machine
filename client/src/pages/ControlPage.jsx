@@ -1408,10 +1408,7 @@ const ControlPage = () => {
 
   const viewerShareUrl = viewerUrl
 
-  const prompterUrl = useMemo(() => {
-    if (typeof window === 'undefined' || !sessionMeta?.viewerToken) return ''
-    return `${window.location.origin}/prompter/${sessionMeta.viewerToken}`
-  }, [sessionMeta?.viewerToken])
+  const prompterUrl = viewerUrl ? `${viewerUrl}?mode=prompter` : ''
 
   const projectorUrl = useMemo(() => {
     if (typeof window === 'undefined' || !sessionMeta?.projectorToken) return ''
@@ -4367,28 +4364,15 @@ const ControlPage = () => {
     }
   }
 
-  const handleCopyViewerFixedLink = async () => {
-    if (!viewerUrl) return
-    try {
-      await navigator.clipboard.writeText(viewerUrl)
-      setStatus({ kind: 'success', message: '固定檢視端網址已複製' })
-    } catch {
-      setStatus({
-        kind: 'error',
-        message: '無法複製，請手動複製固定網址',
-      })
-    }
-  }
-
   const handleCopyPrompterLink = async () => {
     if (!prompterUrl) return
     try {
       await navigator.clipboard.writeText(prompterUrl)
-      setStatus({ kind: 'success', message: '提詞頁網址已複製' })
+      setStatus({ kind: 'success', message: '提詞模式連結已複製' })
     } catch {
       setStatus({
         kind: 'error',
-        message: '無法複製，請手動複製提詞頁網址',
+        message: '無法複製，請手動複製提詞模式連結',
       })
     }
   }
@@ -5029,7 +5013,7 @@ const ControlPage = () => {
               <div className="input-group">
                 <label htmlFor="viewer-alias">目前場次觀眾網址</label>
                 <p className="input-note">
-                  每個場次都有固定網址與 QR code；切換控制場次不會改變已印出的 QR code。
+                  每個場次都有固定網址與 QR code，預設開啟觀眾模式。持有連結的人也能切換提詞模式，查看目前、前一句與後兩句台詞；提詞固定跟隨 CUE，不能手動捲動。
                 </p>
                 <div className="viewer-link">
                   <span>{viewerShareUrl || '尚未載入場次'}</span>
@@ -5063,15 +5047,9 @@ const ControlPage = () => {
                   此節目入口保留供舊連結使用；新觀眾請使用上方目前場次的固定網址。
                 </p>
                 <div className="viewer-link viewer-link-secondary">
-                  <span>{viewerUrl || '尚未載入節目'}</span>
-                  <button type="button" onClick={handleCopyViewerFixedLink}>
-                    複製固定網址
-                  </button>
-                </div>
-                <div className="viewer-link viewer-link-secondary">
                   <span>{prompterUrl || '尚未載入節目'}</span>
                   <button type="button" onClick={handleCopyPrompterLink}>
-                    複製提詞頁
+                    複製提詞模式連結
                   </button>
                 </div>
                 {viewerShareUrl && (
