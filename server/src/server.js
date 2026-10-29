@@ -8165,12 +8165,12 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
   const viewerRevision = Number.isSafeInteger(options.revision)
     ? options.revision
     : getViewerStateRevision(normalized.id);
-  // The locked public prompter only needs a small window around the live cue.
+  // Two previous cues, the current cue and six following cues.
   // Legacy prompter clients can continue requesting the full lines array.
   const cueWindow = options.followOnly && isActiveCell && normalized.displayEnabled &&
     getCaptionMode(normalized) !== 'live' ? {
-      startIndex: Math.max(0, currentIndex - 1), currentIndex, total: sourceLines.length,
-      lines: sourceLines.slice(Math.max(0, currentIndex - 1), currentIndex + 3).map(toPublicLine),
+      startIndex: Math.max(0, currentIndex - 2), currentIndex, total: sourceLines.length,
+      lines: sourceLines.slice(Math.max(0, currentIndex - 2), currentIndex + 7).map(toPublicLine),
     } : null;
 
   if (!isActiveCell) {

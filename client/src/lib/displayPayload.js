@@ -147,7 +147,7 @@ export const normalizeDisplayPayload = (payload) => {
     typeof payload?.source === 'string' ? payload.source : 'script'
   const window = payload?.cueWindow
   const startIndex = normalizeInt(window?.startIndex, 0, 0, Number.MAX_SAFE_INTEGER)
-  const windowLines = Array.isArray(window?.lines) ? window.lines.slice(0, 4).map(normalizeLine).filter(Boolean) : []
+  const windowLines = Array.isArray(window?.lines) ? window.lines.slice(0, 9).map(normalizeLine).filter(Boolean) : []
   const cueWindow = enabled && source === 'script' && window && window.currentIndex === currentIndex &&
     currentIndex >= startIndex && currentIndex < startIndex + windowLines.length &&
     (!nextLine?.id || windowLines[currentIndex - startIndex]?.id === nextLine.id)

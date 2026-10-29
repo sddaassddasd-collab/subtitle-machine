@@ -66,11 +66,11 @@ test('public HTTP prompter uses the scene token, exposes bounded context and sha
   assert.equal(prompter.status,200);assert.equal(viewer.status,200);
   assert.equal(viewer.payload.lines,undefined);assert.equal(viewer.payload.cueWindow,undefined);
   assert.equal(prompter.payload.lines,undefined);assert.equal(prompter.payload.currentIndex,5);
-  assert.deepEqual(prompter.payload.cueWindow.lines.map(l=>l.id),['cue-4','cue-5','cue-6','cue-7']);
+  assert.deepEqual(prompter.payload.cueWindow.lines.map(l=>l.id),['cue-3','cue-4','cue-5','cue-6','cue-7','cue-8','cue-9','cue-10','cue-11']);
   assert.equal(prompter.payload.line.id,viewer.payload.line.id);
   assert.equal(prompter.payload.musicActive,true);assert.equal(prompter.payload.musicText,'演奏開始');
   assert.equal(prompter.payload.musicActive,viewer.payload.musicActive);
-  assert.equal(prompter.payload.cueWindow.lines[0].type,'direction');
+  assert.equal(prompter.payload.cueWindow.lines[1].type,'direction');
   assert.equal(f.payload(null,{followOnly:true}).lines,undefined);
   assert.equal((await request(f.app,route+'?includeLines=1')).payload.lines.length,1000);
   assert.equal((await request(f.app,'/api/session/'+f.session.id)).status,401);
@@ -85,8 +85,8 @@ test('hidden, inactive and live states expose no nearby script; edges of the scr
   f.session.displayEnabled=true;f.session.captionMode='live';
   const live=f.payload(null,options);assert.equal(live.source,'transcription');assert.equal(live.cueWindow,undefined);assert.equal(live.musicActive,false);
   f.session.captionMode='script';f.session.musicEffectEnabled=false;assert.equal(f.payload(null,options).musicActive,false);
-  f.session.currentIndex=0;assert.deepEqual(f.payload(null,options).cueWindow.lines.map(l=>l.id),['cue-0','cue-1','cue-2']);
-  f.session.currentIndex=999;assert.deepEqual(f.payload(null,options).cueWindow.lines.map(l=>l.id),['cue-998','cue-999']);
+  f.session.currentIndex=0;assert.deepEqual(f.payload(null,options).cueWindow.lines.map(l=>l.id),['cue-0','cue-1','cue-2','cue-3','cue-4','cue-5','cue-6']);
+  f.session.currentIndex=999;assert.deepEqual(f.payload(null,options).cueWindow.lines.map(l=>l.id),['cue-997','cue-998','cue-999']);
 });
 
 test('the same public socket switches rooms and roles without controlling the cue; broadcasts follow the selected mode',t=>{
@@ -120,7 +120,7 @@ test('legacy prompter subscriptions still receive full lines while new ones rece
   assert.equal(legacy.events.at(-1).payload.lines.length,1000);assert.equal(modern.events.at(-1).payload.lines,undefined);
   f.broadcast();
   assert.equal(f.broadcasts.find(b=>b.room===legacy.socket.data.viewerRoom).payload.lines.length,1000);
-  assert.equal(f.broadcasts.find(b=>b.room===modern.socket.data.viewerRoom).payload.cueWindow.lines.length,4);
+  assert.equal(f.broadcasts.find(b=>b.room===modern.socket.data.viewerRoom).payload.cueWindow.lines.length,9);
   f.session.captionMode='live';
   f.live({liveTranslationStreamId:'test-live',liveTranscriptionRevision:1,language:'zh-TW',completedFragments:[],draftByItemId:new Map(),mergedLineOverrides:new Map()});
   assert.ok(f.broadcasts.some(b=>b.room===modern.socket.data.viewerRoom&&b.event==='prompter:live-update'));

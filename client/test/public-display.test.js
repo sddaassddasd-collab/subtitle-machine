@@ -44,11 +44,13 @@ test('locked prompter blocks scroll navigation while preserving controls and bro
 })
 
 test('nearby context must contain the current cue and disappears when hidden, live or waiting', () => {
-  const lines = [3,4,5,6].map(i => ({id: 'cue-' + i, text: '台詞' + i}))
-  const payload = {source: 'script', currentIndex: 4, line: lines[1], cueWindow: {startIndex: 3, currentIndex: 4, total: 1000, lines}}
+  const lines = [2,3,4,5,6,7,8,9,10].map(i => ({id: 'cue-' + i, text: '台詞' + i}))
+  const payload = {source: 'script', currentIndex: 4, line: lines[2], cueWindow: {startIndex: 2, currentIndex: 4, total: 1000, lines}}
   const normalized = normalizeDisplayPayload(payload)
   assert.equal(normalized.currentIndex, 4)
-  assert.equal(normalized.cueWindow.lines[1].id, 'cue-4')
+  assert.equal(normalized.cueWindow.lines[2].id, 'cue-4')
+  assert.equal(normalized.cueWindow.lines.length, 9)
+  assert.equal(normalized.cueWindow.lines.at(-1).id, 'cue-10')
   assert.equal(normalized.lines.length, 0)
   for (const source of ['waiting', 'hidden', 'transcription']) assert.equal(normalizeDisplayPayload({...payload, source}).cueWindow, null)
   assert.equal(normalizeDisplayPayload({...payload, displayEnabled: false}).cueWindow, null)

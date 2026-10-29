@@ -12,8 +12,10 @@ export default function FollowPrompter({enabled, line, currentIndex, cueWindow, 
   const context = cueWindow?.currentIndex === currentIndex ? cueWindow : null
   const offset = context ? currentIndex - context.startIndex : 0
   const current = live ? liveEntries.at(-1) : context?.lines[offset] || line
-  const previous = live ? liveEntries.at(-2)?.displayText : format(context?.lines[offset - 1])
-  const future = live ? [] : (context?.lines.slice(offset + 1) || []).map(format)
+  const previous = (live ? liveEntries.slice(-3, -1).map(entry => entry.displayText)
+    : (context?.lines.slice(0, offset) || []).map(format)).filter(Boolean)
+  const future = live ? [] : (context?.lines.slice(offset + 1) || []).map(format).filter(Boolean)
+  const previousText = previous.join('\n')
   const futureText = future.join('\n')
   const currentText = live ? current?.displayText || ''
     : format(current) || (current?.type === 'direction' ? '（舞台指示）' : '等待字幕…')
@@ -28,7 +30,6 @@ export default function FollowPrompter({enabled, line, currentIndex, cueWindow, 
       if (disposed) return
       text.style.fontSize = ''
       root.dataset.context = 'all'
-      root.dataset.dense = root.clientHeight < 96 ? 'true' : 'false'
       const height = root.clientHeight
       if (!height) return
       const desired = Number.parseFloat(getComputedStyle(text).fontSize)
@@ -53,17 +54,18 @@ export default function FollowPrompter({enabled, line, currentIndex, cueWindow, 
     observer.observe(root)
     void document.fonts?.ready.then(fit)
     return () => { disposed = true; observer.disconnect(); cancelAnimationFrame(frame) }
-  }, [enabled, currentText, previous, futureText, fontPercent, languageId])
+  }, [enabled, currentText, previousText, futureText, fontPercent, languageId])
 
   return <main ref={rootRef} className="follow-prompter" aria-label="固定跟隨提詞" style={{'--prompter-font-scale': fontPercent / 100}}>
     {enabled && <>
-      {previous && <div className="follow-prompter-context follow-prompter-previous" aria-label="前一句"><span>前一句</span><div>{previous}</div></div>}
+      {previous.length > 0 && <div className="follow-prompter-context follow-prompter-previous" aria-label="前文台詞">
+        {previous.map((text, index) => <div key={index}>{text}</div>)}
+      </div>}
       <section ref={currentRef} className="follow-prompter-current" aria-label="目前台詞">
-        <div className="follow-prompter-cue">{live ? '即時字幕' : `第 ${currentIndex + 1} 格`}</div>
         <div ref={textRef} className="follow-prompter-text" style={color ? {color} : undefined}>{currentText}</div>
       </section>
-      {future.length > 0 && <div className="follow-prompter-context follow-prompter-future" aria-label="後續台詞"><span>接下來</span>
-        {future.map((text, index) => <div key={index}>{text || '（舞台指示）'}</div>)}
+      {future.length > 0 && <div className="follow-prompter-context follow-prompter-future" aria-label="後續台詞">
+        {future.map((text, index) => <div key={index}>{text}</div>)}
       </div>}
     </>}
   </main>

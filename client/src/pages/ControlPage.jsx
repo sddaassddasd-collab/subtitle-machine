@@ -5013,7 +5013,7 @@ const ControlPage = () => {
               <div className="input-group">
                 <label htmlFor="viewer-alias">目前場次觀眾網址</label>
                 <p className="input-note">
-                  每個場次都有固定網址與 QR code，預設開啟觀眾模式。持有連結的人也能切換提詞模式，查看目前、前一句與後兩句台詞；提詞固定跟隨 CUE，不能手動捲動。
+                  每個場次都有固定網址與 QR code，預設開啟觀眾模式。持有連結的人也能切換提詞模式，查看目前、前兩句與後六句台詞；提詞固定跟隨 CUE，不能手動捲動。
                 </p>
                 <div className="viewer-link">
                   <span>{viewerShareUrl || '尚未載入場次'}</span>
