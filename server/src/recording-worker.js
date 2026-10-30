@@ -18,13 +18,16 @@ parentPort.on('message', message => {
       parentPort.postMessage({type: 'ready', generation});
     } else if (message.type === 'position') {
       generation = message.generation;
-      frontend.reset(); follower.reset(message.currentIndex);
+      if (message.preserve) follower.advance(message.currentIndex);
+      else { frontend.reset(); follower.reset(message.currentIndex); }
     } else if (message.type === 'audio' && follower && generation === message.generation) {
+      const startedAt = Date.now(), started = performance.now();
       let result = null;
       for (const frame of frontend.push(bytes(message.pcm), message.audioEndMs)) {
         result = follower.feed(frame, message.currentIndex) || result;
       }
-      parentPort.postMessage({type: 'result', generation, sequence: message.sequence, result});
+      parentPort.postMessage({type: 'result', generation, sequence: message.sequence, result,
+        workerTiming: {queueMs: Math.max(0, startedAt - message.queuedAt) || 0, processingMs: performance.now() - started}});
     }
   } catch (error) { parentPort.postMessage({type: 'error', error: error.message}); }
 });

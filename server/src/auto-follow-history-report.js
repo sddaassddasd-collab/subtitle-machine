@@ -12,7 +12,7 @@ function historyReport({run, events}) {
     if (event.type === 'context') {
       const context = {...event, rows: event.lines.map(line => ({contextId: event.contextId,
         cellId: event.cellId, cellName: event.cellName, language: event.language, ...line,
-        visits: [], skips: [], status: line.type === 'direction' ? 'direction' : 'unentered'}))};
+        visits: [], skips: [], heard: [], status: line.type === 'direction' ? 'direction' : 'unentered'}))};
       contexts.set(event.contextId, context); rows.push(...context.rows);
     }
     const context = contexts.get(event.contextId), row = context?.rows[event.index];
@@ -37,6 +37,7 @@ function historyReport({run, events}) {
       const visit = visits.get(event.visitId);
       if (visit) { visit.confirmations.push(event); visit.status = 'confirmed'; }
     }
+    if (event.type === 'cue_heard' && row) row.heard.push(event);
     if (event.type === 'display_ack') {
       const visit = decisions.get(event.decisionId);
       if (visit) visit.displayAcks.push(event);
@@ -50,11 +51,14 @@ function historyReport({run, events}) {
     row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'correction', 'silence'].includes(visit.source)).length;
     row.confirmedCount = row.visits.filter(visit => visit.confirmations.length).length;
   }
-  let seenAudio = false, hasGaps = false;
+  let seenAudio = false, hasGaps = false, stoppedNormally = false;
   for (const event of events) {
     if (['interruption', 'logging_gap'].includes(event.type) ||
       (event.type === 'capture_audio' && event.gapMs >= 2000) ||
-      (seenAudio && event.type === 'capture_status' && ['paused', 'error', 'connecting'].includes(event.status))) hasGaps = true;
+      (seenAudio && event.type === 'capture_status' && ['paused', 'error', 'connecting'].includes(event.status) &&
+        !(event.status === 'paused' && event.reason === 'client requested stop'))) hasGaps = true;
+    if (seenAudio && event.type === 'capture_status' && event.status === 'paused' && event.reason === 'client requested stop') stoppedNormally = true;
+    if (stoppedNormally && event.type === 'capture_status' && event.status === 'ready') hasGaps = true;
     if (event.type === 'capture_audio') seenAudio = true;
   }
   return {schemaVersion: 1, run, rows,
@@ -67,6 +71,7 @@ function historyReport({run, events}) {
     hasGaps, notes: ['未進入不等於辨識失敗；需核對實際演出範圍、人工跳格及收音中斷。',
       '起始位置與場次／版本切換不計為自動觸發；同格重演保留每一次經過。',
       '切格事件逐次保存；確認依來源與辨識片段保留首次及句尾確認，診斷訊息每通道每五秒最多一筆。',
+      '文字涵蓋代表該段辨識能對應此格，不代表該格曾顯示；跨格不會回放已過時的字幕。待確認錄音也可參與聲音比對，狀態仍保留待確認。',
       '音訊時間以收音串流為單位，串流重啟會歸零；請連同串流 ID、事件序號及伺服器時間核對。',
       '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。'],
     events};
@@ -82,7 +87,7 @@ const iso = at => Number.isFinite(at) ? new Date(at).toISOString() : '';
 function historyCsv(report) {
   const records = [['排練ID', '節目', '開始時間UTC', '劇本版本ID', '場次', '演出語言', '字幕格ID', '字幕格', '台詞',
     '參考片段可用', '參考起點秒', '參考終點秒', '經過次序', '進入方式', '進入時間UTC', '收音串流ID', '現場音訊毫秒',
-    '確認來源', '句尾確認', '結果', '跨過來源', '辨識文字', '錄音定位秒', '顯示回報', '紀錄含中斷']];
+    '確認來源', '句尾確認', '結果', '跨過來源', '辨識文字', '錄音定位秒', '顯示回報', '紀錄含中斷', '文字涵蓋', '涵蓋辨識文字']];
   for (const row of report.rows) for (const [index, visit] of (row.visits.length ? row.visits : [null]).entries()) {
     const confirmations = visit?.confirmations || [];
     records.push([report.run.id, report.run.name, iso(report.run.startedAt), row.contextId, row.cellName || row.cellId,
@@ -93,7 +98,8 @@ function historyCsv(report) {
       [...new Set(row.skips.map(item => sourceLabel(item.source)))].join('、'),
       confirmations.map(item => item.text).filter(Boolean).join(' / '),
       confirmations.filter(item => Number.isFinite(item.referenceSeconds)).at(-1)?.referenceSeconds,
-      visit?.displayAcks.map(item => `${item.role}: ${item.ms}ms`).join('、'), report.hasGaps ? '是' : '否']);
+      visit?.displayAcks.map(item => `${item.role}: ${item.ms}ms`).join('、'), report.hasGaps ? '是' : '否',
+      row.heard?.length ? '是（不代表已顯示）' : '', [...new Set((row.heard || []).map(item => item.heard))].join(' / ')]);
   }
   return '\uFEFF' + records.map(record => record.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

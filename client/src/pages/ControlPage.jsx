@@ -6377,6 +6377,9 @@ const ControlPage = () => {
                     {Number.isInteger(autoFollow.referenceAudio.index) && ` · 音訊第 ${autoFollow.referenceAudio.index + 1} 格`}
                     {Number.isFinite(autoFollow.referenceAudio.referenceSeconds) && ` · 錄音 ${autoFollow.referenceAudio.referenceSeconds.toFixed(2)} 秒`}
                     {Number.isInteger(autoFollow.lastCandidateIndex) && ` · 文字候選第 ${autoFollow.lastCandidateIndex + 1} 格`}
+                    {autoFollow.referenceAudio.message && ` · ${autoFollow.referenceAudio.message}`}
+                    {Number.isFinite(autoFollow.referenceAudio.confidence) && ` · 聲音分數 ${Math.round(autoFollow.referenceAudio.confidence * 100)}%`}
+                    {autoFollow.referenceAudio.diagnostics && `／門檻 ${Math.round(autoFollow.referenceAudio.diagnostics.minimumConfidence * 100)}% · 連續命中 ${autoFollow.referenceAudio.diagnostics.supportCount}／${autoFollow.referenceAudio.diagnostics.requiredSupport}`}
                     {autoFollow.referenceAudio.error && ` · ${autoFollow.referenceAudio.error}`}
                   </p>}
                   {Number.isInteger(autoFollow.sequenceIndex) && <p>順序跟隨：保留第 {autoFollow.sequenceIndex + 1} 格位置，持續核對後續台詞。</p>}

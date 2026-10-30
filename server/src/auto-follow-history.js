@@ -19,7 +19,7 @@ function historyContext(session) {
       const segment = segments.get(line.id);
       return {id: line.id, index, text: String(line.text || ''), type: line.type || 'dialogue', role: line.role || '',
         reference: {status: segment?.status || 'unmatched',
-          usable: Boolean(compatible && recording.status === 'ready' && isUsableSegment(segment || {}, line)),
+          usable: Boolean(compatible && recording.status === 'ready' && isUsableSegment(segment || {}, line, recording)),
           start: Number.isFinite(segment?.start) ? segment.start : null,
           end: Number.isFinite(segment?.end) ? segment.end : null}};
     }),
@@ -164,6 +164,24 @@ class AutoFollowHistory {
     return this.queue(sessionId, entry => {
       if (!entry.run || entry.run.cursor?.index !== index) return;
       this.append(entry, 'cue_confirm', {index, source, visitId: entry.run.cursor.visitId, ...data});
+    }, {background: true});
+  }
+  heard(sessionId, spans, data = {}) {
+    const entry = this.entries.get(sessionId);
+    if (!entry || !spans?.length) return;
+    const accepted = spans.slice(-24).filter(span => {
+      const key = `heard:${span.index}:${data.providerStreamId || ''}:${data.itemId || ''}`;
+      if (entry.confirmGate.has(key) && (!span.completed || entry.confirmGate.get(key))) return false;
+      entry.confirmGate.set(key, span.completed === true);
+      if (entry.confirmGate.size > 256) entry.confirmGate.delete(entry.confirmGate.keys().next().value);
+      return true;
+    });
+    if (!accepted.length) return;
+    return this.queue(sessionId, entry => {
+      for (const span of accepted) {
+        if (entry.context?.lines[span.index]) this.append(entry, 'cue_heard', {...data, ...span,
+          lineId: entry.context.lines[span.index].id, source: 'transcript'});
+      }
     }, {background: true});
   }
   diagnostic(sessionId, lane, reason, data = {}) {

@@ -242,7 +242,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
       {recording && recording.cellId === cellId && <>
         <div className="recording-meta">
           <strong>{labels[recording.status] || recording.status}{processing ? ` ${recording.progress || 0}%` : ''}</strong>
-          <span>{timeLabel(recording.duration)} · {recording.mappedCount} 格可用 · {recording.reviewCount} 格待確認</span>
+          <span>{timeLabel(recording.duration)} · {recording.usableCount ?? recording.mappedCount} 格參與比對 · {recording.reviewCount} 格待確認</span>
           <span>{languageName(recording.language)} · 劇本欄：{languages.find(language => language.id === recording.scriptLanguageId)?.name || '尚未對應'}</span>
           {processing && <progress max="100" value={recording.progress || 0} aria-label="錄音處理進度"/>}
         </div>
@@ -277,7 +277,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
           {processing && <button type="button" className="subtle-button" onClick={() => act('正在停止對齊…', () =>
             mutation(`/${selectedId}/cancel`, {method: 'POST'}))}>停止對齊</button>}
           <button type="button" className="subtle-button" disabled={Boolean(busy) || recording.status !== 'ready' ||
-            (activeId !== selectedId && (!recording.mappedCount || !compatible))}
+            (activeId !== selectedId && (!(recording.usableCount ?? recording.mappedCount) || !compatible))}
             onClick={() => act('切換中…', () => mutation('/active', {method: 'PUT', headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({recordingId: activeId === selectedId ? null : selectedId})}))}>
             {activeId === selectedId ? '停用音訊跟戲' : '使用此錄音跟戲'}
@@ -302,7 +302,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         </div>
         <small>重新切段會保留人工校正。AI 使用設定中的 OpenAI 金鑰，僅送辨識文字及附近劇本，依用量計費。</small>
         {!(apiKey || canAlignWithAI) && <small>如需 AI 補對齊，請先在設定填入 OpenAI 金鑰。</small>}
-        <p className="recording-note">{activeId === selectedId ? '此錄音已啟用；未確認的片段仍由文字跟戲。' : '此錄音尚未啟用，現場仍由文字跟戲。'}</p>
+        <p className="recording-note">{activeId === selectedId ? '此錄音已啟用；有有效時間範圍的待確認片段也參與比對，需連續命中三次。未對齊或已失效的片段由文字跟戲。' : '此錄音尚未啟用，現場仍由文字跟戲。'}</p>
         {!compatible && <p className="recording-note">此錄音的語言或劇本欄與目前演出設定不同，無法啟用；請選擇對應錄音，或確認劇本欄後重新自動切段。</p>}
         {referenceAudio?.recordingId === selectedId && <p className="recording-live-status">
           音訊比對：{{loading:'載入中', listening:'等待人聲', searching:'尚未可靠定位', candidate:'核對中', verified:'已確認', error:'沿用文字跟戲'}[referenceAudio.status] || '等待收音'}

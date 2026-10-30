@@ -3,9 +3,10 @@ const {playbackDuration} = require('./recording-timing');
 const {normalizePerformanceLanguage, getFollowingLines, describeFollowingScript, isRecordingCompatible} = require('./performance-language');
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_RECORDINGS = 5;
-const isUsableSegment = (segment, line) => Boolean(line && line.type !== 'direction' &&
-  ['auto', 'manual'].includes(segment.status) && segment.textHash === hashText(line) &&
-  Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
+const isUsableSegment = (segment, line, recording) => Boolean(line && line.type !== 'direction' &&
+  ['auto', 'manual', 'review'].includes(segment.status) && segment.textHash === hashText(line) &&
+  Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.start >= 0 && segment.end > segment.start &&
+  (!recording || segment.end <= playbackDuration(recording)));
 
 function normalizeRecordings(session) {
   if (!Array.isArray(session.recordings)) session.recordings = [];
@@ -36,9 +37,9 @@ function refreshMappings(session) {
     let changed = false;
     for (const segment of recording.segments) {
       const line = lines.get(segment.lineId);
-      if (['auto', 'manual'].includes(segment.status) && (!line || segment.textHash !== hashText(line))) {
+      if (['auto', 'manual', 'review'].includes(segment.status) && (!line || segment.textHash !== hashText(line))) {
         segment.sourceStatus = segment.status; segment.status = 'stale'; changed = true;
-      } else if (line && segment.status === 'stale' && ['auto','manual'].includes(segment.sourceStatus) &&
+      } else if (line && segment.status === 'stale' && ['auto','manual','review'].includes(segment.sourceStatus) &&
         segment.textHash === hashText(line)) {
         segment.status = segment.sourceStatus; delete segment.sourceStatus; changed = true;
       }
@@ -51,7 +52,7 @@ function validSegments(session, recording) {
   const byId = new Map(recording.segments.map(segment => [segment.lineId, segment]));
   return recordingLines(session, recording).flatMap((line, index) => {
     const segment = byId.get(line.id);
-    return segment && isUsableSegment(segment, line) ? [{...segment, index}] : [];
+    return segment && isUsableSegment(segment, line, recording) ? [{...segment, index}] : [];
   });
 }
 
@@ -61,6 +62,7 @@ function publicRecording(recording, {details = false, session} = {}) {
     ...(recording.source === 'local' ? {source: 'local', fingerprint: recording.fingerprint,
       chunkSeconds: recording.chunkSeconds, localRevision: recording.localRevision} : {}),
     mappedCount: recording.segments.filter(s => ['auto','manual'].includes(s.status)).length,
+    usableCount: session ? validSegments(session, recording).length : undefined,
     reviewCount: recording.segments.filter(s => ['review','unmatched','stale'].includes(s.status)).length,
     playbackDuration: playbackDuration(recording), timeCalibration: recording.timeCalibration || null,
     featureCalibration: recording.featureCalibration || null,

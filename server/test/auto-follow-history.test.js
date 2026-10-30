@@ -163,6 +163,27 @@ test('database failure retains events for idempotent retry and bounded overflow 
   await h.end(s.id);
 });
 
+test('multi-cue text coverage never fabricates visits or erases skips and normal final stop is not a recording gap', async () => {
+  const {session: s, history: h} = fixture('coverage');
+  const id = await h.start(s);
+  h.audio(s.id, 'a', 100);
+  const spans = [0, 1, 2].map(index => ({index, completed: true, heard: s.lines[index].text, coverage: 1}));
+  for (let i = 0; i < 100; i++) h.heard(s.id, spans, {itemId: 'batch-a', providerStreamId: 'a', audioMs: 2000});
+  h.confirm(s.id, 0, 'transcript', {completed: true, matchedSpan: spans[0]});
+  h.enter(s, 2, {source: 'transcript'}); s.currentIndex = 2;
+  h.confirm(s.id, 2, 'transcript', {completed: true});
+  h.transport(s.id, 'paused', {reason: 'client requested stop'});
+  const report = historyReport(await h.read(s.id, id));
+  assert.equal(report.events.filter(event => event.type === 'cue_heard').length, 3);
+  assert.equal(report.rows[1].heard[0].heard, '第二句台詞');
+  assert.equal(report.rows[1].visits.length, 0);
+  assert.equal(report.rows[1].status, 'skipped_auto');
+  assert.equal(report.rows[0].status, 'confirmed');
+  assert.equal(report.hasGaps, false);
+  assert.match(historyCsv(report), /是（不代表已顯示）/);
+  await h.end(s.id);
+});
+
 test('JSON/CSV exports retain every visit, quoted multiline text, formula safety and ownership partitioning', async () => {
   const {session: s, history: h} = fixture('exports');
   s.title = '=HYPERLINK("bad")'; s.lines[1].text = '+公式,"台詞"\n第二行';

@@ -32,7 +32,7 @@ function fixture(mode = 'auto') {
     LINE_TYPES: { DIRECTION: 'direction', DIALOGUE: 'dialogue' },
     sessions: new Map([[session.id, session]]),
     autoFollowStates: new Map(), transcriptionStreams: new Map(),
-    autoFollowHistory: {enter() {}, confirm() {}, sync() {}, diagnostic() {}, event() {}, status: () => ({})},
+    autoFollowHistory: {enter() {}, confirm() {}, heard() {}, sync() {}, diagnostic() {}, event() {}, status: () => ({})},
     referenceRuntime: {position() {}, invalidate() {}},
     getSession: () => session, getSessionRecord: () => session,
     ensureSessionLines: s => s.lines, sanitizeLineText: t => String(t).trim(),
@@ -258,4 +258,29 @@ test('server advances after weak recognition while publishing both tracking lane
     streamId: 's', itemId: 'stale', startMs: 2000, endMs: 3000, isFinal: true,
   });
   assert.equal(session.currentIndex, 0);
+});
+
+test('cross-cue transcript confirms the displayed prediction before moving, while recording intermediate coverage separately', () => {
+  const {context, session} = fixture();
+  session.lines = ['今晚大家都準備好了', '你哭了？', '我沒有，', '我沒有哭，', '我不知道哭是什麼意思。']
+    .map((text, index) => ({id: `cue-${index}`, text}));
+  const history = [], positions = [];
+  context.autoFollowHistory.confirm = (_id, index, _source, data) => history.push({type: 'confirm', index, ...data});
+  context.autoFollowHistory.enter = (_session, index) => history.push({type: 'enter', index});
+  context.autoFollowHistory.heard = (_id, spans) => history.push({type: 'heard', spans});
+  context.referenceRuntime.position = (_session, _clock, options) => positions.push(options);
+  context.handleAutoFollowTranscript('test', session.lines[0].text, {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
+  for (let endMs = 1020; endMs <= 1200; endMs += 20) context.handleAutoFollowAudioLevel('test', 0.001, 20, endMs);
+  for (let endMs = 1220; endMs <= 1240; endMs += 20) context.handleAutoFollowAudioLevel('test', 0.08, 20, endMs);
+  assert.equal(session.currentIndex, 1);
+  assert.equal(positions.at(-1).continuous, true);
+  history.length = 0;
+  context.handleAutoFollowTranscript('test', '你哭了嗎我沒有我沒有哭我不知道', {streamId: 's', itemId: 'b', startMs: 1200, endMs: 4200});
+  assert.equal(session.currentIndex, 4);
+  assert.deepEqual(Array.from(history[0].spans, span => span.index), [1, 2, 3, 4]);
+  assert.deepEqual(history.slice(1).map(event => [event.type, event.index]), [['confirm', 1], ['enter', 4], ['confirm', 4]]);
+  assert.equal(history[1].completed, true);
+  assert.equal(positions.at(-1).continuous, false, 'a multi-cue jump resets acoustic position');
+  context.applyCurrentIndexChange(session, 3, {manualOverride: true});
+  assert.equal(positions.at(-1).continuous, false);
 });

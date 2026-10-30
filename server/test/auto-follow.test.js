@@ -636,6 +636,54 @@ const directionLines = [
   '可是我答應過你',
 ];
 
+test('a predicted short cue tolerates an added particle without arming another onset', () => {
+  const s = show(['大家終於重新聚在一起了', '你哭了？', '我沒有，', '我沒有哭，', '我不知道哭是什麼意思。']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  assert.equal(s.index(), 1);
+  const result = s.transcript('你哭了嗎', {itemId: 'b', startMs: 1200, endMs: 1900});
+  assert.equal(result.status, 'verified');
+  assert.equal(result.candidate.contextualShort, true);
+  assert.equal(result.candidate.confidence, 0.75);
+  assert.equal(s.tracker.prediction, null);
+  assert.equal(s.tracker.armedIndex, null, 'one-edit evidence alone cannot trigger an audio prediction');
+  s.audio(0.001, 1900, 10); s.audio(0.08, 2100, 2);
+  assert.equal(s.index(), 1);
+  const chain = s.transcript('你哭了嗎我沒有我沒有哭我不知道', {itemId: 'b', startMs: 1200, endMs: 4200});
+  assert.equal(chain.index, 4);
+  assert.deepEqual(chain.spans.map(span => span.index), [1, 2, 3, 4]);
+  assert.deepEqual(chain.spans.map(span => span.completed), [true, true, true, false]);
+});
+
+test('short one-edit tolerance requires a fresh position and rejects competing cues', () => {
+  const startup = show(['你哭了？', '別擔心']);
+  assert.equal(startup.transcript('你哭了嗎').status, 'searching');
+  const repeated = show(['大家終於重新聚在一起了', '你哭了？', '你哭了嗎？']);
+  repeated.transcript(repeated.lines[0].text, {isFinal: true});
+  repeated.audio(0.001, 1000, 10); repeated.audio(0.08, 1200, 2);
+  const result = repeated.transcript('你哭了嗎', {itemId: 'b', startMs: 1200, endMs: 2000});
+  assert.notEqual(result.candidate?.contextualShort, true);
+  assert.notEqual(result.index, 1, 'an exact competing cue beats a fuzzy prediction');
+  const expired = show(['你哭了？', '別擔心']);
+  expired.transcript('你哭了', {isFinal: true});
+  assert.equal(expired.transcript('你哭了嗎', {itemId: 'b', startMs: 12000, endMs: 13000}).status, 'searching');
+});
+
+test('multi-cue evidence can verify a pending prediction but never invent omitted cues', () => {
+  const texts = ['今晚大家都準備好了', '你哭了？', '我沒有，', '我沒有哭，', '我不知道哭是什麼意思。'];
+  const s = show(texts);
+  s.transcript(texts[0], {isFinal: true});
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  const result = s.transcript('你哭了嗎我沒有我沒有哭我不知道', {itemId: 'b', startMs: 1200, endMs: 4200});
+  assert.equal(result.index, 4);
+  assert.equal(result.spans.find(span => span.index === 1).completed, true);
+  const omitted = show(['我們今晚正式開始演出', '這句完全沒有被說出來', '請大家立刻離開這個危險的地方']);
+  const jump = omitted.transcript('我們今晚正式開始演出請大家立刻離開這個危險的地方', {isFinal: true});
+  assert.equal(jump.index, 2);
+  assert.ok(jump.spans.some(span => span.index === 2));
+  assert.ok(!jump.spans.some(span => span.index === 1), 'suffix recovery cannot invent omitted speech');
+});
+
 test('confirmed ending followed by a direction advances only after three seconds of quiet audio', () => {
   const s = show(directionLines);
   s.transcript(directionLines[0]);

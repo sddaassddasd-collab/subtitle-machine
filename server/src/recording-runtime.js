@@ -41,8 +41,8 @@ function runRecordingTask(message, timeoutMs = 180000, signal) {
 }
 
 class RecordingRuntime {
-  constructor({loadAsset = getRecordingAsset, onResult, onStatus} = {}) {
-    this.loadAsset = loadAsset; this.onResult = onResult; this.onStatus = onStatus;
+  constructor({loadAsset = getRecordingAsset, onResult, onStatus, onDiagnostic} = {}) {
+    this.loadAsset = loadAsset; this.onResult = onResult; this.onStatus = onStatus; this.onDiagnostic = onDiagnostic;
     this.sessions = new Map();
   }
   async ensure(session) {
@@ -52,14 +52,14 @@ class RecordingRuntime {
     const previous = this.sessions.get(session.id);
     if (previous?.key === key) return;
     this.stop(session.id);
-    const entry = {key, revision: recording.revision, signature: scriptSignature(session), generation: 1, pending: 0, currentIndex: session.currentIndex, ready: false, recordingId: recording.id};
+    const entry = {key, revision: recording.revision, signature: scriptSignature(session), generation: 1, pending: 0, inFlight: 0, currentIndex: session.currentIndex, ready: false, recordingId: recording.id};
     this.sessions.set(session.id, entry);
     this.onStatus?.(session.id, {status: 'loading', recordingId: recording.id, name: recording.name});
     try {
       const segments = validSegments(session, recording).map(segment => ({...segment,
         start: Math.max(0, toAnalysis(segment.start, recording.featureCalibration)),
         end: Math.min(recording.duration, toAnalysis(segment.end, recording.featureCalibration))})).filter(segment => segment.end > segment.start);
-      if (!segments.length) throw new Error('尚無已確認的錄音片段，沿用文字跟戲');
+      if (!segments.length) throw new Error('尚無有效時間範圍的錄音片段，沿用文字跟戲');
       const asset = await this.loadAsset(session.id, recording.id);
       if (this.sessions.get(session.id) !== entry) return;
       if (!asset?.features) throw new Error('錄音特徵不存在，請重新匯入錄音');
@@ -68,11 +68,16 @@ class RecordingRuntime {
         if (this.sessions.get(session.id) !== entry) return;
         if (message.type === 'ready') { entry.ready = true; this.onStatus?.(session.id, {status: 'listening', recordingId: recording.id, name: recording.name}); }
         if (message.type === 'result') {
+          entry.inFlight = Math.max(0, entry.inFlight - 1);
           if (message.generation === entry.generation) entry.pending = Math.max(0, entry.pending - 1);
           if (message.generation === entry.generation && message.result) this.onResult?.(session.id, {
             ...message.result,
             ...(Number.isFinite(message.result.referenceSeconds) ? {referenceSeconds: toPlayback(message.result.referenceSeconds, recording.featureCalibration)} : {}),
+            ...(message.result.diagnostics ? {diagnostics: {...message.result.diagnostics,
+              candidates: message.result.diagnostics.candidates.map(candidate => ({...candidate,
+                referenceSeconds: toPlayback(candidate.referenceSeconds, recording.featureCalibration)}))}} : {}),
             recordingId: recording.id, revision: entry.revision, generation: entry.generation,
+            workerTiming: message.workerTiming,
           });
         }
         if (message.type === 'error') this.fail(session.id, entry, message.error);
@@ -80,7 +85,10 @@ class RecordingRuntime {
       worker.on('error', error => this.fail(session.id, entry, error.message));
       worker.on('exit', () => { if (entry.worker === worker) this.fail(session.id, entry, '音訊比對工作已停止，沿用文字跟戲'); });
       worker.postMessage({type: 'configure', features: asset.features, segments,
-        generation: entry.generation, currentIndex: session.currentIndex});
+        generation: entry.generation, currentIndex: entry.currentIndex});
+      this.onDiagnostic?.(session.id, 'audio_reset', {reason: 'recording_loaded', index: entry.currentIndex,
+        recordingId: recording.id, generation: entry.generation, usableSegments: segments.length,
+        reviewSegments: segments.filter(segment => segment.status === 'review').length, buffersPreserved: false});
     } catch (error) { this.fail(session.id, entry, error.message); }
   }
   fail(sessionId, entry, error) {
@@ -88,13 +96,19 @@ class RecordingRuntime {
     entry.ready = false; entry.worker?.terminate(); entry.worker = null;
     this.onStatus?.(sessionId, {status: 'error', recordingId: entry.recordingId, error});
   }
-  position(session, audioMs = 0) {
+  position(session, audioMs = 0, {continuous = false, reason = 'reposition'} = {}) {
     const entry = this.sessions.get(session.id);
     if (!entry) return;
+    const fromIndex = entry.currentIndex;
+    const preserve = entry.ready && continuous && session.currentIndex === fromIndex + 1 && !entry.needsReset &&
+      (!Number.isFinite(entry.lastAudioMs) || (audioMs >= entry.lastAudioMs && audioMs - entry.lastAudioMs <= 150));
+    const pending = entry.pending;
     entry.currentIndex = session.currentIndex; entry.generation++; entry.pending = 0;
     entry.fenceMs = audioMs;
-    entry.lastAudioMs = audioMs;
-    entry.worker?.postMessage({type: 'position', generation: entry.generation, currentIndex: session.currentIndex});
+    if (!preserve) entry.lastAudioMs = audioMs;
+    entry.worker?.postMessage({type: 'position', generation: entry.generation, currentIndex: session.currentIndex, preserve});
+    this.onDiagnostic?.(session.id, preserve ? 'audio_position' : 'audio_reset', {reason, fromIndex,
+      index: session.currentIndex, audioMs, generation: entry.generation, pending, inFlight: entry.inFlight, buffersPreserved: preserve});
   }
   feed(session, stream, audio, audioEndMs) {
     if (!session.activeRecordingId || session.subtitleControlMode !== 'auto') return;
@@ -102,18 +116,18 @@ class RecordingRuntime {
     const entry = this.sessions.get(session.id);
     if (!entry?.ready || !entry.worker || entry.currentIndex !== session.currentIndex) return;
     // A slow matcher must never build an unbounded queue or delay the ASR lane.
-    if (entry.pending >= 12) { entry.needsReset = true; return; }
+    if (entry.inFlight >= 12) { entry.needsReset = true; return; }
     if (entry.needsReset) {
-      if (entry.pending >= 4) return;
-      this.position(session, audioEndMs); entry.needsReset = false;
-    }
-    if (Number.isFinite(entry.lastAudioMs) && audioEndMs - entry.lastAudioMs > 150) this.position(session, audioEndMs);
+      if (entry.inFlight >= 4) return;
+      this.position(session, audioEndMs, {reason: 'worker_backpressure'}); entry.needsReset = false;
+    } else if (Number.isFinite(entry.lastAudioMs) && (audioEndMs - entry.lastAudioMs > 150 || audioEndMs <= entry.lastAudioMs))
+      this.position(session, audioEndMs, {reason: audioEndMs <= entry.lastAudioMs ? 'audio_clock_reset' : 'audio_gap'});
     entry.lastAudioMs = audioEndMs;
     const pcm = Buffer.from(audio, 'base64');
     if (!pcm.length || pcm.length % 2) return;
-    entry.pending++;
+    entry.pending++; entry.inFlight++;
     entry.worker.postMessage({type: 'audio', pcm, audioEndMs, currentIndex: session.currentIndex,
-      generation: entry.generation, sequence: stream.lastCaptureSequence});
+      generation: entry.generation, sequence: stream.lastCaptureSequence, queuedAt: Date.now()});
   }
   accepts(sessionId, result) {
     const entry = this.sessions.get(sessionId);

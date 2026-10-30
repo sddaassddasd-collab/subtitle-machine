@@ -115,6 +115,13 @@ const transcriptionStreams = new Map();
 const autoFollowHistory = new AutoFollowHistory();
 const referenceRuntime = new RecordingRuntime({
   onResult: handleReferenceAudioResult,
+  onDiagnostic: (sessionId, type, data) => {
+    const reasons = {recording_loaded: '已載入參考錄音', sequential_advance: '順序前進一格',
+      manual_position: '人工定位', tracking_reset: '跟戲重新定位', cue_jump: '字幕跳段',
+      worker_backpressure: '聲音比對積壓', audio_gap: '收音時間出現缺口', audio_clock_reset: '收音時間重新起算', reposition: '重新定位'};
+    autoFollowHistory.event(sessionId, type, {...followHistoryClock(sessionId), ...data,
+      message: `${reasons[data.reason] || data.reason}；${data.buffersPreserved ? '保留連續聲音累積' : '重設聲音累積'}`});
+  },
   onStatus: (sessionId, referenceAudio) => {
     if (sessions.has(sessionId)) {
       updateAutoFollowState(sessionId, {referenceAudio});
@@ -8947,8 +8954,11 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
       transcriptAudioLagMs: decision.transcriptAudioLagMs, transcriptAudioEndMs: decision.transcriptAudioEndMs,
     } : null,
   });
+  const continuous = !manualOverride && nextIndex === session.currentIndex + 1 &&
+    decision?.index === nextIndex && ['audio', 'transcript', 'correction', 'onset', 'silence'].includes(decision.source);
   session.currentIndex = nextIndex;
-  referenceRuntime.position(session, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0);
+  referenceRuntime.position(session, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0,
+    {continuous, reason: manualOverride ? 'manual_position' : continuous ? 'sequential_advance' : 'cue_jump'});
   const selectedCell = getSelectedCell(session);
   if (selectedCell) selectedCell.currentIndex = nextIndex;
   persistSessionCurrentIndexSoon(session);
@@ -9141,7 +9151,7 @@ function resetAutoFollowPosition(session, message = '') {
     status: AUTO_FOLLOW_STATUS.LISTENING,
     message,
   });
-  referenceRuntime.position(session, stream?.autoFollowAudioMs || 0);
+  referenceRuntime.position(session, stream?.autoFollowAudioMs || 0, {reason: 'tracking_reset'});
 }
 
 function syncPerformanceFollowing(session) {
@@ -9164,24 +9174,31 @@ function switchCaptionMode(session, mode, language, {stopStream = true} = {}) {
 function handleReferenceAudioResult(sessionId, result) {
   const session = getSessionRecord(sessionId), stream = transcriptionStreams.get(sessionId);
   if (!session || !stream?.ready || stream.closing || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
-  if (!referenceRuntime.accepts(sessionId, result) || stream.autoFollowAudioMs - result.audioEndMs > 700) {
-    autoFollowHistory.diagnostic(sessionId, 'audio', 'stale_result', {...followHistoryClock(sessionId), message: '音訊結果已過期或定位版本已更新'});
+  const audioLagMs = stream.autoFollowAudioMs - result.audioEndMs;
+  if (!referenceRuntime.accepts(sessionId, result) || audioLagMs > 700) {
+    autoFollowHistory.diagnostic(sessionId, 'audio', 'stale_result', {...followHistoryClock(sessionId),
+      audioLagMs, workerTiming: result.workerTiming, generation: result.generation,
+      message: audioLagMs > 700 ? '聲音比對落後收音超過 700 毫秒，未套用結果' : '音訊定位版本已更新，未套用舊結果'});
     return;
   }
   const recording = session.recordings?.find(r => r.id === result.recordingId && r.id === session.activeRecordingId);
   if (!recording || !isRecordingCompatible(session, recording) || recording.status !== 'ready' || recording.revision !== result.revision || recording.cellId !== session.selectedCellId) return;
   const state = getAutoFollowState(sessionId);
-  updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name }});
+  const message = ({no_usable_segments: '目前格與後四格沒有可比對的錄音範圍',
+    no_acoustic_match: '附近片段缺少足夠的聲音特徵', below_threshold: '聲音分數未達門檻',
+    ambiguous: '多個錄音片段聲音相近，暫不採用', awaiting_support: '聲音候選尚待連續命中確認', matched: '聲音比對已確認'})[result.reason] || '';
+  updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name, message }});
   if (result.status !== 'verified') {
-    autoFollowHistory.diagnostic(sessionId, 'audio', result.status, {...followHistoryClock(sessionId),
+    autoFollowHistory.diagnostic(sessionId, 'audio', result.reason || result.status, {...followHistoryClock(sessionId),
       candidateIndex: result.index, confidence: result.confidence, referenceSeconds: result.referenceSeconds,
-      message: result.status === 'candidate' ? '聲音候選尚待確認' : '聲音比對無法可靠定位'});
+      acoustic: result.diagnostics, workerTiming: result.workerTiming, segmentStatus: result.segmentStatus, audioLagMs,
+      message: message || (result.status === 'candidate' ? '聲音候選尚待確認' : '聲音比對無法可靠定位')});
     maybeBroadcastAutoFollowDiagnostics(sessionId); return;
   }
   const index = session.lines.findIndex(line => line.id === result.lineId);
   const followingLines = getFollowingLines(session);
   const segment = recording.segments.find(segment => segment.lineId === result.lineId);
-  if (index < session.currentIndex || index > session.currentIndex + 4 || !segment || !isUsableSegment(segment, followingLines[index])) {
+  if (index < session.currentIndex || index > session.currentIndex + 4 || !segment || !isUsableSegment(segment, followingLines[index], recording)) {
     autoFollowHistory.diagnostic(sessionId, 'audio', 'unusable_or_out_of_window', {candidateIndex: index, message: '候選超出附近範圍或錄音片段不可用'});
     return;
   }
@@ -9201,6 +9218,7 @@ function handleReferenceAudioResult(sessionId, result) {
   } else maybeBroadcastAutoFollowDiagnostics(sessionId);
   autoFollowHistory.confirm(sessionId, index, 'audio', {...followHistoryClock(sessionId),
     confidence: result.confidence, referenceSeconds: result.referenceSeconds, completed: result.completed === true,
+    segmentStatus: segment.status, acoustic: result.diagnostics, workerTiming: result.workerTiming, audioLagMs,
     audioMs: result.audioEndMs, recordingId: recording.id, recordingRevision: recording.revision});
 }
 
@@ -9288,6 +9306,19 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     confidence: result.candidate?.confidence ?? null, message: result.message,
     ...(Number.isInteger(result.index) ? { lastVerifiedAt: now } : {}),
   });
+  const evidence = {...followHistoryClock(sessionId), text: sanitizeLineText(transcript).slice(0, 2000),
+    itemId: options.itemId, providerStreamId: options.streamId,
+    audioMs: options.endMs ?? null, audioStartMs: options.startMs ?? null,
+    candidateIndex: result.candidate?.index, confidence: result.candidate?.confidence,
+    message: result.message, candidates: state.tracker.candidates?.slice(0, 3), alignmentMs: state.lastAlignmentMs};
+  if (result.spans?.length) {
+    autoFollowHistory.heard(sessionId, result.spans, evidence);
+    // Confirm the displayed prediction before moving past it; covered cues that
+    // were never displayed remain separate evidence, never fabricated visits.
+    const covered = result.spans.find(span => span.index === session.currentIndex);
+    if (covered && result.index !== session.currentIndex) autoFollowHistory.confirm(sessionId, covered.index, 'transcript',
+      {...evidence, text: covered.heard, completed: covered.completed, matchedSpan: covered});
+  }
   if (Number.isInteger(result.index) && result.index !== session.currentIndex) {
     recordAutoFollowDecision(sessionId, result.index, result.status === 'corrected' ? 'correction' : 'transcript', {
       transcriptReceivedAt: receivedAt, transcriptAudioLagMs: state.lastTranscriptAudioLagMs,
@@ -9299,11 +9330,6 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     // Do not resend the entire script for each interim hypothesis.
     broadcastAutoFollowState(sessionId);
   }
-  const evidence = {...followHistoryClock(sessionId), text: sanitizeLineText(transcript).slice(0, 2000),
-    itemId: options.itemId, providerStreamId: options.streamId,
-    audioMs: options.endMs ?? null, audioStartMs: options.startMs ?? null,
-    candidateIndex: result.candidate?.index, confidence: result.candidate?.confidence,
-    message: result.message, candidates: state.tracker.candidates?.slice(0, 3)};
   if (Number.isInteger(result.index)) autoFollowHistory.confirm(sessionId, result.index,
     result.status === 'corrected' ? 'correction' : 'transcript',
     {...evidence, completed: state.tracker.progressIndex === result.index && state.tracker.progress === 1});

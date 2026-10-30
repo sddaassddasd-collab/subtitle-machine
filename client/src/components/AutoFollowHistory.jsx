@@ -7,6 +7,7 @@ const statuses = {confirmed: '已確認', pending: '已進入、未確認', manu
   skipped_auto: '自動跨過，未進入', skipped_manual: '人工跨過，未進入'}
 const eventNames = {run_start: '開始紀錄', run_end: '結束紀錄', interruption: '紀錄中斷', logging_gap: '紀錄不完整',
   cue_enter: '進入字幕格', cue_confirm: '字幕確認', display_ack: '顯示回報', diagnostic: '定位診斷',
+  cue_heard: '文字涵蓋字幕', audio_reset: '重設聲音累積', audio_position: '更新聲音搜尋位置',
   capture_status: '收音狀態', capture_audio: '收到現場音訊', control_mode: '跟戲模式切換'}
 const captureNames = {ready: '辨識連線就緒', connecting: '辨識連線中', paused: '已暫停', error: '發生錯誤'}
 const time = at => at == null ? '—' : new Date(at).toLocaleString('zh-TW', {hour12: false})
@@ -134,14 +135,15 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
           return <tr key={`${row.contextId}:${row.index}`}>
             <td>{row.index + 1}<small>{row.cellName || '場次'}<br/>版本 {report.contexts.findIndex(context => context.contextId === row.contextId) + 1}</small></td>
             <td>{row.text}</td>
-            <td>{row.reference.usable ? '可用' : '無可用片段'}</td>
+            <td>{row.reference.usable ? row.reference.status === 'review' ? '參與比對（待確認）' : '可用' : '無可用片段'}</td>
             <td>{sources[last?.source] || '無進入紀錄'}</td>
             <td>{last ? labels(last.confirmations) : '—'}</td>
-            <td>{statuses[row.status]}{row.visits.length > 0 && <details><summary>共 {row.entryCount} 次</summary>
+            <td>{statuses[row.status]}{row.heard?.length > 0 && <small>辨識文字曾涵蓋此格（不代表已顯示）</small>}{row.visits.length > 0 && <details><summary>共 {row.entryCount} 次</summary>
               {row.visits.map((visit, index) => <div className="follow-history-visit" key={visit.id}>
                 <strong>第 {index + 1} 次 · {sources[visit.source]} · {statuses[visit.status]}</strong>
                 <div>{time(visit.enteredAt)}{visit.audioMs != null && ` · 收音 ${(visit.audioMs / 1000).toFixed(2)} 秒`}</div>
                 {visit.confirmations.map(item => <div key={item.id}>{sources[item.source]}{item.completed ? '（句尾確認）' : ''}
+                  {item.segmentStatus === 'review' && '（使用待確認錄音片段）'}
                   {Number.isFinite(item.referenceSeconds) && ` · 參考 ${item.referenceSeconds.toFixed(2)} 秒`}
                   {item.text && `：${item.text}`}</div>)}
                 {visit.displayAcks.map(item => <div key={item.id}>顯示回報 {item.role}：{item.ms} ms</div>)}
@@ -163,6 +165,8 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
           {event.status && ` · ${captureNames[event.status] || event.status}`}
           {event.mode && ` · ${event.mode === 'auto' ? '自動跟戲' : '手動跟戲'}`}
           {event.message && ` · ${event.message}`}{event.text && ` · ${event.text}`}
+          {event.acoustic && ` · 聲音門檻 ${Math.round(event.acoustic.minimumConfidence * 100)}% · 連續命中 ${event.acoustic.supportCount}／${event.acoustic.requiredSupport}`}
+          {event.workerTiming && ` · 比對排隊 ${Math.round(event.workerTiming.queueMs)} ms／處理 ${Math.round(event.workerTiming.processingMs)} ms`}
         </li>)}</ol>
       </details>
     </>}

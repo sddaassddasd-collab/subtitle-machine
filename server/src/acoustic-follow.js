@@ -7,6 +7,8 @@ const WINDOW = 400;
 const FFT_SIZE = 512;
 const DIMENSIONS = 24;
 const VERSION = 1;
+const MIN_CONFIDENCE = 0.80;
+const MIN_MARGIN = 0.035;
 const windowWeights = Float32Array.from({length: WINDOW}, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (WINDOW - 1)));
 const mel = hz => 2595 * Math.log10(1 + hz / 700);
 const hz = value => 700 * (10 ** (value / 2595) - 1);
@@ -168,6 +170,14 @@ class AcousticFollower {
     this.reset(0);
   }
   reset(currentIndex) { this.currentIndex = currentIndex; this.live = []; this.frames = 0; this.quietFrames = 0; this.support = null; this.lastPosition = null; this.lastVerified = null; }
+  advance(currentIndex) {
+    if (currentIndex !== this.currentIndex + 1) { this.reset(currentIndex); return; }
+    this.currentIndex = currentIndex;
+    // Keep continuous PCM/features, but never carry support for an expired cue.
+    if (this.lastPosition?.index < currentIndex) this.lastPosition = null;
+    if (this.lastVerified?.index < currentIndex) this.lastVerified = null;
+    if (this.support && !this.segments.some(s => s.lineId === this.support.lineId && s.index >= currentIndex)) this.support = null;
+  }
   feed(frame, currentIndex) {
     if (currentIndex !== this.currentIndex) this.reset(currentIndex);
     if (frame.rms < 0.001) {
@@ -187,8 +197,10 @@ class AcousticFollower {
     if (this.live.length > 40) this.live.shift();
     if (++this.frames % 4 !== 0 || this.live.length < 12) return null;
     const candidates = [];
+    let eligibleSegments = 0;
     for (const segment of this.segments) {
       if (segment.index < currentIndex || segment.index > currentIndex + 4) continue;
+      eligibleSegments++;
       const first = Math.max(0, Math.floor(segment.start * 1000 / FRAME_MS));
       const last = Math.min(this.reference.count, Math.ceil(segment.end * 1000 / FRAME_MS));
       // Limit search to a moving 12-second window for unusually long cues.
@@ -204,15 +216,28 @@ class AcousticFollower {
     }
     candidates.sort((a, b) => a.error - b.error);
     const best = candidates[0], runner = candidates[1];
-    // Conservative acceptance; ambiguous repeated acoustic material stays with ASR.
-    if (!best || best.error > 0.16 || (runner && runner.error - best.error < 0.035)) {
-      this.support = null; return { status: 'searching', confidence: best ? Math.max(0, 1 - best.error) : 0, audioEndMs: frame.endMs };
+    const confidence = best ? Math.max(0, 1 - best.error) : 0;
+    const margin = runner ? runner.error - best.error : null;
+    const requiredSupport = best?.status === 'review' || confidence < 0.84 ? 3 : 2;
+    const diagnostics = {minimumConfidence: MIN_CONFIDENCE, minimumMargin: MIN_MARGIN, margin,
+      liveFrames: this.live.length, eligibleSegments, candidateCount: candidates.length, requiredSupport,
+      candidates: candidates.slice(0, 3).map(candidate => ({index: candidate.index, lineId: candidate.lineId,
+        segmentStatus: candidate.status, confidence: Math.max(0, 1 - candidate.error), referenceSeconds: candidate.referenceSeconds}))};
+    // Lower scores are provisional; repeated material still needs a clear lead.
+    if (!best || confidence < MIN_CONFIDENCE || (runner && margin < MIN_MARGIN)) {
+      this.support = null;
+      return {status: 'searching', reason: !best ? eligibleSegments ? 'no_acoustic_match' : 'no_usable_segments'
+        : confidence < MIN_CONFIDENCE ? 'below_threshold' : 'ambiguous', index: best?.index,
+        segmentStatus: best?.status, referenceSeconds: best?.referenceSeconds,
+        confidence, audioEndMs: frame.endMs, diagnostics: {...diagnostics, supportCount: 0}};
     }
     const consistent = this.support?.lineId === best.lineId && best.frame >= this.support.frame - 2;
     this.support = {lineId: best.lineId, frame: best.frame, count: consistent ? this.support.count + 1 : 1};
     const progress = Math.min(1, Math.max(0, (best.referenceSeconds - best.start) / (best.end - best.start)));
-    const confirmed = this.support.count >= 2;
+    const confirmed = this.support.count >= requiredSupport;
     const result = {status: confirmed ? 'verified' : 'candidate', lineId: best.lineId, index: best.index,
+      reason: confirmed ? 'matched' : 'awaiting_support', segmentStatus: best.status,
+      diagnostics: {...diagnostics, supportCount: this.support.count},
       progress, completed: confirmed && best.referenceSeconds >= best.end - 0.08,
       confidence: Math.max(0, 1 - best.error), referenceSeconds: best.referenceSeconds,
       audioEndMs: frame.endMs, audioStartMs: this.live[this.live.length - best.liveLength].endMs - FRAME_MS };

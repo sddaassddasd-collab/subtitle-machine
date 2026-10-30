@@ -1,7 +1,7 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {extractFeatures, StreamingFeatures, AcousticFollower, decodeFeatures} = require('../src/acoustic-follow');
-const {alignSegments, hashText, refreshMappings, isUsableSegment, validateSegmentEdit} = require('../src/recordings');
+const {alignSegments, hashText, refreshMappings, isUsableSegment, validateSegmentEdit, validSegments, publicRecording} = require('../src/recordings');
 const {createTracker, followTranscript, applyReferencePosition, followAudio} = require('../src/auto-follow');
 const {runRecordingTask} = require('../src/recording-runtime');
 
@@ -160,6 +160,86 @@ test('fresh confirmed text can correct an acoustic guess even if the ASR utteran
   applyReferencePosition(tracker,lines,2,{progress:0.5,completed:false,audioStartMs:500,audioEndMs:1100});
   const result=followTranscript(tracker,lines,2,{streamId:'s',itemId:'new',text:lines[0].text,startMs:0,endMs:1600,isFinal:true});
   assert.equal(result.index,0);assert.equal(result.status,'corrected');assert.equal(tracker.referenceFence,null);
+});
+
+test('valid review segments participate without changing approval status; invalid/stale ranges stay excluded', () => {
+  const script = Array.from({length: 7}, (_, i) => ({id: `cue-${i}`, text: `待核對的第${i}句`, type: 'dialogue'}));
+  script[6].type = 'direction';
+  const recording = {id: 'r', revision: 1, duration: 10, language: 'zh-TW', scriptLanguageId: 'primary', cellId: 'act',
+    segments: script.map((line, i) => ({lineId: line.id, textHash: hashText(line), status: 'review', start: i, end: i + 1}))};
+  recording.segments[1].end = null;
+  recording.segments[2].status = 'unmatched';
+  recording.segments[3].start = -1;
+  recording.segments[4].end = 11;
+  recording.segments[5].textHash = 'old-text';
+  const session = {lines: script, selectedCellId: 'act', transcriptionLanguage: 'zh-TW', recordings: [recording]};
+  assert.deepEqual(validSegments(session, recording).map(segment => segment.index), [0]);
+  assert.equal(recording.segments[0].status, 'review');
+  const summary = publicRecording(recording, {session});
+  assert.equal(summary.usableCount, 1); assert.equal(summary.mappedCount, 0);
+  script[0].text = '字幕已修改'; refreshMappings(session);
+  assert.equal(recording.segments[0].status, 'stale');
+  assert.equal(validSegments(session, recording).length, 0);
+  script[0].text = '待核對的第0句'; refreshMappings(session);
+  assert.equal(recording.segments[0].status, 'review');
+  assert.equal(validSegments(session, recording).length, 1);
+});
+
+// Control cosine distance explicitly, so this tests the new acceptance range
+// rather than hoping a synthetic microphone change happens to score 0.80–0.84.
+function constantReference() {
+  const features = Buffer.from(extractFeatures(phrasePcm(phrases[0])).features);
+  for (let offset = 24; offset < features.length; offset += 25 * 4) {
+    features.fill(0, offset, offset + 25 * 4);
+    features.writeFloatLE(1, offset); features.writeFloatLE(0.1, offset + 24 * 4);
+  }
+  return features;
+}
+function acousticFrame(confidence, index) {
+  const feature = new Float32Array(24);
+  feature[0] = confidence; feature[1] = Math.sqrt(1 - confidence ** 2);
+  return {feature, rms: 0.1, endMs: (index + 1) * 40};
+}
+
+test('0.82 acoustic matches need three consistent hits; subthreshold and ambiguous matches remain rejected', () => {
+  for (const status of ['auto', 'review']) {
+    const matcher = new AcousticFollower(constantReference(), [{lineId: 'a', index: 0, start: 0, end: 1.44, status}]);
+    const results = [];
+    for (let i = 0; i < 20; i++) {
+      const result = matcher.feed(acousticFrame(0.82, i), 0);
+      if (result) results.push(result);
+    }
+    assert.deepEqual(results.map(result => result.status), ['candidate', 'candidate', 'verified']);
+    assert.equal(results.at(-1).diagnostics.minimumConfidence, 0.8);
+    assert.equal(results.at(-1).diagnostics.requiredSupport, 3);
+    assert.equal(results.at(-1).segmentStatus, status);
+  }
+  for (const duplicate of [false, true]) {
+    const segments = [{lineId: 'a', index: 0, start: 0, end: 1.44, status: 'review'}];
+    if (duplicate) segments.push({...segments[0], lineId: 'b', index: 1});
+    const matcher = new AcousticFollower(constantReference(), segments);
+    let last;
+    for (let i = 0; i < 40; i++) last = matcher.feed(acousticFrame(duplicate ? 0.82 : 0.79, i), 0) || last;
+    assert.equal(last.status, 'searching');
+    assert.equal(last.reason, duplicate ? 'ambiguous' : 'below_threshold');
+    assert.equal(last.diagnostics.supportCount, 0);
+  }
+});
+
+test('strong review matches still require three hits and no-reference diagnostics explain the missing window', () => {
+  for (const status of ['auto', 'review']) {
+    const matcher = new AcousticFollower(constantReference(), [{lineId:'a',index:0,start:0,end:1.44,status}]);
+    const results = [];
+    for (let i = 0; i < 20; i++) {
+      const result = matcher.feed(acousticFrame(0.95, i), 0);
+      if (result) results.push(result.status);
+    }
+    assert.deepEqual(results, status === 'review' ? ['candidate','candidate','verified'] : ['candidate','verified','verified']);
+  }
+  const matcher = new AcousticFollower(constantReference(), [{lineId:'a',index:6,start:0,end:1.44,status:'auto'}]);
+  let result;
+  for (let i=0;i<12;i++) result=matcher.feed(acousticFrame(0.95,i),0) || result;
+  assert.equal(result.reason,'no_usable_segments'); assert.equal(result.diagnostics.eligibleSegments,0);
 });
 
 test('a final ending before the acoustic decision cannot rewind it even if it overlaps the matching window', () => {

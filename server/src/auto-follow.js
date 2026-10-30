@@ -107,6 +107,84 @@ function align(heard, lines, from, to) {
   return [...byLine.values()];
 }
 
+// Trace only an accepted, bounded match, not the entire script on each scan.
+// Exact character pairs expose which intervening cues were actually heard;
+// deleted script text must never be reported as spoken or displayed.
+function traceAlignment(input, text, freePrefix = true) {
+  const width = text.length + 1, path = new Uint8Array((input.length + 1) * width);
+  let previous = Float64Array.from({length: width}, (_, j) => freePrefix ? 0 : j);
+  let current = new Float64Array(width);
+  for (let i = 1; i <= input.length; i++) {
+    current[0] = i;
+    for (let j = 1; j <= text.length; j++) {
+      const diagonal = previous[j - 1] + (input[i - 1] === text[j - 1] ? 0 : 1);
+      const insertion = previous[j] + 1, deletion = current[j - 1] + 1;
+      const step = diagonal <= insertion && diagonal <= deletion ? 0 : insertion <= deletion ? 1 : 2;
+      path[i * width + j] = step;
+      current[j] = step === 0 ? diagonal : step === 1 ? insertion : deletion;
+    }
+    [previous, current] = [current, previous];
+  }
+  const pairs = [];
+  let i = input.length, j = text.length;
+  while (i > 0 && j > 0) {
+    const step = path[i * width + j];
+    if (step === 0) {
+      if (input[i - 1] === text[j - 1]) pairs.push({input: i - 1, script: j - 1});
+      i--; j--;
+    } else if (step === 1) i--;
+    else j--;
+  }
+  return {cost: previous[text.length], pairs: pairs.reverse()};
+}
+
+function matchedSpans(best, script) {
+  if (best.confidence < 0.88 || best.contextualShort) return [];
+  const input = Array.from(best.heard).slice(-MAX_HEARD);
+  const end = script.starts[best.index] + best.offset;
+  const start = Math.max(0, end - MAX_HEARD * 2);
+  const {pairs} = traceAlignment(input, script.chars.slice(start, end));
+  const groups = new Map();
+  for (const pair of pairs) {
+    const position = script.positions[start + pair.script];
+    if (!groups.has(position.index)) groups.set(position.index, []);
+    groups.get(position.index).push({...pair, offset: position.offset});
+  }
+  return [...groups].flatMap(([index, matches]) => {
+    const entry = script.entries[index], first = matches[0], last = matches.at(-1);
+    const coverage = matches.length / (last.offset - first.offset + 1);
+    if (matches.length < Math.min(3, entry.length) || coverage < 0.8) return [];
+    return [{index, offset: last.offset, length: entry.length, coverage,
+      completed: first.offset === 1 && last.offset === entry.length && matches.length / entry.length >= 0.8,
+      heard: input.slice(first.input, last.input + 1).join('')}];
+  });
+}
+
+// One edit in a short, already located cue is useful evidence, even when an
+// added particle changes the last character. Never use this for reacquisition.
+function matchContextualShort(tracker, script, currentIndex, text, event) {
+  const recent = tracker.sequence?.index === currentIndex && event.endMs >= tracker.sequence.atMs &&
+    event.endMs - tracker.sequence.atMs <= SEQUENCE_TTL_MS;
+  const predicted = tracker.prediction?.index === currentIndex && event.endMs >= tracker.prediction.onsetMs &&
+    event.endMs - tracker.prediction.onsetMs <= SEQUENCE_TTL_MS;
+  if (!recent && !predicted) return null;
+  const entry = script.entries[currentIndex], input = Array.from(text);
+  if (!entry?.text || entry.source.music || entry.length < 3 || entry.length > 8 ||
+    Math.abs(input.length - entry.length) > 1) return null;
+  const {cost, pairs} = traceAlignment(input, Array.from(entry.text), false);
+  if (cost !== 1 || pairs.length < 3) return null;
+  // A similar nearby phrase cannot be resolved by a one-edit allowance alone.
+  for (let index = Math.max(0, currentIndex - 3); index <= Math.min(script.entries.length - 1, currentIndex + 18); index++) {
+    if (index === currentIndex) continue;
+    const other = script.entries[index];
+    if (!other.text || Math.abs(other.length - input.length) > 1) continue;
+    if (traceAlignment(input, Array.from(other.text), false).cost <= cost) return null;
+  }
+  const confidence = 1 - cost / Math.max(input.length, entry.length);
+  return {index: currentIndex, offset: pairs.at(-1).script + 1, length: entry.length,
+    confidence, rank: confidence, evidence: pairs.length, heard: text, contextualShort: true};
+}
+
 function clearPreparation(tracker) {
   tracker.armedIndex = null;
   tracker.preparedIndex = null;
@@ -215,10 +293,19 @@ function rankRecentCandidates(variants, script, currentIndex, from, to, expected
 
 function canCatchUp(tracker, script, currentIndex, best, event) {
   const sequence = tracker.sequence;
-  if (!sequence || tracker.prediction || sequence.index !== currentIndex ||
+  if (!sequence || sequence.index !== currentIndex ||
     event.endMs <= sequence.atMs || event.endMs - sequence.atMs > SEQUENCE_TTL_MS ||
     best.index <= currentIndex + 1 || best.index > currentIndex + 4 ||
-    best.confidence < 0.92 || best.evidence < 6) return false;
+    best.confidence < 0.88 || best.evidence < 6) return false;
+  // A single growing ASR item may already contain several complete cues. An
+  // explicit ordered path through every intervening cue is stronger evidence
+  // than a clear suffix alone, and can also verify a pending onset prediction.
+  const spans = matchedSpans(best, script);
+  const covered = new Map(spans.map(span => [span.index, span]));
+  if (best.evidence >= 8 && Array.from({length: best.index - currentIndex + 1}, (_, offset) => currentIndex + offset)
+    .every(index => !script.entries[index].source.music && covered.has(index) &&
+      (index === best.index || covered.get(index).completed))) return true;
+  if (tracker.prediction || best.confidence < 0.92) return false;
   // Partial phrases need more evidence than a complete cue. All candidates still
   // pass ambiguity checks; distant/reverse jumps retain the correction handshake.
   return best.evidence >= 8 || best.heard === script.entries[best.index].text;
@@ -367,6 +454,11 @@ function followTranscript(tracker, lines, currentIndex, event) {
   let candidates = opening ? [opening] : rankRecentCandidates(variants, script, currentIndex,
     Math.max(0, currentIndex - 3), Math.min(lines.length - 1, currentIndex + 18), expectedIndex);
   let best = candidates[0];
+  const short = matchContextualShort(tracker, script, currentIndex, text, event);
+  if (short && (!best || best.confidence <= short.confidence)) {
+    candidates = [short, ...candidates.filter(candidate => candidate.index !== currentIndex)];
+    best = short;
+  }
   const correction = evaluateCorrection(tracker, script, currentIndex, text, event);
   const corrected = correction?.candidates[0];
   const next = script.entries[currentIndex]?.next;
@@ -407,7 +499,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     return { status: 'searching', message: tracker.sequence
       ? `${reason} 保留順序跟隨，等待下一格明確開頭。` : reason, candidate: best || null };
   };
-  if (!best || best.confidence < 0.78) {
+  if (!best || best.confidence < (best.contextualShort ? 0.70 : 0.78)) {
     return uncertain('正在重新定位台詞，暫時維持目前字幕。');
   }
   const runner = candidates[1];
@@ -491,8 +583,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
   }
   return {
     index: best.index, candidate: best, progress, armedIndex: tracker.armedIndex,
+    spans: matchedSpans(best, script),
     status: best.index === currentIndex ? 'verified' : relocation || prediction ? 'corrected' : 'advanced',
     message: caughtUp ? '已依最新清楚台詞追上附近字幕。' :
+      best.contextualShort ? '已依附近順序容許短句一字差異，持續核對句尾。' :
       best.recovered ? '已依最新文字尾段重新定位字幕。' :
       best.openingConfirmed ? '已確認下一格開頭，持續核對後續台詞。' :
       canPrepare ? (completed ? '已核對句尾，等待下一格開頭。' : '接近句尾，正在準備下一格。') :

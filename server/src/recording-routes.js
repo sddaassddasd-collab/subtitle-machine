@@ -4,7 +4,7 @@ const persistence = require('./persistence');
 const {registerLocalRecordingRoutes} = require('./local-recording-routes');
 const {runRecordingTask} = require('./recording-runtime');
 const {MAX_FILE_BYTES, MAX_RECORDINGS, normalizeRecordings, refreshMappings,
-  recordingLines, publicRecording, validateSegmentEdit, hashText} = require('./recordings');
+  recordingLines, publicRecording, validateSegmentEdit, hashText, validSegments} = require('./recordings');
 const {analyseAlignment, alignmentOptions} = require('./recording-analysis');
 const {timedWords, timingDiagnostics, fitCalibration, playbackDuration, toAnalysis, toPlayback} = require('./recording-timing');
 const {SOURCE_LANGUAGES, supportedLanguage, normalizePerformanceLanguage, resolveFollowingLanguage,
@@ -222,9 +222,8 @@ function registerRecordingRoutes(app, {requireAuth, ownedSession, sessions, pers
       const recording = session.recordings.find(r => r.id === id);
       if (!isRecordingCompatible(session, recording)) throw new Error('錄音語言或劇本欄與目前演出設定不同，請選擇對應錄音或重新切段');
       refreshMappings(session);
-      const ids = new Set(session.lines.filter(line => line.type !== 'direction').map(line => line.id));
-      if (!recording.segments.some(segment => ids.has(segment.lineId) && ['auto','manual'].includes(segment.status)))
-        throw new Error('請先確認至少一個台詞片段，再啟用音訊跟戲');
+      if (!validSegments(session, recording).length)
+        throw new Error('請先對齊至少一個具有有效時間範圍的台詞片段，再啟用音訊跟戲');
     }
     const previous = session.activeRecordingId;
     session.activeRecordingId = id;

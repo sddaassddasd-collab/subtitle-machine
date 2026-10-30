@@ -226,6 +226,36 @@ test('text can advance immediately; delayed audio for the same/older cue cannot 
   await persistence.deleteRecordingAssets(f.session.id);
 });
 
+test('review-only recording can activate and its provisional source is retained in accepted acoustic history', async t => {
+  const f = fixture();
+  t.after(async () => { await f.history.end(f.session.id); f.dispose(); await persistence.deleteRecordingAssets(f.session.id); });
+  const recording = await importRecording(f), root = `/api/session/${f.session.id}/recordings`;
+  recording.segments.filter(segment => segment.status === 'auto').forEach(segment => { segment.status = 'review'; });
+  recording.revision++; f.runtime.invalidate(f.session.id); f.session.activeRecordingId = null;
+  const activation = await request(f, root + '/active', {method: 'PUT', body: {recordingId: recording.id}});
+  assert.equal(activation.status, 200, activation.bytes.toString());
+  const summary = (await request(f, root)).json().recordings[0];
+  assert.equal(summary.mappedCount, 0); assert.equal(summary.usableCount, 2);
+  f.session.subtitleControlMode = 'auto';
+  const historyId = await f.history.start(f.session);
+  await f.runtime.ensure(f.session); await waitFor(() => f.runtime.sessions.get(f.session.id)?.ready);
+  const entry = f.runtime.sessions.get(f.session.id);
+  f.stream.autoFollowAudioMs = 1000;
+  f.audioResult({recordingId: recording.id, revision: recording.revision, generation: entry.generation,
+    status: 'verified', lineId: 'a', index: 0, progress: 0.6, confidence: 0.82, audioStartMs: 0, audioEndMs: 1000,
+    diagnostics: {minimumConfidence: 0.8, requiredSupport: 3, supportCount: 3}});
+  const report = (await request(f, `/api/session/${f.session.id}/follow-history/${historyId}`)).json();
+  assert.equal(report.rows[0].reference.usable, true);
+  assert.equal(report.rows[0].reference.status, 'review');
+  assert.equal(report.rows[0].visits[0].confirmations[0].segmentStatus, 'review');
+  assert.equal(report.rows[0].visits[0].confirmations[0].acoustic.supportCount, 3);
+  assert.equal(recording.segments[0].status, 'review', 'participation does not approve a segment');
+  recording.segments.forEach(segment => { segment.end = null; });
+  f.session.activeRecordingId = null;
+  const invalid = await request(f, root + '/active', {method: 'PUT', body: {recordingId: recording.id}});
+  assert.equal(invalid.status, 400);
+});
+
 test('real acoustic worker can lead cue changes while ASR stream remains active',async t=>{
   const f=fixture();t.after(()=>f.dispose());const r=await importRecording(f);f.session.subtitleControlMode='auto';
   const historyId = await f.history.start(f.session);
