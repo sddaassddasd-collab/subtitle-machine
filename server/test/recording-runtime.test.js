@@ -4,6 +4,7 @@ const {RecordingRuntime} = require('../src/recording-runtime');
 const {extractFeatures} = require('../src/acoustic-follow');
 const {hashText} = require('../src/recordings');
 const {phrasePcm, phrases} = require('./helpers/reference-audio');
+const {ACOUSTIC_SETTINGS: A} = require('../src/follow-settings');
 
 async function waitFor(predicate) {
   const deadline = Date.now() + 4000;
@@ -73,6 +74,16 @@ test('real worker preserves partial PCM and acoustic history on sequential advan
   runtime.position(session, audioMs, {continuous: false, reason: 'manual_position'});
   assert.equal(diagnostics.at(-1).buffersPreserved, false);
 
+  const resetCount = diagnostics.filter(event => event.reason === 'worker_backpressure').length;
+  const burstGeneration = entry.generation;
+  for (let i = 0; i < 25; i++) {
+    audioMs += 20;
+    runtime.feed(session, {lastCaptureSequence: ++sequence}, take.subarray(i * 960, (i + 1) * 960).toString('base64'), audioMs);
+  }
+  await waitFor(() => entry.pending === 0 && entry.inFlight === 0);
+  assert.equal(entry.generation, burstGeneration, 'a 500 ms arrival burst is batched without clearing feature history');
+  assert.equal(diagnostics.filter(event => event.reason === 'worker_backpressure').length, resetCount);
+
   // A stalled worker plus repeated manual moves must not bypass the queue cap
   // by assigning a new generation on every move.
   const post = entry.worker.postMessage.bind(entry.worker), waiting = [];
@@ -82,11 +93,24 @@ test('real worker preserves partial PCM and acoustic history on sequential advan
     runtime.position(session, audioMs, {reason: 'manual_position'});
     audioMs += 20;
     runtime.feed(session, {lastCaptureSequence: ++sequence}, take.subarray(0, 960).toString('base64'), audioMs);
+    await new Promise(resolve => setImmediate(resolve));
   }
   const queued = waiting.filter(message => message.type === 'audio');
-  assert.equal(queued.length, 12, 'the cap includes work from older generations');
+  assert.equal(queued.length, A.maxInFlight, 'the cap includes work from older generations');
+  for (let i = 0; i < 70; i++) {
+    audioMs += 20;
+    runtime.feed(session, {lastCaptureSequence: ++sequence}, take.subarray(0, 960).toString('base64'), audioMs);
+  }
+  assert.ok(entry.inFlightAudioMs + entry.queuedAudioMs <= A.maxBufferedAudioMs);
+  assert.ok(diagnostics.some(event => event.reason === 'worker_backpressure' && event.droppedAudioMs > 0 && !event.buffersPreserved));
   entry.worker.postMessage = post;
-  for (const message of queued) entry.worker.emit('message', {type: 'result', generation: message.generation, result: null});
+  post({type: 'position', generation: entry.generation, currentIndex: session.currentIndex, preserve: false});
+  for (const message of queued) entry.worker.emit('message', {type: 'result', generation: message.generation, jobId: message.jobId, result: null});
   await feed(1);
-  assert.ok(diagnostics.some(event => event.reason === 'worker_backpressure' && !event.buffersPreserved));
+  await waitFor(() => entry.inFlight === 0);
+  assert.equal(entry.jobs.size, 0, 'obsolete generations still acknowledge their work and release capacity');
+  audioMs += 700;
+  runtime.feed(session, {lastCaptureSequence: ++sequence}, Buffer.alloc(24000 * 2 * 0.7).toString('base64'), audioMs);
+  assert.equal(entry.queuedAudioMs, 0, 'a single oversized packet cannot bypass the duration bound');
+  assert.ok(diagnostics.at(-1).droppedAudioMs >= 700);
 });

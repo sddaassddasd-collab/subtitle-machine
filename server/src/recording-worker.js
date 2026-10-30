@@ -20,7 +20,13 @@ parentPort.on('message', message => {
       generation = message.generation;
       if (message.preserve) follower.advance(message.currentIndex);
       else { frontend.reset(); follower.reset(message.currentIndex); }
-    } else if (message.type === 'audio' && follower && generation === message.generation) {
+    } else if (message.type === 'search' && follower && generation === message.generation) {
+      follower.search(message.hint);
+    } else if (message.type === 'audio') {
+      if (!follower || generation !== message.generation) {
+        parentPort.postMessage({type: 'result', generation: message.generation, jobId: message.jobId, result: null});
+        return;
+      }
       const startedAt = Date.now(), started = performance.now();
       let result = null, observation = null;
       for (const frame of frontend.push(bytes(message.pcm), message.audioEndMs)) {
@@ -28,7 +34,7 @@ parentPort.on('message', message => {
         result = follower.feed(frame, message.currentIndex) || result;
         if (follower.observation !== before) observation = follower.observation;
       }
-      parentPort.postMessage({type: 'result', generation, sequence: message.sequence, result, observation,
+      parentPort.postMessage({type: 'result', generation, sequence: message.sequence, jobId: message.jobId, result, observation,
         workerTiming: {queueMs: Math.max(0, startedAt - message.queuedAt) || 0, processingMs: performance.now() - started}});
     }
   } catch (error) { parentPort.postMessage({type: 'error', error: error.message}); }

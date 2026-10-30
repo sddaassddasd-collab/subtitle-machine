@@ -605,7 +605,7 @@ test('startup and expired positions still require confirmation for nearby jumps'
   for (const expired of [false, true]) {
     const s = show(recoveryLines);
     if (expired) s.transcript(recoveryLines[0], { isFinal: true });
-    s.transcript(recoveryLines[3], { itemId: 'b', startMs: 12000, endMs: 13000 });
+    s.transcript(recoveryLines[3], { itemId: 'b', startMs: 32000, endMs: 33000 });
     assert.equal(s.index(), 0);
   }
 });
@@ -796,4 +796,44 @@ test('a long direction hold still recognizes short next dialogue across consecut
     s.transcript(text, { itemId: 'b', startMs: 44100, endMs: 45000, isFinal: true });
     assert.equal(s.index(), 3);
   }
+});
+
+test('local trailing speech and colloquial insertions retain ordered cues without arming from a trimmed ending', () => {
+  const s = show(['最有效的方法就是使用電擊治療。', '如果他沒寫出快樂的歌，', '就電一次，', '直到他能寫出來為止。']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  const trailing = s.transcript('只要他沒寫出快樂的歌我', {itemId: 'b', startMs: 1100, endMs: 2500});
+  assert.equal(s.index(), 1);
+  assert.equal(trailing.candidate.trailingCharacters, 1);
+  assert.equal(s.tracker.armedIndex, null);
+  const inserted = s.transcript('我就電他一次', {itemId: 'c', startMs: 2600, endMs: 3900});
+  assert.equal(s.index(), 2);
+  assert.equal(inserted.candidate.colloquial, true);
+  assert.ok(inserted.candidate.confidence >= 0.88);
+});
+
+test('a two-character omission verifies only a fresh unique predicted short cue and never arms an onset', () => {
+  for (const competing of [false, true]) {
+    const s = show(['國王都看在眼裡。', '你哭了？', competing ? '他哭了？' : '我沒有，']);
+    s.transcript(s.lines[0].text, {isFinal: true});
+    s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+    const result = s.transcript('哭了', {itemId: 'b', startMs: 1200, endMs: 2100});
+    if (competing) assert.equal(result.index, undefined);
+    else {
+      assert.equal(result.index, 1);
+      assert.equal(result.candidate.contextualShort, true);
+      assert.equal(s.tracker.prediction, null);
+      assert.equal(s.tracker.armedIndex, null);
+    }
+  }
+  assert.equal(show(['你哭了？', '我沒有，']).transcript('哭了').index, undefined);
+});
+
+test('a stalled local position recovers from a unique six-character suffix without requiring a second growing item', () => {
+  const s = show(['我國的隔離所治癒了無數的人民。', '但也有更多人產生害怕的情緒。', '而沒辦法離開隔離所。', '請大家冷靜。']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  s.transcript('這段完全聽不清楚', {itemId: 'b', startMs: 1100, endMs: 2300});
+  const result = s.transcript('讓很多人沒有辦法離開隔離所', {itemId: 'c', startMs: 2400, endMs: 5800});
+  assert.equal(result.reason, 'nearby_recovery');
+  assert.equal(s.index(), 2);
+  assert.ok(!result.spans.some(span => span.index === 1), 'a missed cue is never invented as spoken');
 });

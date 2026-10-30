@@ -830,3 +830,23 @@ test('token transport failures and malformed responses remain actionable and nev
     });
   }
 });
+
+test('the controller refuses an acoustic skip over dialogue without a fresh text hint, including high scores', async t => {
+  const f = fixture(); t.after(() => f.dispose());
+  const recording = await importRecording(f);
+  t.after(() => persistence.deleteRecordingAssets(f.session.id));
+  f.session.lines[1].type = 'dialogue'; f.session.lines[1].text = '中間還有一句台詞。';
+  f.session.subtitleControlMode = 'auto';
+  await f.runtime.ensure(f.session); await waitFor(() => f.runtime.sessions.get(f.session.id)?.ready);
+  const entry = f.runtime.sessions.get(f.session.id);
+  f.stream.autoFollowAudioMs = 2000;
+  const result = {recordingId: recording.id, revision: recording.revision, generation: entry.generation,
+    status: 'verified', lineId: 'b', index: 2, progress: 0.6, confidence: 0.95,
+    audioStartMs: 1000, audioEndMs: 2000, diagnostics: {supportCount: 5}};
+  f.audioResult(result);
+  assert.equal(f.session.currentIndex, 0, 'high score and repeated hits alone cannot skip dialogue');
+  f.audioResult({...result, diagnostics: {...result.diagnostics, textHint: {index: 2, confidence: 0.9, expiresAudioMs: 1900}}});
+  assert.equal(f.session.currentIndex, 0, 'expired text evidence cannot authorize a jump');
+  f.audioResult({...result, diagnostics: {...result.diagnostics, textHint: {index: 2, confidence: 0.9, expiresAudioMs: 3000}}});
+  assert.equal(f.session.currentIndex, 2);
+});

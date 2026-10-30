@@ -248,3 +248,48 @@ test('a final ending before the acoustic decision cannot rewind it even if it ov
   const result=followTranscript(tracker,lines,2,{streamId:'s',itemId:'late',text:lines[0].text,startMs:0,endMs:1200,isFinal:true});
   assert.equal(result.ignored,true);assert.equal(tracker.progressIndex,2);
 });
+
+test('repeated matches to a stationary future position never establish forward audio progress', () => {
+  const matcher = new AcousticFollower(constantReference(), [{lineId: 'future', index: 1, start: 0, end: 1.44, status: 'auto'}]);
+  const results = [];
+  for (let i = 0; i < 80; i++) {
+    const result = matcher.feed(acousticFrame(0.95, i), 0);
+    if (result) results.push(result);
+  }
+  assert.ok(results.some(result => result.reason === 'insufficient_audio_progress'));
+  assert.ok(results.every(result => result.status !== 'verified'));
+});
+
+test('multi-cue audio recovery requires a fresh text hint and a longer advancing sound window', () => {
+  const phrase = [...phrases[0], ...phrases[1]];
+  const features = extractFeatures(phrasePcm(phrase)).features;
+  for (const hint of [null, {index: 3, confidence: 0.95, expiresAudioMs: 10000}, {index: 3, confidence: 0.95, expiresAudioMs: 500}]) {
+    const matcher = new AcousticFollower(features, [{lineId: 'target', index: 3, start: 0, end: 2.88, status: 'review'}]);
+    if (hint) matcher.search(hint);
+    const frontend = new StreamingFeatures(24000), take = phrasePcm(phrase, 24000);
+    const results = [];
+    for (let offset = 0; offset + 960 <= take.length; offset += 960) {
+      for (const frame of frontend.push(take.subarray(offset, offset + 960), (offset + 960) / 48)) {
+        const result = matcher.feed(frame, 0);
+        if (result) results.push(result);
+      }
+    }
+    const confirmed = results.filter(result => result.status === 'verified');
+    if (hint?.expiresAudioMs === 10000) {
+      assert.ok(confirmed.length > 0);
+      assert.ok(confirmed.every(result => result.diagnostics.matchedLiveFrames >= 40 && result.diagnostics.referenceProgressMs >= 120));
+    } else assert.equal(confirmed.length, 0);
+  }
+});
+
+test('stalled acoustic searches expand beyond four cues but wider candidates alone cannot change position', () => {
+  const matcher = new AcousticFollower(constantReference(), [{lineId: 'far', index: 10, start: 0, end: 1.44, status: 'auto'}]);
+  const results = [];
+  for (let i = 0; i < 125; i++) {
+    const result = matcher.feed(acousticFrame(0.95, i), 0);
+    if (result) results.push(result);
+  }
+  assert.equal(results[0].diagnostics.eligibleSegments, 0);
+  assert.ok(results.some(result => result.index === 10 && result.diagnostics.searchAhead >= 12));
+  assert.ok(results.every(result => result.status !== 'verified'));
+});

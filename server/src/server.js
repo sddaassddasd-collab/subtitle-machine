@@ -8968,8 +8968,21 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   if (selectedCell) selectedCell.currentIndex = nextIndex;
   persistSessionCurrentIndexSoon(session);
   broadcastViewerState(session.id);
-  broadcastControlState(session.id);
+  if (manualOverride) broadcastControlState(session.id);
+  else broadcastControlPosition(session);
   return true;
+}
+
+function broadcastControlPosition(session) {
+  // Cue changes do not alter script, recording maps or editor history. Sending
+  // those thousands of records here stalls the same loop receiving live PCM.
+  const room = `control:${session.id}`, patchRoom = `control-position:${session.id}`;
+  const rooms = io.sockets?.adapter?.rooms;
+  if ([...(rooms?.get(room) || [])].some(id => !rooms.get(patchRoom)?.has(id)))
+    io.to(room).except(patchRoom).emit('control:update', getControlPayload(session));
+  io.to(patchRoom).emit('control:position', {sessionId: session.id,
+    cellId: session.selectedCellId, currentIndex: session.currentIndex, lineId: session.lines[session.currentIndex]?.id,
+    displayEnabled: session.displayEnabled, autoFollow: getPublicAutoFollowState(session)});
 }
 
 function followHistoryClock(sessionId) {
@@ -9208,7 +9221,9 @@ function handleReferenceAudioResult(sessionId, result) {
   const state = getAutoFollowState(sessionId);
   const message = ({no_usable_segments: '目前格與後四格沒有可比對的錄音範圍',
     no_acoustic_match: '附近片段缺少足夠的聲音特徵', below_threshold: '聲音分數未達門檻',
-    ambiguous: '多個錄音片段聲音相近，暫不採用', awaiting_support: '聲音候選尚待連續命中確認', matched: '聲音比對已確認'})[result.reason] || '';
+    ambiguous: '多個錄音片段聲音相近，暫不採用', awaiting_support: '聲音候選尚待連續命中確認',
+    jump_requires_text: '跨多格的聲音候選仍需文字佐證', insufficient_audio_window: '正在累積較完整的聲音片段',
+    insufficient_audio_progress: '聲音候選尚未形成連續時間進度', matched: '聲音比對已確認'})[result.reason] || '';
   updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name, message }});
   if (result.status !== 'verified') {
     recordReferenceObservation(sessionId, result, result.reason || result.status, false);
@@ -9221,7 +9236,16 @@ function handleReferenceAudioResult(sessionId, result) {
   const index = session.lines.findIndex(line => line.id === result.lineId);
   const followingLines = getFollowingLines(session);
   const segment = recording.segments.find(segment => segment.lineId === result.lineId);
-  if (index < session.currentIndex || index > session.currentIndex + ACOUSTIC_SETTINGS.ahead || !segment || !isUsableSegment(segment, followingLines[index], recording)) {
+  const jump = index > session.currentIndex + 1 && followingLines.slice(session.currentIndex + 1, index).some(line => line.type !== 'direction');
+  const hint = result.diagnostics?.textHint;
+  const textSupported = hint?.index === index && hint.confidence >= ACOUSTIC_SETTINGS.hintMinimumConfidence && result.audioEndMs <= hint.expiresAudioMs;
+  if (jump && !textSupported) {
+    updateAutoFollowState(sessionId, {referenceAudio: {...result, name: recording.name, status: 'candidate',
+      reason: 'jump_requires_text', message: '跨多格的聲音候選仍需文字佐證'}});
+    recordReferenceObservation(sessionId, result, 'jump_requires_text', false);
+    maybeBroadcastAutoFollowDiagnostics(sessionId); return;
+  }
+  if (index < session.currentIndex || index > session.currentIndex + (textSupported ? ACOUSTIC_SETTINGS.recoveryMaxAhead : ACOUSTIC_SETTINGS.ahead) || !segment || !isUsableSegment(segment, followingLines[index], recording)) {
     recordReferenceObservation(sessionId, result, 'unusable_or_out_of_window', false);
     autoFollowHistory.diagnostic(sessionId, 'audio', 'unusable_or_out_of_window', {candidateIndex: index, message: '候選超出附近範圍或錄音片段不可用'});
     return;
@@ -9330,13 +9354,16 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     return;
   }
   state.lastAlignmentMs = Math.max(0, Date.now() - alignmentStartedAt);
+  if (!result.ignored && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
+    referenceRuntime.hint?.(session, result.candidate, options.endMs);
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
     normalizedText: normalizeText(transcript).slice(-120), before, after: trackerSnapshot(state.tracker, session.currentIndex),
     reason: result.reason || result.status || 'ignored_result', ignored: result.ignored === true,
     accepted: Number.isInteger(result.index), targetIndex: result.index ?? null,
     candidate: result.candidate ? {index: result.candidate.index, confidence: result.candidate.confidence,
       offset: result.candidate.offset, length: result.candidate.length, evidence: result.candidate.evidence,
-      contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true} : null});
+      contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true,
+      colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
     return;
@@ -9376,7 +9403,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   }
   if (Number.isInteger(result.index)) autoFollowHistory.confirm(sessionId, result.index,
     result.status === 'corrected' ? 'correction' : 'transcript',
-    {...evidence, completed: state.tracker.progressIndex === result.index && state.tracker.progress === 1});
+    {...evidence, completed: result.completed === true});
   else autoFollowHistory.diagnostic(sessionId, 'text', result.status || 'searching', evidence);
 }
 
@@ -12738,7 +12765,7 @@ io.on('connection', (socket) => {
     return getOwnedSession(sessionId, socketUser.id, options);
   };
 
-  socket.on('join', ({ sessionId, role, viewerToken, projectorToken, followOnly = false } = {}) => {
+  socket.on('join', ({ sessionId, role, viewerToken, projectorToken, followOnly = false, controlPositionPatches = false } = {}) => {
     if (role === 'viewer' || role === 'prompter') {
       const viewerTarget = viewerToken ? getViewerTargetByToken(viewerToken) : null;
       const viewerSession = viewerTarget?.session || getSession(sessionId);
@@ -12854,6 +12881,8 @@ io.on('connection', (socket) => {
     }
 
     socket.join(`control:${session.id}`);
+    if (controlPositionPatches === true) socket.join(`control-position:${session.id}`);
+    else socket.leave(`control-position:${session.id}`);
     socket.data.publicRole = 'control';
     socket.data.controlSessionId = session.id;
     broadcastControlState(session.id);

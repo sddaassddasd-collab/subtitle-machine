@@ -10,6 +10,7 @@ import { ControlStatusSummary, ControlStatusDetails } from '../components/Contro
 import AutoFollowHistory from '../components/AutoFollowHistory'
 import {APP_BUILD} from '../lib/build-info'
 import {signalMetrics} from '../lib/audio-signal'
+import {resolveControlPosition} from '../lib/control-position'
 import {
   areProjectorLayoutsEqual,
   normalizeProjectorDisplayMode,
@@ -1021,6 +1022,7 @@ const ControlPage = () => {
   const [sessionMeta, setSessionMeta] = useState(null)
   const [lines, setLines] = useState([])
   const linesRef = useRef(lines)
+  const positionCellIdRef = useRef('')
   linesRef.current = lines
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
@@ -1527,6 +1529,8 @@ const ControlPage = () => {
         nextSession?.selectedCellId ||
         (Array.isArray(nextSession?.cells) ? nextSession.cells[0]?.id : '') ||
         ''
+      positionCellIdRef.current = nextSelectedCellId
+      linesRef.current = nextLines
       const pendingCueRequest = pendingCueRequestRef.current
       let effectiveLiveIndex = nextLiveIndex
       if (pendingCueRequest) {
@@ -1966,7 +1970,7 @@ const ControlPage = () => {
 
     const joinSession = () => {
       if (disposed || !sessionId) return
-      socket.emit('join', { sessionId, role: 'control' })
+      socket.emit('join', { sessionId, role: 'control', controlPositionPatches: true })
     }
 
     const refreshSession = async () => {
@@ -2003,6 +2007,21 @@ const ControlPage = () => {
 
     const handleAutoFollowUpdate = (payload) => {
       setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
+    }
+
+    const handlePositionUpdate = (payload) => {
+      const position = resolveControlPosition(payload, {sessionId, cellId: positionCellIdRef.current,
+        lines: linesRef.current, pending: pendingCueRequestRef.current, now: Date.now(), timeoutMs: CUE_CONFIRM_TIMEOUT_MS})
+      if (!position) return
+      const {index, lineId} = position
+      pendingCueRequestRef.current = position.pending
+      if (lineId && lineId !== liveLineIdRef.current && !pendingCueRequestRef.current && !editingModeEnabledRef.current) requestCueScroll(lineId)
+      liveLineIdRef.current = lineId || null
+      liveCurrentIndexRef.current = index
+      setLiveCurrentIndex(index)
+      if (!editingModeEnabledRef.current) setCurrentIndex(index)
+      setDisplayEnabled(payload.displayEnabled !== false)
+      setAutoFollow(normalizeAutoFollowState(payload.autoFollow))
     }
 
     const handleTranscriptionError = (payload) => {
@@ -2049,6 +2068,7 @@ const ControlPage = () => {
     socket.on('reconnect', rejoinAndRefresh)
     socket.on('disconnect', markSocketDisconnected)
     socket.on('control:update', applySessionPayload)
+    socket.on('control:position', handlePositionUpdate)
     socket.on('control:transcription', handleTranscriptionUpdate)
     socket.on('control:auto-follow', handleAutoFollowUpdate)
     socket.on('control:deleted', handleSessionDeleted)
@@ -2080,6 +2100,7 @@ const ControlPage = () => {
     applySessionPayload,
     applyTranscriptionPayload,
     persistTranscriptionContext,
+    requestCueScroll,
   ])
 
   useEffect(() => {

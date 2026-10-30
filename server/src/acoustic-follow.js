@@ -170,10 +170,20 @@ class AcousticFollower {
     this.segments = segments;
     this.reset(0);
   }
-  reset(currentIndex) { this.currentIndex = currentIndex; this.live = []; this.frames = 0; this.quietFrames = 0; this.support = null; this.lastPosition = null; this.lastVerified = null; this.observation = null; }
+  reset(currentIndex) {
+    this.currentIndex = currentIndex; this.live = []; this.frames = 0; this.quietFrames = 0;
+    this.support = null; this.lastPosition = null; this.lastVerified = null; this.observation = null;
+    this.hint = null; this.positionStartedMs = null;
+  }
+  search(hint) {
+    if (Number.isInteger(hint?.index) && hint.index > this.currentIndex && hint.index <= this.currentIndex + A.recoveryMaxAhead &&
+      hint.confidence >= A.hintMinimumConfidence && Number.isFinite(hint.expiresAudioMs))
+      this.hint = {...hint};
+  }
   advance(currentIndex) {
     if (currentIndex !== this.currentIndex + 1) { this.reset(currentIndex); return; }
     this.currentIndex = currentIndex;
+    this.positionStartedMs = null;
     // Keep continuous PCM/features, but never carry support for an expired cue.
     if (this.lastPosition?.index < currentIndex) this.lastPosition = null;
     if (this.lastVerified?.index < currentIndex) this.lastVerified = null;
@@ -181,6 +191,8 @@ class AcousticFollower {
   }
   feed(frame, currentIndex) {
     if (currentIndex !== this.currentIndex) this.reset(currentIndex);
+    if (this.positionStartedMs === null) this.positionStartedMs = frame.endMs;
+    if (this.hint && frame.endMs > this.hint.expiresAudioMs) this.hint = null;
     if (frame.rms < A.quietRms) {
       const interrupted = this.support;
       const previousLiveFrames = this.live.length;
@@ -212,8 +224,11 @@ class AcousticFollower {
     const candidates = [];
     const ranges = [];
     let eligibleSegments = 0;
+    const waitingMs = frame.endMs - this.positionStartedMs;
+    const searchAhead = Math.max(A.ahead, this.hint ? this.hint.index - currentIndex + 1 : 0,
+      waitingMs >= A.recoveryExpandMs ? A.recoveryMaxAhead : waitingMs >= A.recoveryAfterMs ? A.recoveryAhead : 0);
     for (const segment of this.segments) {
-      if (segment.index < currentIndex || segment.index > currentIndex + A.ahead) continue;
+      if (segment.index < currentIndex || segment.index > currentIndex + searchAhead) continue;
       eligibleSegments++;
       const first = Math.max(0, Math.floor(segment.start * 1000 / FRAME_MS));
       const last = Math.min(this.reference.count, Math.ceil(segment.end * 1000 / FRAME_MS));
@@ -223,7 +238,10 @@ class AcousticFollower {
       const to = Math.min(last, Math.max(from + A.searchMinFrames, Math.ceil(center + A.searchAheadFrames)));
       ranges.push({index: segment.index, fromFrame: from, toFrame: to, referenceFrames: Math.max(0, to - from)});
       let match = null;
-      for (const length of A.liveLengths.filter(length => length <= this.live.length)) {
+      const jump = segment.index > currentIndex + 1 && segment.previousDialogueIndex !== currentIndex;
+      const requiredFrames = jump ? A.jumpLiveFrames : segment.index > currentIndex ? A.forwardLiveFrames : A.minLiveFrames;
+      const lengths = A.liveLengths.filter(length => length <= this.live.length && (this.live.length < requiredFrames || length >= requiredFrames));
+      for (const length of lengths) {
         const candidate = subsequenceDtw(this.live.slice(-length), this.reference, from, to);
         if (candidate && (!match || candidate.error < match.error)) match = {...candidate, liveLength: length};
       }
@@ -233,10 +251,13 @@ class AcousticFollower {
     const best = candidates[0], runner = candidates[1];
     const confidence = best ? Math.max(0, 1 - best.error) : 0;
     const margin = runner ? runner.error - best.error : null;
-    const requiredSupport = best?.status === 'review' || confidence < A.strongConfidence ? A.provisionalSupport : A.normalSupport;
+    const forward = best?.index > currentIndex;
+    const requiredSupport = Math.max(forward ? A.forwardSupport : 0,
+      best?.status === 'review' || confidence < A.strongConfidence ? A.provisionalSupport : A.normalSupport);
     const previousSupport = this.support ? {...this.support} : null;
     const diagnostics = {compared: true, minimumConfidence: MIN_CONFIDENCE, minimumMargin: MIN_MARGIN, margin, ranges,
-      liveFrames: this.live.length, eligibleSegments, candidateCount: candidates.length, requiredSupport,
+      liveFrames: this.live.length, matchedLiveFrames: best?.liveLength ?? 0, searchAhead,
+      textHint: this.hint ? {...this.hint} : null, eligibleSegments, candidateCount: candidates.length, requiredSupport,
       candidates: candidates.slice(0, 3).map(candidate => ({index: candidate.index, lineId: candidate.lineId,
         segmentStatus: candidate.status, confidence: Math.max(0, 1 - candidate.error), referenceSeconds: candidate.referenceSeconds}))};
     // Lower scores are provisional; repeated material still needs a clear lead.
@@ -249,18 +270,40 @@ class AcousticFollower {
           supportResetReason: previousSupport ? !best ? 'no_acoustic_match' : confidence < MIN_CONFIDENCE ? 'below_threshold' : 'ambiguous' : null}};
     }
     const consistent = this.support?.lineId === best.lineId && best.frame >= this.support.frame - A.backwardToleranceFrames;
-    this.support = {lineId: best.lineId, frame: best.frame, count: consistent ? this.support.count + 1 : 1};
+    // Growing the comparison window can move its best endpoint by itself.
+    // Count forward travel only between equal-length windows.
+    const travel = consistent && this.support.liveLength === best.liveLength ? best.frame - this.support.frame : 0;
+    this.support = {lineId: best.lineId, frame: best.frame, count: consistent ? this.support.count + 1 : 1,
+      liveLength: best.liveLength,
+      progressFrames: consistent ? this.support.progressFrames + travel : 0,
+      firstFrame: consistent ? this.support.firstFrame : best.frame,
+      firstAudioMs: consistent ? this.support.firstAudioMs : frame.endMs};
     const progress = Math.min(1, Math.max(0, (best.referenceSeconds - best.start) / (best.end - best.start)));
-    const confirmed = this.support.count >= requiredSupport;
+    const supportMs = frame.endMs - this.support.firstAudioMs;
+    const referenceProgressMs = this.support.progressFrames * FRAME_MS;
+    const progressRatio = supportMs ? referenceProgressMs / supportMs : 0;
+    const jump = best.index > currentIndex + 1 && best.previousDialogueIndex !== currentIndex;
+    const enoughWindow = !forward || best.liveLength >= (jump ? A.jumpLiveFrames : A.forwardLiveFrames);
+    const advancing = !forward || (supportMs >= A.forwardSupportMs && referenceProgressMs >= A.forwardProgressMs &&
+      progressRatio >= A.minimumProgressRatio && progressRatio <= A.maximumProgressRatio);
+    const textSupported = !jump || this.hint?.index === best.index;
+    const confirmed = this.support.count >= requiredSupport && enoughWindow && advancing && textSupported;
+    const reason = confirmed ? 'matched' : !enoughWindow ? 'insufficient_audio_window' :
+      !textSupported ? 'jump_requires_text' : this.support.count >= requiredSupport && !advancing ? 'insufficient_audio_progress' : 'awaiting_support';
     const result = {status: confirmed ? 'verified' : 'candidate', lineId: best.lineId, index: best.index,
-      reason: confirmed ? 'matched' : 'awaiting_support', segmentStatus: best.status,
+      reason, segmentStatus: best.status,
       diagnostics: {...diagnostics, supportCount: this.support.count, previousSupport,
+        supportMs, referenceProgressMs, progressRatio, textSupported,
         supportResetReason: previousSupport && !consistent ? previousSupport.lineId !== best.lineId ? 'candidate_changed' : 'reference_moved_back' : null},
       progress, completed: confirmed && best.referenceSeconds >= best.end - A.completionSeconds,
       confidence: Math.max(0, 1 - best.error), referenceSeconds: best.referenceSeconds,
       audioEndMs: frame.endMs, audioStartMs: this.live[this.live.length - best.liveLength].endMs - FRAME_MS };
     this.lastPosition = result;
-    if (confirmed) this.lastVerified = result;
+    if (confirmed) {
+      if (!this.lastVerified || this.lastVerified.index !== result.index ||
+        result.referenceSeconds - this.lastVerified.referenceSeconds >= A.forwardProgressMs / 1000) this.positionStartedMs = frame.endMs;
+      this.lastVerified = result;
+    }
     return result;
   }
 }

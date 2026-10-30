@@ -55,6 +55,7 @@ function trackerSnapshot(tracker, currentIndex) {
     correction: {status: tracker.correction.status, candidates: tracker.correction.candidates.slice(0, 3)},
     referenceFence: tracker.referenceFence ? {index: tracker.referenceFence.index, audioMs: tracker.referenceFence.audioMs, decidedAudioMs: tracker.referenceFence.decidedAudioMs} : null,
     referenceProgress: tracker.referenceProgress ? {...tracker.referenceProgress} : null,
+    lastLocated: tracker.lastLocated ? {...tracker.lastLocated} : null,
     ignoreBeforeMs: tracker.ignoreBeforeMs, latestStartMs: tracker.latestStartMs, latestOrder: tracker.latestOrder,
     quietMs: tracker.quietMs, loudMs: tracker.loudMs};
 }

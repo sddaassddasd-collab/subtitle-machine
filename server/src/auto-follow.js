@@ -66,12 +66,13 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     directionSpeechStartedMs: null,
     referenceFence: null,
     referenceProgress: null,
+    lastLocated: null,
   };
 }
 
 // Semi-global edit alignment: all heard characters must be accounted for;
 // the script may have an unheard prefix/suffix. Keep the order of characters.
-function align(heard, lines, from, to) {
+function align(heard, lines, from, to, {local = false} = {}) {
   const script = Array.isArray(lines) ? prepareScript(lines) : lines;
   const start = script.starts[Math.max(0, from)] ?? 0;
   const end = script.starts[Math.min(script.entries.length, to + 1)] ?? start;
@@ -81,16 +82,21 @@ function align(heard, lines, from, to) {
   if (!input.length || !text.length) return [];
   let previous = new Float64Array(text.length + 1);
   let current = new Float64Array(text.length + 1);
+  let previousMatches = local ? new Uint16Array(text.length + 1) : null;
+  let currentMatches = local ? new Uint16Array(text.length + 1) : null;
   for (let i = 1; i <= input.length; i += 1) {
-    current[0] = i;
+    const insertionCost = local && T.localFillers.includes(input[i - 1]) ? T.localInsertionCost : 1;
+    current[0] = previous[0] + insertionCost;
     for (let j = 1; j <= text.length; j += 1) {
-      current[j] = Math.min(
-        previous[j - 1] + (input[i - 1] === text[j - 1] ? 0 : 1),
-        previous[j] + 1,
-        current[j - 1] + 1,
-      );
+      const exact = input[i - 1] === text[j - 1];
+      const diagonal = previous[j - 1] + (exact ? 0 : 1);
+      const insertion = previous[j] + insertionCost, deletion = current[j - 1] + 1;
+      current[j] = Math.min(diagonal, insertion, deletion);
+      if (local) currentMatches[j] = diagonal <= insertion && diagonal <= deletion
+        ? previousMatches[j - 1] + Number(exact) : insertion <= deletion ? previousMatches[j] : currentMatches[j - 1];
     }
     [previous, current] = [current, previous];
+    if (local) { [previousMatches, currentMatches] = [currentMatches, previousMatches]; currentMatches[0] = 0; }
   }
   const byLine = new Map();
   for (let j = 1; j <= text.length; j += 1) {
@@ -98,7 +104,8 @@ function align(heard, lines, from, to) {
     if (text[j - 1] !== input[input.length - 1]) continue;
     const position = positions[j - 1];
     const confidence = Math.max(0, 1 - previous[j] / input.length);
-    const candidate = { ...position, confidence, evidence: input.length, heard };
+    const candidate = { ...position, confidence, evidence: input.length, heard,
+      ...(local ? {matchedCharacters: previousMatches[j], colloquial: true} : {}) };
     const old = byLine.get(position.index);
     if (!old || confidence > old.confidence ||
       (confidence === old.confidence && position.offset < old.offset)) {
@@ -173,7 +180,9 @@ function matchContextualShort(tracker, script, currentIndex, text, event) {
   if (!entry?.text || entry.source.music || entry.length < T.shortMinLength || entry.length > T.shortMaxLength ||
     Math.abs(input.length - entry.length) > 1) return null;
   const {cost, pairs} = traceAlignment(input, Array.from(entry.text), false);
-  if (cost !== T.shortMaxEdits || pairs.length < T.shortMatchedCharacters) return null;
+  const missingShort = entry.length === T.shortMinLength && input.length === T.predictedShortMatchedCharacters &&
+    (predicted || recent) && pairs.length === input.length;
+  if (cost !== T.shortMaxEdits || pairs.length < (missingShort ? T.predictedShortMatchedCharacters : T.shortMatchedCharacters)) return null;
   // A similar nearby phrase cannot be resolved by a one-edit allowance alone.
   for (let index = Math.max(0, currentIndex - T.nearbyBehind); index <= Math.min(script.entries.length - 1, currentIndex + T.nearbyAhead); index++) {
     if (index === currentIndex) continue;
@@ -181,9 +190,43 @@ function matchContextualShort(tracker, script, currentIndex, text, event) {
     if (!other.text || Math.abs(other.length - input.length) > 1) continue;
     if (traceAlignment(input, Array.from(other.text), false).cost <= cost) return null;
   }
-  const confidence = 1 - cost / Math.max(input.length, entry.length);
+  const confidence = Math.max(missingShort ? T.contextualShortConfidence : 0, 1 - cost / Math.max(input.length, entry.length));
   return {index: currentIndex, offset: pairs.at(-1).script + 1, length: entry.length,
     confidence, rank: confidence, evidence: pairs.length, heard: text, contextualShort: true};
+}
+
+// Only a recently established local position permits filler/trailing-word
+// tolerance. Full-script relocation keeps the strict, ordered edit distance.
+function localCandidates(tracker, script, currentIndex, text, event) {
+  const anchor = tracker.lastLocated || tracker.sequence;
+  const predicted = tracker.prediction?.index === currentIndex && event.endMs >= tracker.prediction.onsetMs &&
+    event.endMs - tracker.prediction.onsetMs <= SEQUENCE_TTL_MS;
+  const fresh = anchor?.index === currentIndex && event.endMs >= (anchor.atMs ?? anchor.endMs) &&
+    event.endMs - (anchor.atMs ?? anchor.endMs) <= T.recoveryTtlMs;
+  if (!predicted && !fresh) return [];
+  const ahead = fresh && event.endMs - (anchor.atMs ?? anchor.endMs) >= T.recoveryAfterMs ? T.recoveryAhead : T.catchUpAhead;
+  const matches = [];
+  for (let trailing = 0; trailing <= T.localTrailingCharacters; trailing++) {
+    const heard = trailing ? text.slice(0, -trailing) : text;
+    if (heard.length < T.localMinimumMatches) continue;
+    for (const match of align(heard, script, currentIndex, Math.min(script.entries.length - 1, currentIndex + ahead), {local: true})) {
+      if (match.matchedCharacters < T.localMinimumMatches || match.matchedCharacters / heard.length < T.localMatchedCoverage) continue;
+      const confidence = match.confidence - trailing * T.localTrailingPenalty;
+      if (confidence < T.minimumConfidence) continue;
+      matches.push({...match, confidence, rank: confidence - (trailing ? T.recoveryPenalty : 0), trailingCharacters: trailing});
+    }
+  }
+  return matches;
+}
+
+function canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous) {
+  const anchor = tracker.lastLocated;
+  return Boolean(anchor?.index === currentIndex && !ambiguous && best && !best.trailingCharacters &&
+    best.index > currentIndex + 1 && best.index <= currentIndex + T.recoveryAhead &&
+    event.endMs - anchor.atMs >= T.recoveryAfterMs && event.endMs - anchor.atMs <= T.recoveryTtlMs &&
+    event.startMs >= anchor.atMs && best.confidence >= T.recoveryMinimumConfidence &&
+    best.evidence >= T.recoveryMinimumEvidence &&
+    !script.entries.slice(currentIndex, best.index + 1).some(entry => entry.source.music));
 }
 
 function clearPreparation(tracker) {
@@ -385,6 +428,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
       located: tracker.located, anchor: tracker.anchor, armedIndex: tracker.armedIndex,
       armedAtMs: tracker.armedAtMs, preparedIndex: tracker.preparedIndex,
       directionWait: tracker.directionWait, openingHint: tracker.openingHint,
+      lastLocated: tracker.lastLocated,
     } : {};
     Object.assign(tracker, createTracker({ ignoreBeforeMs }), {
       ...referenceState, streamId: event.streamId, script: tracker.script,
@@ -406,6 +450,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.prediction = null;
     tracker.referenceFence = null;
     tracker.referenceProgress = null;
+    tracker.lastLocated = null;
   }
   tracker.script = script;
   if (event.startMs < tracker.latestStartMs ||
@@ -455,9 +500,16 @@ function followTranscript(tracker, lines, currentIndex, event) {
     script.entries[tracker.preparedIndex].text.startsWith(partialOpening);
   let candidates = opening ? [opening] : rankRecentCandidates(variants, script, currentIndex,
     Math.max(0, currentIndex - T.nearbyBehind), Math.min(lines.length - 1, currentIndex + T.nearbyAhead), expectedIndex);
+  if (!opening) {
+    const byIndex = new Map(candidates.map(candidate => [candidate.index, candidate]));
+    for (const candidate of localCandidates(tracker, script, currentIndex, text, event)) {
+      if (!byIndex.has(candidate.index) || candidate.rank > byIndex.get(candidate.index).rank) byIndex.set(candidate.index, candidate);
+    }
+    candidates = [...byIndex.values()].sort((a, b) => b.rank - a.rank || Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex));
+  }
   let best = candidates[0];
   const short = matchContextualShort(tracker, script, currentIndex, text, event);
-  if (short && (!best || best.confidence <= short.confidence)) {
+  if (short && (!best || best.index === currentIndex || best.confidence <= short.confidence)) {
     candidates = [short, ...candidates.filter(candidate => candidate.index !== currentIndex)];
     best = short;
   }
@@ -465,10 +517,12 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const corrected = correction?.candidates[0];
   const next = script.entries[currentIndex]?.next;
   const localSequential = best && (best.index === currentIndex || best.index === next);
+  const localRecovery = best && canRecoverNearby(tracker, script, currentIndex, best, event,
+    candidates[1] && best.rank - candidates[1].rank < T.minimumMargin);
   // One arbiter owns the display. A confirmed correction can override a local
   // guess, while an ambiguous/pending search cannot block a usable sequence.
   const useCorrection = correction && (
-    (!tracker.sequence && !opening) ||
+    (!tracker.sequence && !opening && !localRecovery && !(localSequential && best.colloquial)) ||
     (correction.accepted && (!localSequential || !best ||
       corrected.confidence > best.confidence ||
       (correction.exactUnique && text !== script.entries[best.index].text)))
@@ -523,7 +577,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     return uncertain('insufficient_opening', '已聽到可能的開頭，等待更多內容確認。');
   }
   if ((ambiguous && !exactUnique) ||
-    (best.evidence < 3 && !expectedShort && !best.openingConfirmed)) {
+    (best.evidence < 3 && !expectedShort && !best.openingConfirmed && !best.contextualShort)) {
     return uncertain(ambiguous ? 'ambiguous_text' : 'insufficient_text_evidence', '有多處相似台詞，等待更多內容確認。');
   }
   // Revisions/finalization of one ASR item must not rewind that item's progress.
@@ -531,11 +585,12 @@ function followTranscript(tracker, lines, currentIndex, event) {
 
   const relocation = best.index !== currentIndex && best.index !== next;
   const caughtUp = relocation && canCatchUp(tracker, script, currentIndex, best, event);
+  const recoveredNearby = relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous);
   if (relocation) {
     if (best.confidence < T.strongConfidence || text.length < T.relocationEvidence || (ambiguous && !exactUnique)) {
       return uncertain('relocation_requirements', '疑似跳詞，正在核對新的位置。');
     }
-    if (!correction?.accepted || corrected.index !== best.index) {
+    if (!recoveredNearby && (!correction?.accepted || corrected.index !== best.index)) {
       return uncertain('correction_pending', '疑似跳詞，等待後續語音確認。');
     }
   }
@@ -554,15 +609,16 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.prediction = null;
   tracker.sequence = { index: best.index, atMs: event.endMs,
     observed: { itemId: event.itemId, text, endMs: event.endMs } };
+  tracker.lastLocated = {index: best.index, atMs: event.endMs};
   if (relocation) tracker.correction.pending = null;
   const entry = script.entries[best.index];
   const tail = entry.tail;
   // Only arm from the actual end of a line, never merely from ASR is_final.
-  const completed = progress === 1 && best.confidence >= T.strongConfidence &&
+  const completed = !best.trailingCharacters && progress === 1 && best.confidence >= T.strongConfidence &&
     best.heard.endsWith(tail) && (best.evidence >= 3 || expectedShort);
   const following = entry.next;
   const nearEnding = progress >= T.nearEndingProgress && entry.length - best.offset <= T.nearEndingRemaining;
-  const canPrepare = (completed || nearEnding) && best.confidence >= T.strongConfidence && following === best.index + 1 &&
+  const canPrepare = !best.trailingCharacters && (completed || nearEnding) && best.confidence >= T.strongConfidence && following === best.index + 1 &&
     !lines[best.index]?.music && !lines[following]?.music;
   tracker.preparedIndex = canPrepare ? following : null;
   tracker.armedIndex = canPrepare && completed ? following : null;
@@ -584,12 +640,13 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.directionWait = null;
   }
   return {
-    index: best.index, candidate: best, progress, armedIndex: tracker.armedIndex,
-    reason: caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short' : best.recovered ? 'suffix_recovery'
+    index: best.index, candidate: best, progress, completed, armedIndex: tracker.armedIndex,
+    reason: recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
+      : best.trailingCharacters ? 'trailing_tolerance' : best.colloquial ? 'local_colloquial' : best.recovered ? 'suffix_recovery'
       : best.openingConfirmed ? 'opening_confirmed' : 'text_matched',
     spans: matchedSpans(best, script),
     status: best.index === currentIndex ? 'verified' : relocation || prediction ? 'corrected' : 'advanced',
-    message: caughtUp ? '已依最新清楚台詞追上附近字幕。' :
+    message: recoveredNearby ? '已依附近明確台詞恢復定位。' : caughtUp ? '已依最新清楚台詞追上附近字幕。' :
       best.contextualShort ? '已依附近順序容許短句一字差異，持續核對句尾。' :
       best.recovered ? '已依最新文字尾段重新定位字幕。' :
       best.openingConfirmed ? '已確認下一格開頭，持續核對後續台詞。' :
@@ -707,6 +764,7 @@ function applyReferencePosition(tracker, lines, index, evidence) {
   tracker.prediction = null;
   tracker.progress = Math.max(sameLine ? tracker.progress : 0, evidence.completed ? 1 : evidence.progress);
   tracker.referenceProgress = {index, progress: tracker.progress, completed: tracker.progress === 1, audioEndMs: evidence.audioEndMs};
+  tracker.lastLocated = {index, atMs: evidence.audioEndMs};
   if (tracker.progress === 1) {
     const anchor = {itemId: `reference-${index}`, text: entry.text, endMs: evidence.audioEndMs, completed: true};
     const following = entry.next;

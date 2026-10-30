@@ -53,11 +53,19 @@ class RecordingRuntime {
     const previous = this.sessions.get(session.id);
     if (previous?.key === key) return;
     this.stop(session.id);
-    const entry = {key, revision: recording.revision, signature: scriptSignature(session), generation: 1, pending: 0, inFlight: 0, currentIndex: session.currentIndex, ready: false, recordingId: recording.id};
+    const entry = {key, revision: recording.revision, signature: scriptSignature(session), generation: 1, pending: 0,
+      inFlight: 0, inFlightAudioMs: 0, queue: [], queuedAudioMs: 0, jobs: new Map(), nextJobId: 1,
+      currentIndex: session.currentIndex, ready: false, recordingId: recording.id};
     this.sessions.set(session.id, entry);
     this.onStatus?.(session.id, {status: 'loading', recordingId: recording.id, name: recording.name});
     try {
-      const segments = validSegments(session, recording).map(segment => ({...segment,
+      let previousDialogue = -1;
+      const predecessors = recordingLines(session, recording).map((line, index) => {
+        const previous = previousDialogue;
+        if (line.type !== 'direction') previousDialogue = index;
+        return previous;
+      });
+      const segments = validSegments(session, recording).map(segment => ({...segment, previousDialogueIndex: predecessors[segment.index],
         start: Math.max(0, toAnalysis(segment.start, recording.featureCalibration)),
         end: Math.min(recording.duration, toAnalysis(segment.end, recording.featureCalibration))})).filter(segment => segment.end > segment.start);
       const byLine = new Map(recording.segments.map(segment => [segment.lineId, segment]));
@@ -74,7 +82,7 @@ class RecordingRuntime {
       const project = (result, current = true) => ({...result,
         ...(Number.isFinite(result.referenceSeconds) ? {referenceSeconds: toPlayback(result.referenceSeconds, recording.featureCalibration)} : {}),
         ...(result.diagnostics ? {diagnostics: {...result.diagnostics,
-          ...(current ? {eligibility: entry.eligibility.slice(entry.currentIndex, entry.currentIndex + A.ahead + 1)} : {}),
+          ...(current ? {eligibility: entry.eligibility.slice(entry.currentIndex, entry.currentIndex + (result.diagnostics.searchAhead || A.ahead) + 1)} : {}),
           candidates: result.diagnostics.candidates.map(candidate => ({...candidate,
             referenceSeconds: toPlayback(candidate.referenceSeconds, recording.featureCalibration)}))}} : {})});
       const worker = new Worker(workerPath); entry.worker = worker;
@@ -82,8 +90,12 @@ class RecordingRuntime {
         if (this.sessions.get(session.id) !== entry) return;
         if (message.type === 'ready') { entry.ready = true; this.onStatus?.(session.id, {status: 'listening', recordingId: recording.id, name: recording.name}); }
         if (message.type === 'result') {
-          entry.inFlight = Math.max(0, entry.inFlight - 1);
-          if (message.generation === entry.generation) entry.pending = Math.max(0, entry.pending - 1);
+          const job = entry.jobs.get(message.jobId);
+          if (job) {
+            entry.jobs.delete(message.jobId); entry.inFlight = entry.jobs.size;
+            entry.inFlightAudioMs = Math.max(0, entry.inFlightAudioMs - job.durationMs);
+            if (job.generation === entry.generation) entry.pending = Math.max(0, entry.pending - job.packetCount);
+          }
           if (message.generation !== entry.generation && message.result) this.onDiagnostic?.(session.id, 'audio_observation', {
             ...project(message.result, false),
             reason: 'generation_changed', generation: message.generation, activeGeneration: entry.generation,
@@ -95,6 +107,7 @@ class RecordingRuntime {
             recordingId: recording.id, revision: entry.revision, generation: entry.generation,
             workerTiming: message.workerTiming,
           });
+          this.scheduleDrain(session.id, entry);
         }
         if (message.type === 'error') this.fail(session.id, entry, message.error);
       });
@@ -112,38 +125,82 @@ class RecordingRuntime {
     entry.ready = false; entry.worker?.terminate(); entry.worker = null;
     this.onStatus?.(sessionId, {status: 'error', recordingId: entry.recordingId, error});
   }
-  position(session, audioMs = 0, {continuous = false, reason = 'reposition'} = {}) {
+  position(session, audioMs = 0, {continuous = false, reason = 'reposition', droppedInputAudioMs = 0} = {}) {
     const entry = this.sessions.get(session.id);
     if (!entry) return;
     const fromIndex = entry.currentIndex;
-    const preserve = entry.ready && continuous && session.currentIndex === fromIndex + 1 && !entry.needsReset &&
+    const preserve = entry.ready && continuous && session.currentIndex === fromIndex + 1 &&
       (!Number.isFinite(entry.lastAudioMs) || (audioMs >= entry.lastAudioMs && audioMs - entry.lastAudioMs <= A.maxAudioGapMs));
     const pending = entry.pending;
     entry.currentIndex = session.currentIndex; entry.generation++; entry.pending = 0;
     entry.fenceMs = audioMs;
     if (!preserve) entry.lastAudioMs = audioMs;
-    entry.worker?.postMessage({type: 'position', generation: entry.generation, currentIndex: session.currentIndex, preserve});
+    const droppedAudioMs = preserve ? 0 : entry.queuedAudioMs + droppedInputAudioMs;
+    if (!preserve) { entry.queue = []; entry.queuedAudioMs = 0; }
+    entry.queue.push({type: 'position', generation: entry.generation, currentIndex: session.currentIndex, preserve});
+    this.scheduleDrain(session.id, entry);
     this.onDiagnostic?.(session.id, preserve ? 'audio_position' : 'audio_reset', {reason, fromIndex,
-      index: session.currentIndex, audioMs, generation: entry.generation, pending, inFlight: entry.inFlight, buffersPreserved: preserve});
+      index: session.currentIndex, audioMs, generation: entry.generation, pending, inFlight: entry.inFlight,
+      queuedAudioMs: entry.queuedAudioMs, inFlightAudioMs: entry.inFlightAudioMs, droppedAudioMs, buffersPreserved: preserve});
+  }
+  hint(session, candidate, audioEndMs) {
+    const entry = this.sessions.get(session.id);
+    if (!entry?.ready || !candidate || candidate.index <= session.currentIndex || candidate.index > session.currentIndex + A.recoveryMaxAhead ||
+      candidate.confidence < A.hintMinimumConfidence || candidate.evidence < A.hintMinimumEvidence || !Number.isFinite(audioEndMs)) return;
+    entry.queue.push({type: 'search', generation: entry.generation,
+      hint: {index: candidate.index, confidence: candidate.confidence, expiresAudioMs: audioEndMs + A.hintTtlMs}});
+    this.scheduleDrain(session.id, entry);
+  }
+  scheduleDrain(sessionId, entry) {
+    if (entry.drainScheduled || !entry.worker) return;
+    entry.drainScheduled = setImmediate(() => {
+      entry.drainScheduled = null;
+      if (this.sessions.get(sessionId) === entry) this.drain(entry);
+    });
+  }
+  drain(entry) {
+    while (entry.worker && entry.queue.length) {
+      const first = entry.queue[0];
+      if (first.type !== 'audio') { entry.worker.postMessage(entry.queue.shift()); continue; }
+      if (entry.inFlight >= A.maxInFlight) break;
+      const packets = [entry.queue.shift()];
+      let durationMs = first.durationMs;
+      while (entry.queue[0]?.type === 'audio' && entry.queue[0].generation === first.generation &&
+        entry.queue[0].currentIndex === first.currentIndex && durationMs + entry.queue[0].durationMs <= A.maxBatchMs) {
+        const packet = entry.queue.shift(); packets.push(packet); durationMs += packet.durationMs;
+      }
+      const jobId = entry.nextJobId++;
+      entry.queuedAudioMs = Math.max(0, entry.queuedAudioMs - durationMs);
+      entry.jobs.set(jobId, {generation: first.generation, durationMs, packetCount: packets.length});
+      entry.inFlight = entry.jobs.size; entry.inFlightAudioMs += durationMs;
+      entry.worker.postMessage({type: 'audio', pcm: Buffer.concat(packets.map(packet => packet.pcm)),
+        audioEndMs: packets.at(-1).audioEndMs, currentIndex: first.currentIndex, generation: first.generation,
+        sequence: packets.at(-1).sequence, queuedAt: first.queuedAt, jobId});
+    }
   }
   feed(session, stream, audio, audioEndMs) {
     if (!session.activeRecordingId || session.subtitleControlMode !== 'auto') return;
     void this.ensure(session);
     const entry = this.sessions.get(session.id);
     if (!entry?.ready || !entry.worker || entry.currentIndex !== session.currentIndex) return;
-    // A slow matcher must never build an unbounded queue or delay the ASR lane.
-    if (entry.inFlight >= A.maxInFlight) { entry.needsReset = true; return; }
-    if (entry.needsReset) {
-      if (entry.inFlight >= A.drainBelow) return;
-      this.position(session, audioEndMs, {reason: 'worker_backpressure'}); entry.needsReset = false;
-    } else if (Number.isFinite(entry.lastAudioMs) && (audioEndMs - entry.lastAudioMs > A.maxAudioGapMs || audioEndMs <= entry.lastAudioMs))
-      this.position(session, audioEndMs, {reason: audioEndMs <= entry.lastAudioMs ? 'audio_clock_reset' : 'audio_gap'});
-    entry.lastAudioMs = audioEndMs;
     const pcm = Buffer.from(audio, 'base64');
     if (!pcm.length || pcm.length % 2) return;
-    entry.pending++; entry.inFlight++;
-    entry.worker.postMessage({type: 'audio', pcm, audioEndMs, currentIndex: session.currentIndex,
+    const durationMs = pcm.length / 2 / A.sourceSampleRate * 1000;
+    if (durationMs > A.maxBufferedAudioMs) {
+      this.position(session, audioEndMs, {reason: 'worker_backpressure', droppedInputAudioMs: durationMs});
+      return;
+    }
+    // A short arrival burst is coalesced without losing PCM. Only a genuine
+    // time backlog drops buffered audio and resets the matching window.
+    if (Number.isFinite(entry.lastAudioMs) && (audioEndMs - entry.lastAudioMs > A.maxAudioGapMs || audioEndMs <= entry.lastAudioMs))
+      this.position(session, audioEndMs - durationMs, {reason: audioEndMs <= entry.lastAudioMs ? 'audio_clock_reset' : 'audio_gap'});
+    if (entry.inFlightAudioMs + entry.queuedAudioMs + durationMs > A.maxBufferedAudioMs)
+      this.position(session, audioEndMs - durationMs, {reason: 'worker_backpressure'});
+    entry.lastAudioMs = audioEndMs;
+    entry.pending++; entry.queuedAudioMs += durationMs;
+    entry.queue.push({type: 'audio', pcm, audioEndMs, durationMs, currentIndex: session.currentIndex,
       generation: entry.generation, sequence: stream.lastCaptureSequence, queuedAt: Date.now()});
+    this.scheduleDrain(session.id, entry);
   }
   accepts(sessionId, result) {
     const entry = this.sessions.get(sessionId);
@@ -161,7 +218,9 @@ class RecordingRuntime {
   invalidate(sessionId) { this.stop(sessionId); }
   stop(sessionId) {
     const entry = this.sessions.get(sessionId);
-    this.sessions.delete(sessionId); entry?.worker?.terminate();
+    this.sessions.delete(sessionId);
+    if (entry?.drainScheduled) clearImmediate(entry.drainScheduled);
+    entry?.worker?.terminate();
   }
   dispose() { for (const sessionId of this.sessions.keys()) this.stop(sessionId); }
 }

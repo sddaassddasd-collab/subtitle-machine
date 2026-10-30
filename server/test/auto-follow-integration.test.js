@@ -286,3 +286,39 @@ test('cross-cue transcript confirms the displayed prediction before moving, whil
   context.applyCurrentIndexChange(session, 3, {manualOverride: true});
   assert.equal(positions.at(-1).continuous, false);
 });
+
+test('automatic positions send a small patch and preserve full updates for older control clients', () => {
+  const {context, session} = fixture();
+  const sent = [], patchRoom = `control-position:${session.id}`, room = `control:${session.id}`;
+  const rooms = new Map([[room, new Set(['modern'])], [patchRoom, new Set(['modern'])]]);
+  context.io.sockets = {adapter: {rooms}};
+  context.io.to = room => ({except(excluded) { this.excluded = excluded; return this; },
+    emit(event, payload) { sent.push({room, event, payload, excluded: this.excluded}); }});
+  let fullBuilds = 0;
+  context.getControlPayload = () => {fullBuilds++; return {lines: Array(1000).fill({text: 'script'})};};
+  context.broadcastControlPosition(session);
+  assert.equal(fullBuilds, 0);
+  assert.equal(sent[0].event, 'control:position');
+  assert.equal(sent[0].payload.currentIndex, 0);
+  assert.equal(sent[0].payload.lines, undefined);
+  assert.equal(sent[0].payload.session, undefined);
+  rooms.get(room).add('legacy');
+  sent.length = 0;
+  context.broadcastControlPosition(session);
+  assert.equal(fullBuilds, 1);
+  assert.equal(sent[0].event, 'control:update');
+  assert.equal(sent[0].excluded, patchRoom);
+  assert.equal(sent[1].event, 'control:position');
+});
+
+test('a trimmed tail can locate a cue without exporting it as a confirmed ending', () => {
+  const {context, session} = fixture();
+  session.lines = ['最有效的方法就是使用電擊治療。', '如果他沒寫出快樂的歌，', '就電一次，'].map(text => ({text}));
+  const confirmations = [];
+  context.autoFollowHistory.confirm = (_id, index, _source, data) => confirmations.push({index, ...data});
+  context.handleAutoFollowTranscript('test', session.lines[0].text, {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
+  context.handleAutoFollowTranscript('test', '只要他沒寫出快樂的歌我', {streamId: 's', itemId: 'b', startMs: 1100, endMs: 2500});
+  assert.equal(session.currentIndex, 1);
+  assert.equal(confirmations.at(-1).completed, false);
+  assert.equal(context.getPublicAutoFollowState(session).armedIndex, null);
+});
