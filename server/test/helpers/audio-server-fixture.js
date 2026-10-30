@@ -76,7 +76,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         };
       }
       return {
-        server, session, stream, user, sent, connect, send: connect(), cueChanges,
+        server, session, stream, user, sent, connect, send: connect(), cueChanges, history: autoFollowHistory,
         counts: () => ({ structures: structureCalls, lines: lineCalls }),
         transcript: (text, options) => handleAutoFollowTranscript(session.id, text, options),
         state: () => getPublicAutoFollowState(session),

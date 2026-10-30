@@ -8,9 +8,12 @@ const statuses = {confirmed: '已確認', pending: '已進入、未確認', manu
 const eventNames = {run_start: '開始紀錄', run_end: '結束紀錄', interruption: '紀錄中斷', logging_gap: '紀錄不完整',
   cue_enter: '進入字幕格', cue_confirm: '字幕確認', display_ack: '顯示回報', diagnostic: '定位診斷',
   cue_heard: '文字涵蓋字幕', audio_reset: '重設聲音累積', audio_position: '更新聲音搜尋位置',
+  decision_trace: '決策前後紀錄', transcript_revision: '辨識修訂', acoustic_summary: '聲音比對摘要',
+  capture_summary: '收音品質摘要', stream_configuration: '辨識與程式設定', problem_mark: '問題標記',
   capture_status: '收音狀態', capture_audio: '收到現場音訊', control_mode: '跟戲模式切換'}
 const captureNames = {ready: '辨識連線就緒', connecting: '辨識連線中', paused: '已暫停', error: '發生錯誤'}
-const time = at => at == null ? '—' : new Date(at).toLocaleString('zh-TW', {hour12: false})
+const time = at => at == null ? '—' : new Date(at).toLocaleString('zh-TW', {timeZone: 'Asia/Taipei', hour12: false,
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3})
 const labels = confirmations => [...new Set(confirmations.map(item => sources[item.source] || item.source))].join('、') || '尚無確認'
 async function request(url, options = {}) {
   const response = await fetch(url, {cache: 'no-store', ...options})
@@ -34,6 +37,7 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
+  const [problemNote, setProblemNote] = useState('')
   const root = `/api/session/${encodeURIComponent(sessionId)}/follow-history`
 
   useEffect(() => {
@@ -92,6 +96,15 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
       <button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={() => setRefresh(value => value + 1)}>重新整理</button>
       {busy && <span role="status">{busy}…</span>}
     </div>
+    <div className="follow-history-actions">
+      <input value={problemNote} maxLength={300} onChange={event => setProblemNote(event.target.value)} placeholder="問題註記（選填）" aria-label="問題註記"/>
+      <button type="button" className="subtle-button" disabled={Boolean(busy) || !current} onClick={() => {
+        void act('標記中', async () => {
+          await request(`${root}/${selectedId}/mark`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({note: problemNote})})
+          setProblemNote('')
+        })
+      }}>標記問題並保留前後紀錄</button>
+    </div>
     <label className="follow-history-select">排練紀錄
       <select value={selectedId} onChange={event => { setSelectedId(event.target.value); setPage(0); setContextId('all') }}>
         {!runs.length && <option value="">尚無紀錄</option>}
@@ -116,6 +129,8 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
         }}>刪除這次紀錄</button>
       </div>
       <p className="follow-history-note">未進入不等於辨識失敗，可能尚未演到、人工跳過或收音中斷。起始位置不計自動觸發；「已確認」也不保證配對正確。顯示回報不代表觀眾實際看見。</p>
+      <p className="follow-history-note">畫面時間為台北時間，精確至毫秒；CSV 同時提供 UTC、台北時間及距紀錄開始秒數。辨識修訂、詞時間、決策前後與版本設定請匯出完整 JSON。標記問題不會改變字幕位置。</p>
+      {report.diagnostics && <p>辨識修訂 {report.diagnostics.transcriptRevisions} 次 · 決策紀錄 {report.diagnostics.traceSamples} 筆 · 問題標記 {report.diagnostics.problemMarks} 次</p>}
       <label>篩選 <select value={filter} onChange={event => { setFilter(event.target.value); setPage(0) }}>
         <option value="all">全部字幕格</option><option value="unentered">未進入／被跨過</option>
         <option value="pending">曾進入但未確認</option><option value="manual">有人工介入</option>
@@ -129,19 +144,19 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
         </select>
       </label>}
       <div className="follow-history-table-wrap"><table className="follow-history-table">
-        <thead><tr><th>字幕格／版本</th><th>台詞</th><th>錄音片段</th><th>最近進入方式</th><th>後續確認</th><th>狀態／歷程</th></tr></thead>
+        <thead><tr><th>字幕格／版本</th><th>台詞</th><th>錄音片段</th><th>最近進入方式／觸發時間（台北）</th><th>後續確認</th><th>狀態／歷程</th></tr></thead>
         <tbody>{rows.slice(safePage * 40, (safePage + 1) * 40).map(row => {
           const last = row.visits.at(-1)
           return <tr key={`${row.contextId}:${row.index}`}>
             <td>{row.index + 1}<small>{row.cellName || '場次'}<br/>版本 {report.contexts.findIndex(context => context.contextId === row.contextId) + 1}</small></td>
             <td>{row.text}</td>
             <td>{row.reference.usable ? row.reference.status === 'review' ? '參與比對（待確認）' : '可用' : '無可用片段'}</td>
-            <td>{sources[last?.source] || '無進入紀錄'}</td>
+            <td>{sources[last?.source] || '無進入紀錄'}{last && <small>{time(last.triggeredAt ?? last.enteredAt)}</small>}</td>
             <td>{last ? labels(last.confirmations) : '—'}</td>
             <td>{statuses[row.status]}{row.heard?.length > 0 && <small>辨識文字曾涵蓋此格（不代表已顯示）</small>}{row.visits.length > 0 && <details><summary>共 {row.entryCount} 次</summary>
               {row.visits.map((visit, index) => <div className="follow-history-visit" key={visit.id}>
                 <strong>第 {index + 1} 次 · {sources[visit.source]} · {statuses[visit.status]}</strong>
-                <div>{time(visit.enteredAt)}{visit.audioMs != null && ` · 收音 ${(visit.audioMs / 1000).toFixed(2)} 秒`}</div>
+                <div>觸發：{time(visit.triggeredAt ?? visit.enteredAt)}{visit.elapsedMs != null && ` · 本次 +${(visit.elapsedMs / 1000).toFixed(3)} 秒`}{visit.audioMs != null && ` · 收音 ${(visit.audioMs / 1000).toFixed(3)} 秒`}</div>
                 {visit.confirmations.map(item => <div key={item.id}>{sources[item.source]}{item.completed ? '（句尾確認）' : ''}
                   {item.segmentStatus === 'review' && '（使用待確認錄音片段）'}
                   {Number.isFinite(item.referenceSeconds) && ` · 參考 ${item.referenceSeconds.toFixed(2)} 秒`}
@@ -165,6 +180,8 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
           {event.status && ` · ${captureNames[event.status] || event.status}`}
           {event.mode && ` · ${event.mode === 'auto' ? '自動跟戲' : '手動跟戲'}`}
           {event.message && ` · ${event.message}`}{event.text && ` · ${event.text}`}
+          {event.reason && ` · ${event.reason}`}{event.note && ` · ${event.note}`}
+          {event.type === 'decision_trace' && ` · ${event.sampleCount ?? event.samples.length} 筆分析結果`}
           {event.acoustic && ` · 聲音門檻 ${Math.round(event.acoustic.minimumConfidence * 100)}% · 連續命中 ${event.acoustic.supportCount}／${event.acoustic.requiredSupport}`}
           {event.workerTiming && ` · 比對排隊 ${Math.round(event.workerTiming.queueMs)} ms／處理 ${Math.round(event.workerTiming.processingMs)} ms`}
         </li>)}</ol>

@@ -33,6 +33,7 @@ function fixture({waitPermission=false,waitResume=false}={}) {
     releaseMicrophoneCapture:()=>{attempts.current++;capture.current={};},
     autoStartedTranscriptionRef:{current:false},projectorStartedTranscriptionRef:{current:false},
     micDiagnosticsUpdateRef:{current:0},DEFAULT_TRANSCRIPTION_PROVIDER:'deepgram',DEFAULT_TRANSCRIPTION_MODEL:'test',
+    APP_BUILD:{commit:'capture-test',builtAt:null},
   });
   vm.runInContext(source.slice(start,end)+'\nglobalThis.begin=handleStartLiveTranscription;',context);
   return {begin:()=>context.begin({autoFollow:true}),attempts,capture,track,contexts,calls,statuses,

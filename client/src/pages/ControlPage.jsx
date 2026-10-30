@@ -8,6 +8,8 @@ import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
 import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import AutoFollowHistory from '../components/AutoFollowHistory'
+import {APP_BUILD} from '../lib/build-info'
+import {signalMetrics} from '../lib/audio-signal'
 import {
   areProjectorLayoutsEqual,
   normalizeProjectorDisplayMode,
@@ -362,20 +364,6 @@ const downsampleFloat32 = (input, inputSampleRate, outputSampleRate) => {
   }
 
   return output
-}
-
-const computeSignalLevel = (input) => {
-  if (!input?.length) {
-    return 0
-  }
-
-  let sumSquares = 0
-  for (let index = 0; index < input.length; index += 1) {
-    const sample = input[index]
-    sumSquares += sample * sample
-  }
-
-  return Math.min(1, Math.sqrt(sumSquares / input.length))
 }
 
 const float32ToInt16 = (input) => {
@@ -2604,7 +2592,7 @@ const ControlPage = () => {
         const socket = socketRef.current
         if (!socket?.connected || !sessionId) return
         socket.emit('transcription:audio', {
-          ...packet, stale: Date.now() - packet.capturedAt > 250,
+          ...packet, stale: Date.now() - packet.capturedAt > 250, clientAgeMs: Math.max(0, Date.now() - packet.capturedAt),
         }, (ack) => {
           const acknowledgedAt = Date.now()
           if (ack?.ok === true && acknowledgedAt - lastAckDiagnosticAt < 120) return
@@ -2644,7 +2632,8 @@ const ControlPage = () => {
         const audio = int16ToBase64(pcm16)
         if (!audio) return
         const durationMs = (pcm16.length / TARGET_SAMPLE_RATE) * 1000
-        const level = computeSignalLevel(downsampled)
+        const metrics = signalMetrics(downsampled)
+        const level = metrics.level
         const now = Date.now()
         if (now - micDiagnosticsUpdateRef.current > 120) {
           micDiagnosticsUpdateRef.current = now
@@ -2663,6 +2652,7 @@ const ControlPage = () => {
           level,
           sequence: nextAudioSequence,
           capturedAt: now,
+          quality: {peak: metrics.peak, clippedSamples: metrics.clippedSamples, samples: metrics.samples},
         }
         nextAudioSequence += 1
         if (transcriptionReady) {
@@ -2785,6 +2775,9 @@ const ControlPage = () => {
         resumeListenersCleanup,
       }
 
+      const trackSettings = stream.getAudioTracks()[0]?.getSettings?.() || {}
+      const captureSettings = Object.fromEntries(['sampleRate', 'channelCount', 'echoCancellation', 'noiseSuppression', 'autoGainControl']
+        .filter(key => key in trackSettings).map(key => [key, trackSettings[key]]))
       const startResult = await new Promise((resolve, reject) => {
         socketRef.current
           .timeout(10000)
@@ -2794,6 +2787,8 @@ const ControlPage = () => {
               sessionId,
               apiKey,
               autoFollow,
+              clientInfo: {build: APP_BUILD, userAgent: navigator.userAgent,
+                audio: {contextSampleRate: audioContext.sampleRate, ...captureSettings}},
               provider: transcription.provider || DEFAULT_TRANSCRIPTION_PROVIDER,
               model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
               language: selectedSourceLanguage,

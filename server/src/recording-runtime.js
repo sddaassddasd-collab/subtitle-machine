@@ -1,7 +1,8 @@
 const {Worker} = require('node:worker_threads');
 const path = require('node:path');
 const {getRecordingAsset} = require('./persistence');
-const {validSegments} = require('./recordings');
+const {validSegments, recordingLines, segmentEligibility} = require('./recordings');
+const {ACOUSTIC_SETTINGS: A} = require('./follow-settings');
 const {toAnalysis, toPlayback} = require('./recording-timing');
 const {getFollowingLines, isRecordingCompatible} = require('./performance-language');
 const workerPath = path.join(__dirname, 'recording-worker.js');
@@ -59,10 +60,23 @@ class RecordingRuntime {
       const segments = validSegments(session, recording).map(segment => ({...segment,
         start: Math.max(0, toAnalysis(segment.start, recording.featureCalibration)),
         end: Math.min(recording.duration, toAnalysis(segment.end, recording.featureCalibration))})).filter(segment => segment.end > segment.start);
+      const byLine = new Map(recording.segments.map(segment => [segment.lineId, segment]));
+      const indexed = new Set(segments.map(segment => segment.index));
+      entry.eligibility = recordingLines(session, recording).map((line, index) => {
+        const segment = byLine.get(line.id), reason = segmentEligibility(segment, line, recording);
+        return {index, lineId: line.id, status: segment?.status || 'missing', start: segment?.start ?? null, end: segment?.end ?? null,
+          reason: reason === 'usable' && !indexed.has(index) ? 'outside_feature_clock' : reason};
+      });
       if (!segments.length) throw new Error('尚無有效時間範圍的錄音片段，沿用文字跟戲');
       const asset = await this.loadAsset(session.id, recording.id);
       if (this.sessions.get(session.id) !== entry) return;
       if (!asset?.features) throw new Error('錄音特徵不存在，請重新匯入錄音');
+      const project = (result, current = true) => ({...result,
+        ...(Number.isFinite(result.referenceSeconds) ? {referenceSeconds: toPlayback(result.referenceSeconds, recording.featureCalibration)} : {}),
+        ...(result.diagnostics ? {diagnostics: {...result.diagnostics,
+          ...(current ? {eligibility: entry.eligibility.slice(entry.currentIndex, entry.currentIndex + A.ahead + 1)} : {}),
+          candidates: result.diagnostics.candidates.map(candidate => ({...candidate,
+            referenceSeconds: toPlayback(candidate.referenceSeconds, recording.featureCalibration)}))}} : {})});
       const worker = new Worker(workerPath); entry.worker = worker;
       worker.on('message', message => {
         if (this.sessions.get(session.id) !== entry) return;
@@ -70,12 +84,14 @@ class RecordingRuntime {
         if (message.type === 'result') {
           entry.inFlight = Math.max(0, entry.inFlight - 1);
           if (message.generation === entry.generation) entry.pending = Math.max(0, entry.pending - 1);
+          if (message.generation !== entry.generation && message.result) this.onDiagnostic?.(session.id, 'audio_observation', {
+            ...project(message.result, false),
+            reason: 'generation_changed', generation: message.generation, activeGeneration: entry.generation,
+            workerTiming: message.workerTiming});
+          if (message.generation === entry.generation && message.observation) this.onDiagnostic?.(session.id, 'audio_observation', {
+            ...message.observation, generation: entry.generation, workerTiming: message.workerTiming});
           if (message.generation === entry.generation && message.result) this.onResult?.(session.id, {
-            ...message.result,
-            ...(Number.isFinite(message.result.referenceSeconds) ? {referenceSeconds: toPlayback(message.result.referenceSeconds, recording.featureCalibration)} : {}),
-            ...(message.result.diagnostics ? {diagnostics: {...message.result.diagnostics,
-              candidates: message.result.diagnostics.candidates.map(candidate => ({...candidate,
-                referenceSeconds: toPlayback(candidate.referenceSeconds, recording.featureCalibration)}))}} : {}),
+            ...project(message.result),
             recordingId: recording.id, revision: entry.revision, generation: entry.generation,
             workerTiming: message.workerTiming,
           });
@@ -101,7 +117,7 @@ class RecordingRuntime {
     if (!entry) return;
     const fromIndex = entry.currentIndex;
     const preserve = entry.ready && continuous && session.currentIndex === fromIndex + 1 && !entry.needsReset &&
-      (!Number.isFinite(entry.lastAudioMs) || (audioMs >= entry.lastAudioMs && audioMs - entry.lastAudioMs <= 150));
+      (!Number.isFinite(entry.lastAudioMs) || (audioMs >= entry.lastAudioMs && audioMs - entry.lastAudioMs <= A.maxAudioGapMs));
     const pending = entry.pending;
     entry.currentIndex = session.currentIndex; entry.generation++; entry.pending = 0;
     entry.fenceMs = audioMs;
@@ -116,11 +132,11 @@ class RecordingRuntime {
     const entry = this.sessions.get(session.id);
     if (!entry?.ready || !entry.worker || entry.currentIndex !== session.currentIndex) return;
     // A slow matcher must never build an unbounded queue or delay the ASR lane.
-    if (entry.inFlight >= 12) { entry.needsReset = true; return; }
+    if (entry.inFlight >= A.maxInFlight) { entry.needsReset = true; return; }
     if (entry.needsReset) {
-      if (entry.inFlight >= 4) return;
+      if (entry.inFlight >= A.drainBelow) return;
       this.position(session, audioEndMs, {reason: 'worker_backpressure'}); entry.needsReset = false;
-    } else if (Number.isFinite(entry.lastAudioMs) && (audioEndMs - entry.lastAudioMs > 150 || audioEndMs <= entry.lastAudioMs))
+    } else if (Number.isFinite(entry.lastAudioMs) && (audioEndMs - entry.lastAudioMs > A.maxAudioGapMs || audioEndMs <= entry.lastAudioMs))
       this.position(session, audioEndMs, {reason: audioEndMs <= entry.lastAudioMs ? 'audio_clock_reset' : 'audio_gap'});
     entry.lastAudioMs = audioEndMs;
     const pcm = Buffer.from(audio, 'base64');

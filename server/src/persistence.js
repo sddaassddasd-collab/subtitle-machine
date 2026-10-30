@@ -711,15 +711,32 @@ async function listFollowRuns(sessionId, limit = 20, offset = 0) {
       ORDER BY started_at DESC,run_id DESC LIMIT ? OFFSET ?`).all(sessionId, limit, offset);
   return rows.map(followData);
 }
-async function getFollowRun(sessionId, runId) {
+async function getFollowRun(sessionId, runId, {summary = false} = {}) {
   const row = PERSISTENCE_BACKEND === 'postgres'
     ? (await (await getPostgresPool()).query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2', [sessionId, runId])).rows[0]
     : getSqliteDatabase().prepare('SELECT data FROM follow_runs WHERE session_id=? AND run_id=?').get(sessionId, runId);
   if (!row) return null;
+  const run = followData(row), boundary = Number.isSafeInteger(run.nextSequence) ? run.nextSequence : 2147483647;
+  const details = ['decision_trace', 'transcript_revision', 'acoustic_summary', 'capture_summary'];
+  // The panel needs all cue visits, but only recent diagnostic previews. Avoid
+  // reading hours of word arrays and trace samples on its five-second refresh.
+  const filter = summary ? " AND event_type NOT IN ('decision_trace','transcript_revision','acoustic_summary','capture_summary')" : '';
   const rows = PERSISTENCE_BACKEND === 'postgres'
-    ? (await (await getPostgresPool()).query('SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2 ORDER BY sequence', [sessionId, runId])).rows
-    : getSqliteDatabase().prepare('SELECT data FROM follow_events WHERE session_id=? AND run_id=? ORDER BY sequence').all(sessionId, runId);
-  return {run: followData(row), events: rows.map(followData)};
+    ? (await (await getPostgresPool()).query(`SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2 AND sequence<$3${filter} ORDER BY sequence`, [sessionId, runId, boundary])).rows
+    : getSqliteDatabase().prepare(`SELECT data FROM follow_events WHERE session_id=? AND run_id=? AND sequence<?${filter} ORDER BY sequence`).all(sessionId, runId, boundary);
+  const events = rows.map(followData);
+  if (!summary) return {run, events};
+  const recent = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query('SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2 AND sequence<$3 ORDER BY sequence DESC LIMIT 80', [sessionId, runId, boundary])).rows
+    : getSqliteDatabase().prepare('SELECT data FROM follow_events WHERE session_id=? AND run_id=? AND sequence<? ORDER BY sequence DESC LIMIT 80').all(sessionId, runId, boundary);
+  for (const row of recent) {
+    const event = followData(row);
+    if (!details.includes(event.type)) continue;
+    const {samples, words: _words, before: _before, after: _after, normalizedText: _normalized, ...preview} = event;
+    events.push({...preview, ...(samples ? {sampleCount: samples.length, samples: []} : {})});
+  }
+  events.sort((a, b) => a.sequence - b.sequence);
+  return {run, events, scope: 'summary'};
 }
 async function deleteFollowHistory(sessionId, runId = null) {
   if (PERSISTENCE_BACKEND === 'postgres') {

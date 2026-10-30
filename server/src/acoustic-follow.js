@@ -1,14 +1,15 @@
 // Small, deterministic acoustic frontend and bounded online subsequence DTW.
 // No ASR request runs on this path. Heavy work is executed in a worker thread.
-const SAMPLE_RATE = 16000;
-const FRAME_MS = 40;
+const {ACOUSTIC_SETTINGS: A} = require('./follow-settings');
+const SAMPLE_RATE = A.sampleRate;
+const FRAME_MS = A.frameMs;
 const HOP = SAMPLE_RATE * FRAME_MS / 1000;
-const WINDOW = 400;
-const FFT_SIZE = 512;
-const DIMENSIONS = 24;
-const VERSION = 1;
-const MIN_CONFIDENCE = 0.80;
-const MIN_MARGIN = 0.035;
+const WINDOW = A.windowSamples;
+const FFT_SIZE = A.fftSize;
+const DIMENSIONS = A.dimensions;
+const VERSION = A.featureVersion;
+const MIN_CONFIDENCE = A.minimumConfidence;
+const MIN_MARGIN = A.minimumMargin;
 const windowWeights = Float32Array.from({length: WINDOW}, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (WINDOW - 1)));
 const mel = hz => 2595 * Math.log10(1 + hz / 700);
 const hz = value => 700 * (10 ** (value / 2595) - 1);
@@ -129,7 +130,7 @@ class StreamingFeatures {
 
 function distance(a, matrix, frame) {
   const offset = frame * (DIMENSIONS + 1);
-  if (matrix[offset + DIMENSIONS] < 0.0008) return 0.9;
+  if (matrix[offset + DIMENSIONS] < A.referenceQuietRms) return 0.9;
   let dot = 0;
   for (let i = 0; i < DIMENSIONS; i++) dot += a[i] * matrix[offset + i];
   return Math.max(0, 1 - dot);
@@ -144,7 +145,7 @@ function subsequenceDtw(live, reference, first, last) {
     current.fill(Infinity);
     for (let j = 1; j <= length; j++) {
       const cost = distance(live[i].feature, reference.matrix, first + j - 1);
-      const diagonal = previous[j - 1], vertical = previous[j] + 0.025, horizontal = current[j - 1] + 0.025;
+      const diagonal = previous[j - 1], vertical = previous[j] + A.dtwPenalty, horizontal = current[j - 1] + A.dtwPenalty;
       if (diagonal <= vertical && diagonal <= horizontal) {
         current[j] = diagonal + cost; nextStarts[j] = starts[j - 1];
       } else if (vertical <= horizontal) {
@@ -156,7 +157,7 @@ function subsequenceDtw(live, reference, first, last) {
   let best = null;
   for (let j = 1; j <= length; j++) {
     const span = j - starts[j];
-    if (span < live.length * 0.35 || span > live.length * 2.8) continue;
+    if (span < live.length * A.minSpanRatio || span > live.length * A.maxSpanRatio) continue;
     const error = previous[j] / live.length;
     if (!best || error < best.error) best = {error, frame: first + j - 1, startFrame: first + starts[j]};
   }
@@ -169,7 +170,7 @@ class AcousticFollower {
     this.segments = segments;
     this.reset(0);
   }
-  reset(currentIndex) { this.currentIndex = currentIndex; this.live = []; this.frames = 0; this.quietFrames = 0; this.support = null; this.lastPosition = null; this.lastVerified = null; }
+  reset(currentIndex) { this.currentIndex = currentIndex; this.live = []; this.frames = 0; this.quietFrames = 0; this.support = null; this.lastPosition = null; this.lastVerified = null; this.observation = null; }
   advance(currentIndex) {
     if (currentIndex !== this.currentIndex + 1) { this.reset(currentIndex); return; }
     this.currentIndex = currentIndex;
@@ -180,13 +181,20 @@ class AcousticFollower {
   }
   feed(frame, currentIndex) {
     if (currentIndex !== this.currentIndex) this.reset(currentIndex);
-    if (frame.rms < 0.001) {
+    if (frame.rms < A.quietRms) {
+      const interrupted = this.support;
+      const previousLiveFrames = this.live.length;
       this.frames = 0;
       this.support = null;
-      if (++this.quietFrames >= 3) this.live = [];
+      if (++this.quietFrames >= A.quietClearFrames) this.live = [];
+      if (interrupted || (previousLiveFrames && this.quietFrames === A.quietClearFrames)) this.observation = {
+        reason: interrupted ? 'quiet' : 'quiet_window_cleared', audioEndMs: frame.endMs,
+        diagnostics: {compared: false, liveFrames: this.live.length, supportCount: 0,
+          previousLiveFrames, previousSupport: interrupted ? {...interrupted} : null,
+          supportResetReason: interrupted ? 'quiet' : null, rms: frame.rms, candidates: []}};
       const last = this.lastVerified, segment = this.segments.find(s => s.lineId === last?.lineId);
-      if (this.quietFrames >= 3 && last && !last.completed && last.progress >= 0.9 && last.confidence >= 0.9 &&
-        segment && segment.end - last.referenceSeconds <= 0.121) {
+      if (this.quietFrames >= A.quietClearFrames && last && !last.completed && last.progress >= A.quietCompletionProgress && last.confidence >= A.quietCompletionConfidence &&
+        segment && segment.end - last.referenceSeconds <= A.quietCompletionSeconds) {
         this.lastVerified = {...last, progress: 1, completed: true, referenceSeconds: segment.end, audioEndMs: frame.endMs};
         return this.lastVerified;
       }
@@ -194,21 +202,28 @@ class AcousticFollower {
     }
     this.quietFrames = 0;
     this.live.push(frame);
-    if (this.live.length > 40) this.live.shift();
-    if (++this.frames % 4 !== 0 || this.live.length < 12) return null;
+    if (this.live.length > A.maxLiveFrames) this.live.shift();
+    if (++this.frames % A.comparisonEveryFrames !== 0) return null;
+    if (this.live.length < A.minLiveFrames) {
+      this.observation = {reason: 'warming_up', audioEndMs: frame.endMs,
+        diagnostics: {compared: false, liveFrames: this.live.length, requiredLiveFrames: A.minLiveFrames, supportCount: 0, candidates: []}};
+      return null;
+    }
     const candidates = [];
+    const ranges = [];
     let eligibleSegments = 0;
     for (const segment of this.segments) {
-      if (segment.index < currentIndex || segment.index > currentIndex + 4) continue;
+      if (segment.index < currentIndex || segment.index > currentIndex + A.ahead) continue;
       eligibleSegments++;
       const first = Math.max(0, Math.floor(segment.start * 1000 / FRAME_MS));
       const last = Math.min(this.reference.count, Math.ceil(segment.end * 1000 / FRAME_MS));
       // Limit search to a moving 12-second window for unusually long cues.
       const center = this.lastPosition?.lineId === segment.lineId ? this.lastPosition.referenceSeconds * 1000 / FRAME_MS : first;
-      const from = Math.max(first, Math.floor(center - 75));
-      const to = Math.min(last, Math.max(from + 300, Math.ceil(center + 200)));
+      const from = Math.max(first, Math.floor(center - A.searchBehindFrames));
+      const to = Math.min(last, Math.max(from + A.searchMinFrames, Math.ceil(center + A.searchAheadFrames)));
+      ranges.push({index: segment.index, fromFrame: from, toFrame: to, referenceFrames: Math.max(0, to - from)});
       let match = null;
-      for (const length of [12, 24, 40].filter(length => length <= this.live.length)) {
+      for (const length of A.liveLengths.filter(length => length <= this.live.length)) {
         const candidate = subsequenceDtw(this.live.slice(-length), this.reference, from, to);
         if (candidate && (!match || candidate.error < match.error)) match = {...candidate, liveLength: length};
       }
@@ -218,8 +233,9 @@ class AcousticFollower {
     const best = candidates[0], runner = candidates[1];
     const confidence = best ? Math.max(0, 1 - best.error) : 0;
     const margin = runner ? runner.error - best.error : null;
-    const requiredSupport = best?.status === 'review' || confidence < 0.84 ? 3 : 2;
-    const diagnostics = {minimumConfidence: MIN_CONFIDENCE, minimumMargin: MIN_MARGIN, margin,
+    const requiredSupport = best?.status === 'review' || confidence < A.strongConfidence ? A.provisionalSupport : A.normalSupport;
+    const previousSupport = this.support ? {...this.support} : null;
+    const diagnostics = {compared: true, minimumConfidence: MIN_CONFIDENCE, minimumMargin: MIN_MARGIN, margin, ranges,
       liveFrames: this.live.length, eligibleSegments, candidateCount: candidates.length, requiredSupport,
       candidates: candidates.slice(0, 3).map(candidate => ({index: candidate.index, lineId: candidate.lineId,
         segmentStatus: candidate.status, confidence: Math.max(0, 1 - candidate.error), referenceSeconds: candidate.referenceSeconds}))};
@@ -229,16 +245,18 @@ class AcousticFollower {
       return {status: 'searching', reason: !best ? eligibleSegments ? 'no_acoustic_match' : 'no_usable_segments'
         : confidence < MIN_CONFIDENCE ? 'below_threshold' : 'ambiguous', index: best?.index,
         segmentStatus: best?.status, referenceSeconds: best?.referenceSeconds,
-        confidence, audioEndMs: frame.endMs, diagnostics: {...diagnostics, supportCount: 0}};
+        confidence, audioEndMs: frame.endMs, diagnostics: {...diagnostics, supportCount: 0, previousSupport,
+          supportResetReason: previousSupport ? !best ? 'no_acoustic_match' : confidence < MIN_CONFIDENCE ? 'below_threshold' : 'ambiguous' : null}};
     }
-    const consistent = this.support?.lineId === best.lineId && best.frame >= this.support.frame - 2;
+    const consistent = this.support?.lineId === best.lineId && best.frame >= this.support.frame - A.backwardToleranceFrames;
     this.support = {lineId: best.lineId, frame: best.frame, count: consistent ? this.support.count + 1 : 1};
     const progress = Math.min(1, Math.max(0, (best.referenceSeconds - best.start) / (best.end - best.start)));
     const confirmed = this.support.count >= requiredSupport;
     const result = {status: confirmed ? 'verified' : 'candidate', lineId: best.lineId, index: best.index,
       reason: confirmed ? 'matched' : 'awaiting_support', segmentStatus: best.status,
-      diagnostics: {...diagnostics, supportCount: this.support.count},
-      progress, completed: confirmed && best.referenceSeconds >= best.end - 0.08,
+      diagnostics: {...diagnostics, supportCount: this.support.count, previousSupport,
+        supportResetReason: previousSupport && !consistent ? previousSupport.lineId !== best.lineId ? 'candidate_changed' : 'reference_moved_back' : null},
+      progress, completed: confirmed && best.referenceSeconds >= best.end - A.completionSeconds,
       confidence: Math.max(0, 1 - best.error), referenceSeconds: best.referenceSeconds,
       audioEndMs: frame.endMs, audioStartMs: this.live[this.live.length - best.liveLength].endMs - FRAME_MS };
     this.lastPosition = result;

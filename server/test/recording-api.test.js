@@ -788,6 +788,33 @@ test('follow history records real text/manual transitions, exports every visit a
   assert.equal((await request(f, `${root}/${id}`)).status, 404);
 });
 
+test('diagnostic exports preserve every text revision and words; authorized markers keep cue position unchanged', async t => {
+  const f = fixture();
+  t.after(async () => { await f.history.end(f.session.id); f.dispose(); });
+  f.session.subtitleControlMode = 'auto';
+  const id = await f.history.start(f.session), root = `/api/session/${f.session.id}/follow-history/${id}`;
+  const options = {streamId: 'recording-live', itemId: 'diagnostic-item', startMs: 0, endMs: 1000,
+    words: [{word: '我們今晚開始演出', start: 0, end: 1, confidence: 0.92}], confidence: 0.92, order: 1};
+  f.transcript('我們今晚開始演出', options);
+  f.transcript('我們今晚開始演出', options);
+  f.transcript('我們今晚開始演出', {...options, isFinal: true});
+  const index = f.session.currentIndex;
+  assert.equal((await request(f, root + '/mark', {method: 'POST', body: {note: '核對此處'}})).status, 200);
+  assert.equal(f.session.currentIndex, index);
+  assert.equal((await request(f, root + '/mark', {method: 'POST', cookie: ''})).status, 401);
+  const report = (await request(f, root + '?format=json')).json();
+  const revisions = report.events.filter(event => event.type === 'transcript_revision');
+  assert.equal(revisions.length, 3);
+  assert.equal(revisions[1].reason, 'duplicate_interim'); assert.equal(revisions[1].ignored, true);
+  assert.equal(revisions[2].isFinal, true); assert.equal(revisions[2].words[0].endMs, 1000);
+  assert.equal(revisions[0].before.currentIndex, index);
+  assert.ok(report.contexts[0].environment.settings.acoustic);
+  const csv = await request(f, root + '?format=csv');
+  assert.match(csv.bytes.toString(), /觸發時間台北UTC\+08/);
+  await f.history.end(f.session.id);
+  assert.equal((await request(f, root + '/mark', {method: 'POST'})).status, 409);
+});
+
 test('token transport failures and malformed responses remain actionable and never expose raw provider errors',async t=>{
   for(const [name,transport,expected,status] of [
     ['timeout',async()=>{throw Object.assign(new Error('test-only-not-a-real-key'),{name:'TimeoutError'});},/逾時/,504],

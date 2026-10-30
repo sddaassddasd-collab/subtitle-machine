@@ -6,9 +6,17 @@ const STATUS_LABELS = Object.freeze({confirmed: '已確認', pending: '已進入
   unentered: '未進入，原因待查', skipped_auto: '自動跨過，未進入', skipped_manual: '人工跨過，未進入'});
 const sourceLabel = source => SOURCE_LABELS[source] || source || '';
 
-function historyReport({run, events}) {
+function historyReport({run, events, scope}) {
   const contexts = new Map(), visits = new Map(), decisions = new Map(), rows = [];
+  const diagnosticTotals = {transcriptRevisions: 0, traceSamples: 0, acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
+  const windows = new Set(), streams = [];
   for (const event of events) {
+    if (event.type === 'transcript_revision') diagnosticTotals.transcriptRevisions++;
+    if (event.type === 'decision_trace') { windows.add(event.windowId); diagnosticTotals.traceSamples += event.samples.length; }
+    if (event.type === 'acoustic_summary') diagnosticTotals.acousticSummaries++;
+    if (event.type === 'capture_summary') diagnosticTotals.captureSummaries++;
+    if (event.type === 'problem_mark') diagnosticTotals.problemMarks++;
+    if (event.type === 'stream_configuration') streams.push(event);
     if (event.type === 'context') {
       const context = {...event, rows: event.lines.map(line => ({contextId: event.contextId,
         cellId: event.cellId, cellName: event.cellName, language: event.language, ...line,
@@ -18,6 +26,9 @@ function historyReport({run, events}) {
     const context = contexts.get(event.contextId), row = context?.rows[event.index];
     if (event.type === 'cue_enter' && row) {
       const visit = {id: event.visitId, enteredAt: event.at, sequence: event.sequence, source: event.source,
+        triggeredAt: event.triggeredAt ?? event.decisionTiming?.decidedAt ?? event.at,
+        elapsedMs: event.elapsedMs ?? Math.max(0, (event.decisionTiming?.decidedAt ?? event.at) - run.startedAt),
+        timestampSource: event.triggeredAt != null || event.decisionTiming?.decidedAt != null ? 'trigger' : 'legacy_event',
         audioMs: event.audioMs ?? null, streamId: event.streamId || null,
         decisionId: event.decisionId || null, confirmations: [], displayAcks: [],
         decisionTiming: event.decisionTiming || null,
@@ -61,7 +72,8 @@ function historyReport({run, events}) {
     if (stoppedNormally && event.type === 'capture_status' && event.status === 'ready') hasGaps = true;
     if (event.type === 'capture_audio') seenAudio = true;
   }
-  return {schemaVersion: 1, run, rows,
+  return {schemaVersion: 2, run, rows, streams,
+    diagnostics: scope === 'summary' && run.diagnostics ? run.diagnostics : {...diagnosticTotals, traceWindows: windows.size},
     contexts: [...contexts.values()].map(({rows: _rows, ...context}) => context),
     totals: {cueVersions: rows.filter(row => row.type !== 'direction').length,
       entered: rows.filter(row => row.type !== 'direction' && row.entryCount).length,
@@ -72,6 +84,9 @@ function historyReport({run, events}) {
       '起始位置與場次／版本切換不計為自動觸發；同格重演保留每一次經過。',
       '切格事件逐次保存；確認依來源與辨識片段保留首次及句尾確認，診斷訊息每通道每五秒最多一筆。',
       '文字涵蓋代表該段辨識能對應此格，不代表該格曾顯示；跨格不會回放已過時的字幕。待確認錄音也可參與聲音比對，狀態仍保留待確認。',
+      '觸發時間為伺服器決策時間（毫秒）；recordedAt 為記錄處理時間。舊事件缺少觸發時間時沿用當時的事件時間。',
+      '辨識修訂逐次保存；決策暫存保留觸發前 5 秒及後 3 秒，重疊樣本不重複保存，單窗最長 10 秒、暫存最多 160 個分析結果。',
+      '聲音及收音摘要每五秒彙整，匯出與暫停時保存尚未滿五秒的摘要；不包含現場原始音訊。超長文字與詞陣列有上限並標示截短。',
       '音訊時間以收音串流為單位，串流重啟會歸零；請連同串流 ID、事件序號及伺服器時間核對。',
       '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。'],
     events};
@@ -84,10 +99,14 @@ function csvCell(value) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 const iso = at => Number.isFinite(at) ? new Date(at).toISOString() : '';
+const taipeiFormatter = new Intl.DateTimeFormat('sv-SE', {timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hour12: false});
+const taipei = at => Number.isFinite(at) ? taipeiFormatter.format(at) : '';
 function historyCsv(report) {
   const records = [['排練ID', '節目', '開始時間UTC', '劇本版本ID', '場次', '演出語言', '字幕格ID', '字幕格', '台詞',
     '參考片段可用', '參考起點秒', '參考終點秒', '經過次序', '進入方式', '進入時間UTC', '收音串流ID', '現場音訊毫秒',
-    '確認來源', '句尾確認', '結果', '跨過來源', '辨識文字', '錄音定位秒', '顯示回報', '紀錄含中斷', '文字涵蓋', '涵蓋辨識文字']];
+    '確認來源', '句尾確認', '結果', '跨過來源', '辨識文字', '錄音定位秒', '顯示回報', '紀錄含中斷', '文字涵蓋', '涵蓋辨識文字',
+    '觸發時間UTC', '觸發時間台北UTC+08', '距紀錄開始秒', '觸發時間來源', '觸發證據音訊毫秒']];
   for (const row of report.rows) for (const [index, visit] of (row.visits.length ? row.visits : [null]).entries()) {
     const confirmations = visit?.confirmations || [];
     records.push([report.run.id, report.run.name, iso(report.run.startedAt), row.contextId, row.cellName || row.cellId,
@@ -99,7 +118,10 @@ function historyCsv(report) {
       confirmations.map(item => item.text).filter(Boolean).join(' / '),
       confirmations.filter(item => Number.isFinite(item.referenceSeconds)).at(-1)?.referenceSeconds,
       visit?.displayAcks.map(item => `${item.role}: ${item.ms}ms`).join('、'), report.hasGaps ? '是' : '否',
-      row.heard?.length ? '是（不代表已顯示）' : '', [...new Set((row.heard || []).map(item => item.heard))].join(' / ')]);
+      row.heard?.length ? '是（不代表已顯示）' : '', [...new Set((row.heard || []).map(item => item.heard))].join(' / '),
+      iso(visit?.triggeredAt), taipei(visit?.triggeredAt), visit ? (visit.elapsedMs / 1000).toFixed(3) : '',
+      visit ? visit.timestampSource === 'trigger' ? '觸發決策' : '舊版事件時間' : '',
+      visit?.decisionTiming?.transcriptAudioEndMs ?? visit?.decisionTiming?.audioEndMs ?? visit?.decisionTiming?.onsetAudioMs ?? visit?.decisionTiming?.silenceAudioMs]);
   }
   return '\uFEFF' + records.map(record => record.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

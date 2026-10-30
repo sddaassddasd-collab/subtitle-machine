@@ -2,7 +2,9 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { createTracker, prepareScript, followTranscript, followAudio } = require('../src/auto-follow');
+const { createTracker, prepareScript, normalizeText, followTranscript, followAudio } = require('../src/auto-follow');
+const {trackerSnapshot} = require('../src/follow-trace');
+const {ACOUSTIC_SETTINGS} = require('../src/follow-settings');
 const performanceLanguage = require('../src/performance-language');
 const captionMode = require('../src/caption-mode');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
@@ -22,7 +24,7 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, crypto: require('node:crypto'), createTracker, prepareScript, followTranscript, followAudio,
+    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, trackerSnapshot, ACOUSTIC_SETTINGS,
     ...performanceLanguage, ...captionMode, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
@@ -32,7 +34,7 @@ function fixture(mode = 'auto') {
     LINE_TYPES: { DIRECTION: 'direction', DIALOGUE: 'dialogue' },
     sessions: new Map([[session.id, session]]),
     autoFollowStates: new Map(), transcriptionStreams: new Map(),
-    autoFollowHistory: {enter() {}, confirm() {}, heard() {}, sync() {}, diagnostic() {}, event() {}, status: () => ({})},
+    autoFollowHistory: {enter() {}, confirm() {}, heard() {}, observe() {}, revision() {}, sync() {}, diagnostic() {}, event() {}, status: () => ({})},
     referenceRuntime: {position() {}, invalidate() {}},
     getSession: () => session, getSessionRecord: () => session,
     ensureSessionLines: s => s.lines, sanitizeLineText: t => String(t).trim(),

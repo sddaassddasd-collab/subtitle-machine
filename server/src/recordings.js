@@ -3,10 +3,19 @@ const {playbackDuration} = require('./recording-timing');
 const {normalizePerformanceLanguage, getFollowingLines, describeFollowingScript, isRecordingCompatible} = require('./performance-language');
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_RECORDINGS = 5;
-const isUsableSegment = (segment, line, recording) => Boolean(line && line.type !== 'direction' &&
-  ['auto', 'manual', 'review'].includes(segment.status) && segment.textHash === hashText(line) &&
-  Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.start >= 0 && segment.end > segment.start &&
-  (!recording || segment.end <= playbackDuration(recording)));
+const {ACOUSTIC_SETTINGS} = require('./follow-settings');
+function segmentEligibility(segment, line, recording) {
+  if (!line) return 'line_missing';
+  if (line.type === 'direction') return 'direction';
+  if (!segment) return 'segment_missing';
+  if (!ACOUSTIC_SETTINGS.allowedStatuses.includes(segment.status)) return `status_${segment.status || 'missing'}`;
+  if (segment.textHash !== hashText(line)) return 'text_changed';
+  if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end)) return 'time_missing';
+  if (segment.start < 0 || segment.end <= segment.start) return 'invalid_range';
+  if (recording && segment.end > playbackDuration(recording)) return 'outside_recording';
+  return 'usable';
+}
+const isUsableSegment = (segment, line, recording) => segmentEligibility(segment, line, recording) === 'usable';
 
 function normalizeRecordings(session) {
   if (!Array.isArray(session.recordings)) session.recordings = [];
@@ -85,5 +94,5 @@ function validateSegmentEdit(recording, line, body) {
     status: line.type === 'direction' ? 'direction' : 'manual'};
 }
 
-module.exports = {MAX_FILE_BYTES, MAX_RECORDINGS, hashText, isUsableSegment,
+module.exports = {MAX_FILE_BYTES, MAX_RECORDINGS, hashText, isUsableSegment, segmentEligibility,
   normalizeRecordings, recordingLines, refreshMappings, validSegments, publicRecording, alignSegments, validateSegmentEdit};

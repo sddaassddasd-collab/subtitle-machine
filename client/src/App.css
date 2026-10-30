@@ -1504,6 +1504,7 @@ textarea.script-line-text.editing {
 .follow-history p { font-size: 0.85rem; line-height: 1.6; }
 .follow-history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0.65rem 0; }
 .follow-history-actions button { min-height: 2.4rem; }
+.follow-history-actions input { min-width: 12rem; flex: 1; padding: 0.55rem; color: #f8fafc; background: #111827; border: 1px solid #64748b; border-radius: 0.4rem; }
 .follow-history-export { display: inline-flex; align-items: center; padding: 0.55rem 0.8rem; min-height: 2.4rem; box-sizing: border-box; text-decoration: none; border: 1px solid #64748b; border-radius: 6px; color: #e2e8f0; }
 .follow-history-select { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .follow-history select { max-width: 100%; min-height: 2.4rem; padding: 0.35rem; background: #1e293b; color: #e2e8f0; border: 1px solid #64748b; border-radius: 5px; }

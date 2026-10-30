@@ -8,6 +8,31 @@ const packet = (fixture, sequence) => ({
   sessionId: fixture.session.id, audio, sequence, durationMs: 20, level: 0.001,
 });
 
+test('enabled diagnostics retain revisions and bounded traces without writing a database event for every PCM packet', async t => {
+  const fixture = createFixture(); t.after(() => fixture.dispose());
+  const history = fixture.history, events = [];
+  let clock = 1760000000000;
+  history.now = () => clock;
+  history.store = {getOpenFollowRun: async () => null,
+    saveFollowHistory: async (_run, batch) => { events.push(...batch); }};
+  await history.start(fixture.session);
+  const started = performance.now();
+  for (let sequence = 1; sequence <= 3000; sequence++) {
+    clock += 20;
+    assert.equal(fixture.send(packet(fixture, sequence)).ok, true);
+    if (sequence % 100 === 0) fixture.transcript(fixture.session.lines[0].text, {
+      streamId: 'diagnostic-load', itemId: `item-${sequence}`, startMs: sequence * 20 - 1000, endMs: sequence * 20, isFinal: true,
+    });
+  }
+  await history.end(fixture.session.id);
+  assert.deepEqual(fixture.counts(), {structures: 0, lines: 0});
+  assert.equal(events.filter(event => event.type === 'transcript_revision').length, 30);
+  assert.equal(events.filter(event => event.type === 'capture_summary').reduce((count, event) => count + event.packets, 0), 3000);
+  assert.ok(events.length < 350, `${events.length} events for 3000 PCM packets`);
+  assert.ok(history.entry(fixture.session.id).trace.ring.length <= 160);
+  t.diagnostic(`60 seconds / 1000 cues / diagnostics enabled: ${(performance.now() - started).toFixed(1)} ms, ${events.length} saved events`);
+});
+
 for (const provider of ['deepgram', 'openai']) {
   test(`${provider}: 30 seconds of PCM uses no per-packet script normalization`, t => {
     const fixture = createFixture();

@@ -22,11 +22,13 @@ parentPort.on('message', message => {
       else { frontend.reset(); follower.reset(message.currentIndex); }
     } else if (message.type === 'audio' && follower && generation === message.generation) {
       const startedAt = Date.now(), started = performance.now();
-      let result = null;
+      let result = null, observation = null;
       for (const frame of frontend.push(bytes(message.pcm), message.audioEndMs)) {
+        const before = follower.observation;
         result = follower.feed(frame, message.currentIndex) || result;
+        if (follower.observation !== before) observation = follower.observation;
       }
-      parentPort.postMessage({type: 'result', generation, sequence: message.sequence, result,
+      parentPort.postMessage({type: 'result', generation, sequence: message.sequence, result, observation,
         workerTiming: {queueMs: Math.max(0, startedAt - message.queuedAt) || 0, processingMs: performance.now() - started}});
     }
   } catch (error) { parentPort.postMessage({type: 'error', error: error.message}); }
