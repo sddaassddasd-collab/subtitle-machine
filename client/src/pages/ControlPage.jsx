@@ -5400,7 +5400,7 @@ const ControlPage = () => {
               </span>
             </div>
             </ControlSection>
-<ControlSection panel="recordings" activePanel={activePanel} title="彩排錄音與音訊跟戲" defaultOpen>
+<ControlSection panel="recordings" activePanel={activePanel} title="彩排錄音與比對診斷" defaultOpen>
               <RecordingsPanel sessionId={sessionId} cellId={selectedCellId} lines={lines}
                 referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active} visible={activePanel === 'recordings'}
                 performanceLanguage={transcription.language || 'zh-TW'} sourceLanguages={transcription.sourceLanguages}

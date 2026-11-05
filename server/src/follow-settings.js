@@ -14,6 +14,9 @@ const TEXT_SETTINGS = Object.freeze({
   recoveryConfidence: 0.9, recoveryPenalty: 0.04, recoveryLengths: Object.freeze([24, 16, 10, 6]),
   contextBonus: 0.04, contextConfidence: 0.85, expectationBonus: 0.025,
   openingMinEvidence: 2, sequenceOpeningMinEvidence: 3, nearOpeningMaxEvidence: 12,
+  pathWidth: 4, pathTtlMs: 12000, pathMinimumEvidence: 3, pathMinimumSteps: 2,
+  pathMaximumStep: 2, pathSkipPenalty: 0.025, pathRetention: 0.7,
+  phoneticCost: 0.35, phoneticMinimumMatches: 4,
   normalization: 'NFKC/opencc-cn-twp/remove-parentheses-punctuation',
 });
 const ONSET_SETTINGS = Object.freeze({
@@ -22,6 +25,7 @@ const ONSET_SETTINGS = Object.freeze({
   directionSilenceMs: 3000, maximumGapMs: 100,
 });
 const ACOUSTIC_SETTINGS = Object.freeze({
+  decisionMode: 'diagnostic',
   minimumConfidence: 0.80, minimumMargin: 0.035, strongConfidence: 0.84,
   normalSupport: 2, provisionalSupport: 3, allowedStatuses: Object.freeze(['auto', 'manual', 'review']),
   ahead: 4, minLiveFrames: 12, maxLiveFrames: 60, comparisonEveryFrames: 4,
@@ -45,7 +49,7 @@ const DIAGNOSTIC_SETTINGS = Object.freeze({
   maxPendingEvents: 5000, maxPendingBytes: 8 * 1024 * 1024, flushMs: 250,
 });
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 4, onset: 1, acoustic: 4, diagnostics: 2}),
+  versions: Object.freeze({text: 5, onset: 1, acoustic: 4, diagnostics: 3}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
 });
 module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, FOLLOW_SETTINGS};

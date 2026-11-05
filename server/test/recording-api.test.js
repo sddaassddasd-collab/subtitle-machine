@@ -226,7 +226,7 @@ test('text can advance immediately; delayed audio for the same/older cue cannot 
   await persistence.deleteRecordingAssets(f.session.id);
 });
 
-test('review-only recording can activate and its provisional source is retained in accepted acoustic history', async t => {
+test('review-only recording participates in diagnostics without confirming or preparing a cue', async t => {
   const f = fixture();
   t.after(async () => { await f.history.end(f.session.id); f.dispose(); await persistence.deleteRecordingAssets(f.session.id); });
   const recording = await importRecording(f), root = `/api/session/${f.session.id}/recordings`;
@@ -247,8 +247,9 @@ test('review-only recording can activate and its provisional source is retained 
   const report = (await request(f, `/api/session/${f.session.id}/follow-history/${historyId}`)).json();
   assert.equal(report.rows[0].reference.usable, true);
   assert.equal(report.rows[0].reference.status, 'review');
-  assert.equal(report.rows[0].visits[0].confirmations[0].segmentStatus, 'review');
-  assert.equal(report.rows[0].visits[0].confirmations[0].acoustic.supportCount, 3);
+  assert.equal(report.rows[0].visits[0].confirmations.length, 0);
+  assert.equal(f.state().referenceAudio.status, 'diagnostic');
+  assert.equal(f.state().armedIndex, null);
   assert.equal(recording.segments[0].status, 'review', 'participation does not approve a segment');
   recording.segments.forEach(segment => { segment.end = null; });
   f.session.activeRecordingId = null;
@@ -256,7 +257,7 @@ test('review-only recording can activate and its provisional source is retained 
   assert.equal(invalid.status, 400);
 });
 
-test('real acoustic worker can lead cue changes while ASR stream remains active',async t=>{
+test('real acoustic worker records diagnostics without changing cues while ASR remains active',async t=>{
   const f=fixture();t.after(()=>f.dispose());const r=await importRecording(f);f.session.subtitleControlMode='auto';
   const historyId = await f.history.start(f.session);
   t.after(() => f.history.end(f.session.id));
@@ -268,11 +269,13 @@ test('real acoustic worker can lead cue changes while ASR stream remains active'
     assert.equal(reply.ok,true,JSON.stringify(reply));
     await new Promise(resolve=>setTimeout(resolve,3));
   }
-  await waitFor(()=>f.session.currentIndex===2);
-  assert.equal(f.state().lastDecision.source,'audio');assert.equal(f.viewer().text,'可是我答應過你');
+  await waitFor(()=>f.state().referenceAudio?.status === 'diagnostic');
+  assert.equal(f.session.currentIndex, 0);
+  assert.equal(f.state().lastDecision, null);
+  assert.equal(f.state().armedIndex, null);
   const traced = (await request(f, `/api/session/${f.session.id}/follow-history/${historyId}`)).json();
-  assert.equal(traced.rows[2].visits[0].source, 'audio');
-  assert.equal(traced.rows[2].visits[0].confirmations[0].source, 'audio');
+  assert.equal(traced.rows[2].visits.length, 0);
+  assert.ok(f.state().referenceAudio.diagnostics);
   assert.equal(traced.rows[2].reference.usable, true);
   assert.equal(f.stream.ready,true);assert.equal(f.stream.closing,false);
   await persistence.deleteRecordingAssets(f.session.id,r.id);
@@ -848,5 +851,5 @@ test('the controller refuses an acoustic skip over dialogue without a fresh text
   f.audioResult({...result, diagnostics: {...result.diagnostics, textHint: {index: 2, confidence: 0.9, expiresAudioMs: 1900}}});
   assert.equal(f.session.currentIndex, 0, 'expired text evidence cannot authorize a jump');
   f.audioResult({...result, diagnostics: {...result.diagnostics, textHint: {index: 2, confidence: 0.9, expiresAudioMs: 3000}}});
-  assert.equal(f.session.currentIndex, 2);
+  assert.equal(f.session.currentIndex, 0, 'diagnostic mode never applies even text-supported acoustic results');
 });

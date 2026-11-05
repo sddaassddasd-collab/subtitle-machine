@@ -14,6 +14,7 @@ const OpenCC = require('opencc-js');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition } = require('./auto-follow');
 const {trackerSnapshot, clientMetadata} = require('./follow-trace');
 const {ACOUSTIC_SETTINGS} = require('./follow-settings');
+const {scriptKeyterms, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
@@ -7845,6 +7846,10 @@ function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
   }
   stream.autoFollowAudioMs = (stream.autoFollowAudioMs || 0) + durationMs;
   if (stream?.provider === 'deepgram') {
+    const session = getSessionRecord(stream.sessionId);
+    if (session)
+      refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? getFollowingLines(session) : [], session.currentIndex,
+        (status, data) => autoFollowHistory.event(session.id, 'keyterms_update', {status, ...data, ...followHistoryClock(session.id)}));
     sendDeepgramAudioChunk(stream, audio, durationMs, level);
     return;
   }
@@ -9224,7 +9229,13 @@ function handleReferenceAudioResult(sessionId, result) {
     ambiguous: '多個錄音片段聲音相近，暫不採用', awaiting_support: '聲音候選尚待連續命中確認',
     jump_requires_text: '跨多格的聲音候選仍需文字佐證', insufficient_audio_window: '正在累積較完整的聲音片段',
     insufficient_audio_progress: '聲音候選尚未形成連續時間進度', matched: '聲音比對已確認'})[result.reason] || '';
-  updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name, message }});
+  updateAutoFollowState(sessionId, {referenceAudio: { ...result, name: recording.name,
+    decisionMode: ACOUSTIC_SETTINGS.decisionMode,
+    ...(ACOUSTIC_SETTINGS.decisionMode === 'diagnostic' ? {status: 'diagnostic', message: '參考錄音頻譜比對僅供診斷，不參與換格或起音準備。'} : {message}) }});
+  if (ACOUSTIC_SETTINGS.decisionMode === 'diagnostic') {
+    recordReferenceObservation(sessionId, result, result.status === 'verified' ? 'diagnostic_only' : result.reason || result.status, false);
+    maybeBroadcastAutoFollowDiagnostics(sessionId); return;
+  }
   if (result.status !== 'verified') {
     recordReferenceObservation(sessionId, result, result.reason || result.status, false);
     autoFollowHistory.diagnostic(sessionId, 'audio', result.reason || result.status, {...followHistoryClock(sessionId),
@@ -9363,7 +9374,9 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     candidate: result.candidate ? {index: result.candidate.index, confidence: result.candidate.confidence,
       offset: result.candidate.offset, length: result.candidate.length, evidence: result.candidate.evidence,
       contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true,
-      colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0} : null});
+      colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0,
+      phonetic: result.candidate.phonetic === true, pathConfirmed: result.candidate.pathConfirmed === true,
+      pathSteps: result.candidate.pathSteps || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
     return;
@@ -11968,6 +11981,10 @@ function startDeepgramTranscription({
   if (selectedSpeakerRecognitionEnabled) {
     query.set('diarize_model', 'latest');
   }
+  const followSession = getSessionRecord(sessionId);
+  const initialKeyterms = followSession?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+    ? scriptKeyterms(getFollowingLines(followSession), followSession.currentIndex, selectedContext) : [];
+  for (const term of initialKeyterms) query.append('keyterm', term);
   const socket = new WebSocket(
     `wss://api.deepgram.com/v1/listen?${query.toString()}`,
     { headers: { Authorization: `Token ${apiKey}` } },
@@ -11988,6 +12005,7 @@ function startDeepgramTranscription({
     socket,
     model: DEEPGRAM_MODEL,
     language: selectedLanguage,
+    scriptKeyterms: {terms: initialKeyterms, pending: null, checkedAt: 0, disabled: false},
     transcriptionContext: selectedContext,
     semanticSegmentationEnabled: true,
     dualChannelEnabled: false,
@@ -12044,6 +12062,7 @@ function startDeepgramTranscription({
       transcriptionContext: stream.transcriptionContext?.slice(0, 2000) || '', contextTruncated: (stream.transcriptionContext?.length || 0) > 2000,
       providerSettings: {semanticSegmentationEnabled: stream.semanticSegmentationEnabled, dualChannelEnabled: stream.dualChannelEnabled,
         speakerRecognitionEnabled: stream.speakerRecognitionEnabled,
+        keyterms: initialKeyterms, acousticDecisionMode: ACOUSTIC_SETTINGS.decisionMode,
         query: Object.fromEntries(query)}});
   }
   queueRequestedLiveTranslations(
@@ -12115,6 +12134,8 @@ function startDeepgramTranscription({
     } catch (_error) {
       return;
     }
+    if (acknowledgeKeyterms(stream, event, (status, data) => autoFollowHistory.event(sessionId,
+      'keyterms_update', {status, ...data, ...followHistoryClock(sessionId)}))) return;
     if (event?.type === 'Error') {
       const message =
         sanitizeLineText(event.description || event.message || '') ||

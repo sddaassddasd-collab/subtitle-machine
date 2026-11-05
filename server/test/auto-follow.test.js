@@ -871,3 +871,33 @@ test('a one-character future opening does not hide a completed nearby cue with a
   assert.equal(result.completed, false, 'trimmed trailing words must not invent a complete boundary');
   assert.equal(s.tracker.armedIndex, null);
 });
+
+test('a repeated current suffix cannot relocate to a later exact short line', () => {
+  const s = show(['問他能夠為這次的慶典做什麼', '舞者說', '我會創作最美的舞蹈給人民看', '國王再次問商人', '能為這次的慶典做什麼']);
+  s.transcript('問他能夠為這次的慶典', {endMs: 1000});
+  const result = s.transcript('能為這次的慶典做什麼', {itemId: 'b', startMs: 1000, endMs: 2000, isFinal: true});
+  assert.equal(result.index, 0);
+  assert.equal(s.index(), 0);
+});
+
+test('local phone tolerance recovers homophones with literal anchors and never arms an onset', () => {
+  const s = show(['國王開始宣布新的命令', '而沒辦法離開隔離所', '大家都保持沉默']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  const result = s.transcript('而沒辦法離開隔利索', {itemId: 'b', startMs: 1100, endMs: 2500});
+  assert.equal(result.index, 1);
+  assert.equal(result.reason, 'local_phonetic');
+  assert.equal(result.completed, false);
+  assert.equal(s.tracker.armedIndex, null);
+  assert.equal(show(['完全不同的內容', '而沒辦法離開隔離所']).transcript('而沒辦法離開隔利索').index, undefined);
+});
+
+test('ordered short cue observations recover a stalled position without a long single utterance', () => {
+  const s = show(['這是我們原本停留的台詞', '中間沒有辨識到的內容', '另一句漏掉的話', '你們的論點', '既是對的', '又是錯的', '因為大家都沒有根據現在的情境']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  const first = s.transcript('你們的論點', {itemId: 'b', startMs: 32000, endMs: 33000});
+  assert.equal(first.index, undefined);
+  const second = s.transcript('既是對的', {itemId: 'c', startMs: 33000, endMs: 34000});
+  assert.equal(second.reason, 'path_recovery');
+  assert.equal(second.index, 4);
+  assert.ok(second.candidate.pathSteps >= 2);
+});

@@ -183,7 +183,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const handleSave = () => act('保存中…', async () => {
     await mutation(`/${selectedId}/segments/${encodeURIComponent(lineId)}`, {method: 'PUT',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({start: Number(start), end: Number(end)})})
-    setNotice('片段範圍已保存，可用於音訊跟戲')
+    setNotice('片段範圍已保存，可用於試聽與比對診斷')
   })
   const playClip = () => {
     const from = Number(start), to = Number(end)
@@ -214,7 +214,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
   const lineIndex = lines.findIndex(line => line.id === lineId)
 
   return <div className="recordings-panel">
-    <p>匯入彩排錄音後自動按字幕格切段。試聽校正後，按「使用此錄音跟戲」啟用音訊與文字並行判斷；文字先確認也會立即換格。</p>
+    <p>匯入彩排錄音後自動按字幕格切段，可試聽校正。錄音頻譜比對目前僅供診斷，不觸發換格；現場以辨識文字與劇本位置追蹤跟戲。</p>
     <label className="recording-select">匯入錄音的語言
       <select value={importLanguage} disabled={Boolean(busy)} onChange={event => setImportLanguage(event.target.value)}>
         <option value="performance">依演出語言（{languageName(performanceLanguage)}）</option>
@@ -280,7 +280,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
             (activeId !== selectedId && (!(recording.usableCount ?? recording.mappedCount) || !compatible))}
             onClick={() => act('切換中…', () => mutation('/active', {method: 'PUT', headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({recordingId: activeId === selectedId ? null : selectedId})}))}>
-            {activeId === selectedId ? '停用音訊跟戲' : '使用此錄音跟戲'}
+            {activeId === selectedId ? '停用錄音診斷' : '使用此錄音診斷'}
           </button>
           <button type="button" className="subtle-button" disabled={Boolean(busy) || processing}
             onClick={() => {
@@ -302,10 +302,10 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         </div>
         <small>重新切段會保留人工校正。AI 使用設定中的 OpenAI 金鑰，僅送辨識文字及附近劇本，依用量計費。</small>
         {!(apiKey || canAlignWithAI) && <small>如需 AI 補對齊，請先在設定填入 OpenAI 金鑰。</small>}
-        <p className="recording-note">{activeId === selectedId ? '此錄音已啟用；有有效時間範圍的待確認片段也參與比對，需連續命中三次。未對齊或已失效的片段由文字跟戲。' : '此錄音尚未啟用，現場仍由文字跟戲。'}</p>
+        <p className="recording-note">{activeId === selectedId ? '此錄音已啟用比對診斷；有有效時間範圍的待確認片段也參與分析。聲音結果不會換格、確認字幕或準備下一格。' : '此錄音尚未啟用診斷，現場由文字與劇本位置追蹤跟戲。'}</p>
         {!compatible && <p className="recording-note">此錄音的語言或劇本欄與目前演出設定不同，無法啟用；請選擇對應錄音，或確認劇本欄後重新自動切段。</p>}
         {referenceAudio?.recordingId === selectedId && <p className="recording-live-status">
-          音訊比對：{{loading:'載入中', listening:'等待人聲', searching:'尚未可靠定位', candidate:'核對中', verified:'已確認', error:'沿用文字跟戲'}[referenceAudio.status] || '等待收音'}
+          音訊比對：{{loading:'載入中', listening:'等待人聲', searching:'尚未可靠定位', candidate:'核對中', verified:'已確認', diagnostic:'僅供診斷', error:'沿用文字跟戲'}[referenceAudio.status] || '等待收音'}
           {Number.isFinite(referenceAudio.referenceSeconds) && ` · 錄音 ${timeLabel(referenceAudio.referenceSeconds)}`}
           {Number.isFinite(referenceAudio.confidence) && ` · 聲音相似度 ${Math.round(referenceAudio.confidence * 100)}%`}
           {referenceAudio.error && ` · ${referenceAudio.error}`}

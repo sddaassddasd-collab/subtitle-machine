@@ -56,6 +56,7 @@ function trackerSnapshot(tracker, currentIndex) {
     referenceFence: tracker.referenceFence ? {index: tracker.referenceFence.index, audioMs: tracker.referenceFence.audioMs, decidedAudioMs: tracker.referenceFence.decidedAudioMs} : null,
     referenceProgress: tracker.referenceProgress ? {...tracker.referenceProgress} : null,
     lastLocated: tracker.lastLocated ? {...tracker.lastLocated} : null,
+    scriptPaths: (tracker.path?.hypotheses || []).map(({index, score, steps, endMs}) => ({index, score, steps, endMs})),
     ignoreBeforeMs: tracker.ignoreBeforeMs, latestStartMs: tracker.latestStartMs, latestOrder: tracker.latestOrder,
     quietMs: tracker.quietMs, loudMs: tracker.loudMs};
 }

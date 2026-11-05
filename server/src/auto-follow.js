@@ -3,6 +3,8 @@
 const OpenCC = require('opencc-js');
 const traditionalize = OpenCC.Converter({ from: 'cn', to: 'twp' });
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O} = require('./follow-settings');
+const {pinyin} = require('pinyin-pro');
+const {observeScriptPath, isCurrentSuffix} = require('./script-path');
 const MAX_HEARD = T.maxHeard;
 const SEQUENCE_TTL_MS = T.sequenceTtlMs;
 const DIRECTION_SILENCE_MS = O.directionSilenceMs;
@@ -46,7 +48,10 @@ function prepareScript(lines, previous) {
     entries[i].next = next;
     if (entries[i].text) next = i;
   }
-  return { entries, chars, positions, starts, exactLines };
+  const phones = pinyin(chars.join(''), {toneType: 'none', type: 'array', nonZh: 'consecutive'});
+  // Preserve one token per character even for Latin text and digits.
+  const phonemes = phones.length === chars.length ? phones : chars.map(char => pinyin(char, {toneType: 'none'}));
+  return { entries, chars, phonemes, positions, starts, exactLines };
 }
 
 function normalizeText(text) {
@@ -67,45 +72,56 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     referenceFence: null,
     referenceProgress: null,
     lastLocated: null,
+    path: {hypotheses: [], lastMs: -1},
   };
 }
 
 // Semi-global edit alignment: all heard characters must be accounted for;
 // the script may have an unheard prefix/suffix. Keep the order of characters.
-function align(heard, lines, from, to, {local = false} = {}) {
+function align(heard, lines, from, to, {local = false, phonetic = false} = {}) {
   const script = Array.isArray(lines) ? prepareScript(lines) : lines;
   const start = script.starts[Math.max(0, from)] ?? 0;
   const end = script.starts[Math.min(script.entries.length, to + 1)] ?? start;
   const text = script.chars.slice(start, end);
   const positions = script.positions.slice(start, end);
   const input = Array.from(heard).slice(-MAX_HEARD);
+  const inputPhones = phonetic ? input.map(char => pinyin(char, {toneType: 'none'})) : null;
   if (!input.length || !text.length) return [];
   let previous = new Float64Array(text.length + 1);
   let current = new Float64Array(text.length + 1);
   let previousMatches = local ? new Uint16Array(text.length + 1) : null;
   let currentMatches = local ? new Uint16Array(text.length + 1) : null;
+  let previousPhones = phonetic ? new Uint16Array(text.length + 1) : null;
+  let currentPhones = phonetic ? new Uint16Array(text.length + 1) : null;
   for (let i = 1; i <= input.length; i += 1) {
     const insertionCost = local && T.localFillers.includes(input[i - 1]) ? T.localInsertionCost : 1;
     current[0] = previous[0] + insertionCost;
     for (let j = 1; j <= text.length; j += 1) {
       const exact = input[i - 1] === text[j - 1];
-      const diagonal = previous[j - 1] + (exact ? 0 : 1);
+      const samePhone = phonetic && /\p{Script=Han}/u.test(input[i - 1]) &&
+        /\p{Script=Han}/u.test(text[j - 1]) && inputPhones[i - 1] === script.phonemes[start + j - 1];
+      const diagonal = previous[j - 1] + (exact ? 0 : samePhone ? T.phoneticCost : 1);
       const insertion = previous[j] + insertionCost, deletion = current[j - 1] + 1;
       current[j] = Math.min(diagonal, insertion, deletion);
       if (local) currentMatches[j] = diagonal <= insertion && diagonal <= deletion
         ? previousMatches[j - 1] + Number(exact) : insertion <= deletion ? previousMatches[j] : currentMatches[j - 1];
+      if (phonetic) currentPhones[j] = diagonal <= insertion && diagonal <= deletion
+        ? previousPhones[j - 1] + Number(!exact && samePhone) : insertion <= deletion ? previousPhones[j] : currentPhones[j - 1];
     }
     [previous, current] = [current, previous];
     if (local) { [previousMatches, currentMatches] = [currentMatches, previousMatches]; currentMatches[0] = 0; }
+    if (phonetic) { [previousPhones, currentPhones] = [currentPhones, previousPhones]; currentPhones[0] = 0; }
   }
   const byLine = new Map();
   for (let j = 1; j <= text.length; j += 1) {
     // Do not report progress through a suffix that has not actually been heard.
-    if (text[j - 1] !== input[input.length - 1]) continue;
+    if (text[j - 1] !== input[input.length - 1] &&
+      !(phonetic && inputPhones.at(-1) === script.phonemes[start + j - 1])) continue;
     const position = positions[j - 1];
     const confidence = Math.max(0, 1 - previous[j] / input.length);
     const candidate = { ...position, confidence, evidence: input.length, heard,
-      ...(local ? {matchedCharacters: previousMatches[j], colloquial: true} : {}) };
+      ...(local ? {matchedCharacters: previousMatches[j], colloquial: true} : {}),
+      ...(phonetic ? {phonetic: true, phoneticMatches: previousPhones[j]} : {}) };
     const old = byLine.get(position.index);
     if (!old || confidence > old.confidence ||
       (confidence === old.confidence && position.offset < old.offset)) {
@@ -464,6 +480,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.referenceFence = null;
     tracker.referenceProgress = null;
     tracker.lastLocated = null;
+    tracker.path = {hypotheses: [], lastMs: -1};
   }
   tracker.script = script;
   if (event.startMs < tracker.latestStartMs ||
@@ -526,13 +543,35 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const viableCandidates = candidates.filter(candidate => candidate.index === currentIndex ||
     candidate.offset >= Math.min(2, candidate.length));
   if (!opening && !waitingForOpening && viableCandidates.length) candidates = viableCandidates;
+  // Phone tolerance is local, requires literal anchors and never authorizes a
+  // global relocation or completion. It is not an acoustic model.
+  const anchor = recoveryAnchor(tracker, currentIndex);
+  if (!opening && anchor && event.endMs >= anchor.atMs && event.endMs - anchor.atMs <= T.recoveryTtlMs &&
+    (!candidates[0] || candidates[0].confidence < T.strongConfidence || candidates[0].trailingCharacters)) {
+    const phonetic = align(text, script, currentIndex, Math.min(lines.length - 1, currentIndex + T.catchUpAhead),
+      {local: true, phonetic: true}).filter(c => c.matchedCharacters >= T.phoneticMinimumMatches &&
+        c.phoneticMatches > 0 &&
+        c.confidence >= T.strongConfidence && (c.index === currentIndex || c.offset >= Math.min(2, c.length)) &&
+        !script.entries[c.index].source.music);
+    const byIndex = new Map(candidates.map(c => [c.index, c]));
+    for (const c of phonetic) {
+      const rank = c.confidence + (byIndex.get(c.index)?.trailingCharacters ? T.localTrailingPenalty * 2 : 0);
+      if (!byIndex.has(c.index) || byIndex.get(c.index).rank < rank) byIndex.set(c.index, {...c, rank});
+    }
+    candidates = [...byIndex.values()].sort((a, b) => b.rank - a.rank);
+  }
+  const currentSuffix = candidates[0]?.index > currentIndex + 1 ? align(text, script, currentIndex, currentIndex)[0] : null;
+  const suffixConflict = isCurrentSuffix(script, currentIndex, text, candidates[0], currentSuffix);
+  if (suffixConflict && currentSuffix) candidates = [{...currentSuffix, rank: currentSuffix.confidence}];
+  const pathCandidate = observeScriptPath(tracker, script, currentIndex, candidates, event);
+  if (pathCandidate) candidates = [pathCandidate, ...candidates.filter(c => c.index !== pathCandidate.index)];
   let best = candidates[0];
   const short = matchContextualShort(tracker, script, currentIndex, text, event);
   if (short && (!best || best.index === currentIndex || best.confidence <= short.confidence)) {
     candidates = [short, ...candidates.filter(candidate => candidate.index !== currentIndex)];
     best = short;
   }
-  const correction = evaluateCorrection(tracker, script, currentIndex, text, event);
+  const correction = suffixConflict || pathCandidate ? null : evaluateCorrection(tracker, script, currentIndex, text, event);
   const corrected = correction?.candidates[0];
   const next = script.entries[currentIndex]?.next;
   const localSequential = best && (best.index === currentIndex || best.index === next);
@@ -578,7 +617,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     return uncertain('low_text_score', '正在重新定位台詞，暫時維持目前字幕。');
   }
   const runner = candidates[1];
-  const ambiguous = runner && best.rank - runner.rank < T.minimumMargin;
+  const ambiguous = !best.pathConfirmed && runner && best.rank - runner.rank < T.minimumMargin;
   const sequential = best.index === currentIndex || best.index === tracker.armedIndex;
   // Identical short lines are only resolvable through an already confirmed boundary.
   const expectedShort = sequential && text === script.entries[best.index].text &&
@@ -606,10 +645,11 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const caughtUp = relocation && canCatchUp(tracker, script, currentIndex, best, event);
   const recoveredNearby = relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous);
   if (relocation) {
-    if (best.confidence < T.strongConfidence || text.length < T.relocationEvidence || (ambiguous && !exactUnique)) {
+    if (best.confidence < (best.pathConfirmed ? T.minimumConfidence : T.strongConfidence) ||
+      (!best.pathConfirmed && text.length < T.relocationEvidence) || (ambiguous && !exactUnique && !best.pathConfirmed)) {
       return uncertain('relocation_requirements', '疑似跳詞，正在核對新的位置。');
     }
-    if (!recoveredNearby && (!correction?.accepted || corrected.index !== best.index)) {
+    if (!best.pathConfirmed && !recoveredNearby && (!correction?.accepted || corrected.index !== best.index)) {
       return uncertain('correction_pending', '疑似跳詞，等待後續語音確認。');
     }
   }
@@ -633,11 +673,11 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const entry = script.entries[best.index];
   const tail = entry.tail;
   // Only arm from the actual end of a line, never merely from ASR is_final.
-  const completed = !best.trailingCharacters && progress === 1 && best.confidence >= T.strongConfidence &&
+  const completed = !best.phonetic && !best.trailingCharacters && progress === 1 && best.confidence >= T.strongConfidence &&
     best.heard.endsWith(tail) && (best.evidence >= 3 || expectedShort);
   const following = entry.next;
   const nearEnding = progress >= T.nearEndingProgress && entry.length - best.offset <= T.nearEndingRemaining;
-  const canPrepare = !best.trailingCharacters && (completed || nearEnding) && best.confidence >= T.strongConfidence && following === best.index + 1 &&
+  const canPrepare = !best.phonetic && !best.trailingCharacters && (completed || nearEnding) && best.confidence >= T.strongConfidence && following === best.index + 1 &&
     !lines[best.index]?.music && !lines[following]?.music;
   tracker.preparedIndex = canPrepare ? following : null;
   tracker.armedIndex = canPrepare && completed ? following : null;
@@ -660,7 +700,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   }
   return {
     index: best.index, candidate: best, progress, completed, armedIndex: tracker.armedIndex,
-    reason: recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
+    reason: best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
       : best.trailingCharacters ? 'trailing_tolerance' : best.colloquial ? 'local_colloquial' : best.recovered ? 'suffix_recovery'
       : best.openingConfirmed ? 'opening_confirmed' : 'text_matched',
     spans: matchedSpans(best, script),
