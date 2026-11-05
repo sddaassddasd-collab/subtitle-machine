@@ -301,3 +301,24 @@ Deepgram 與 OpenAI Realtime 的 interim 原文會直接顯示，不等待二次
 - 這次更新對應 [Render eMudhra 公告](https://render.com/docs/advisory-emudhra) 與 [Node.js 2026-10-21 安全更新](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)。只更新 npm 套件不能取代 Node.js runtime 更新。
 - 所有相關 Render 原生服務（包括前端建置）都需重新建置及部署，才會更新 runtime 與系統憑證庫。若未啟用自動部署，請執行 Manual Deploy → Deploy latest commit。
 - 部署前確認資料使用 Postgres 或持久磁碟，並備份節目；避開演出時段。部署後從建置紀錄及服務 Shell 的 `node --version` 確認為 `v22.23.4`，再驗證登入、字幕同步及 OpenAI／Deepgram 功能。
+
+### 跟戲跨格比對與離線驗收
+
+文字／聲音演算法版本 4：同一辨識片段的修訂可以縮短詞時間，仍受順序、人工定位、聲音定位和同片段禁止回退的保護；起音預推保留前一個已確認位置的附近恢復路徑，不把預推當成確認。未滿兩字的未來候選不再遮住可用的前句候選，但保留正常逐字開頭的等待流程。
+
+聲音比對允許使用目標格之前的錄音內容作為上下文，匹配終點仍必須落在目標格範圍。這讓不到一秒的格也能使用較長聲音視窗，無須把整個視窗壓縮到短句內。分數、候選差距、連續命中、向前進度與跨多格文字支持規則維持不變；診斷 `ranges.endpointFromFrame` 區分上下文起點與有效匹配終點範圍。既有參考特徵不需重新產生。
+
+離線驗收會直接使用正式串流重取樣與比對程式，不呼叫雲端 API、不上傳音訊：
+
+```sh
+cd server
+node scripts/evaluate-acoustic.cjs --reference-pcm reference-16k.pcm --live-pcm live-24k.pcm --segments segments.json --live-timeline live-timeline.json --output report.json
+```
+
+輸入音訊是**無檔頭、單聲道、有號 16 位元 little-endian PCM**，參考固定 16000 Hz；現場預設 24000 Hz，可用 `--live-sample-rate` 指定。不能把 MP3/WAV 直接改副檔名當作 PCM。
+
+`segments.json` 是陣列，每筆包含 `index`（從 0 開始）、`lineId`、`start`、`end`（秒）、`status`（`auto`／`manual`／`review`／`unmatched`）。`live-timeline.json` 是獨立人工標註的現場時間：`[{"index":0,"start":0}, ...]`。同檔測試可使用參考時間；不同場次不能直接沿用參考秒數作為正解。沒有現場標註時可省略該參數，報告僅列觀測，不宣稱準確率。
+
+報告包含設定、演算法版本、拒絕原因、聲音換格時間、參考位置、每格首次確認時間、缺少參考範圍，以及有標註時的換格時間誤差。這是**純聲音引擎**測試，不模擬文字／起音介入與瀏覽器畫面渲染。應分別驗收同檔、重新收音、不同場次與音樂遮蔽資料；合成音測試只能驗證流程，不能代表中文戲劇的實際辨識率。
+
+語音內容模型與人聲分離尚未接入正式路徑：目前仍是頻譜特徵，不能宣稱已解決跨演員、跨場次或配樂遮蔽。採用新模型前，須以上述現場標註比較漏格、誤跳、延遲、運算需求與授權；也不能自動補造沒有證據的參考時間。

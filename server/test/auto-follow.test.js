@@ -837,3 +837,37 @@ test('a stalled local position recovers from a unique six-character suffix witho
   assert.equal(s.index(), 2);
   assert.ok(!result.spans.some(span => span.index === 1), 'a missed cue is never invented as spoken');
 });
+
+test('an ordered interim with corrected earlier word times can advance without rewinding its item', () => {
+  const s = show(['帶給人民快樂', '其中的人都喜歡歌手', '接下來繼續演出']);
+  s.transcript('帶給人民快', {endMs: 5000});
+  const corrected = s.transcript('帶給人民快樂', {endMs: 2000});
+  assert.equal(corrected.status, 'verified');
+  const next = s.transcript('帶給人民快樂其中的人都喜歡歌手', {endMs: 4000});
+  assert.equal(next.index, 1);
+  const old = s.transcript('帶給人民快樂', {endMs: 4500});
+  assert.equal(old.index, undefined);
+  assert.equal(s.index(), 1);
+});
+
+test('a pending onset retains a confirmed local recovery path without confirming the predicted cue', () => {
+  const s = show(['國王都看在眼裡', '這句暫時聽不清楚', '另外一句暫時漏掉', '來解決這個問題', '大家一起出發']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  s.audio(0.001, 1000, 10); s.audio(0.08, 1200, 2);
+  assert.equal(s.index(), 1);
+  assert.equal(s.tracker.lastLocated.index, 0);
+  const result = s.transcript('來解決這個問題', {itemId: 'b', startMs: 2400, endMs: 5800});
+  assert.equal(result.reason, 'nearby_recovery');
+  assert.equal(s.index(), 3);
+  assert.ok(!result.spans.some(span => span.index === 1));
+});
+
+test('a one-character future opening does not hide a completed nearby cue with a trailing word', () => {
+  const s = show(['國王開始思考這件事情', '這句暫時沒有辨識到', '國王下定決心', '要幫忙這個可憐的歌手']);
+  s.transcript(s.lines[0].text, {isFinal: true});
+  const result = s.transcript('國王下定決心他要', {itemId: 'b', startMs: 2400, endMs: 5800});
+  assert.equal(result.index, 2);
+  assert.equal(result.reason, 'nearby_recovery');
+  assert.equal(result.completed, false, 'trimmed trailing words must not invent a complete boundary');
+  assert.equal(s.tracker.armedIndex, null);
+});

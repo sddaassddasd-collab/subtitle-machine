@@ -136,7 +136,7 @@ function distance(a, matrix, frame) {
   return Math.max(0, 1 - dot);
 }
 
-function subsequenceDtw(live, reference, first, last) {
+function subsequenceDtw(live, reference, first, last, endpointFirst = first) {
   const length = last - first;
   if (!length || live.length < 8) return null;
   let previous = new Float64Array(length + 1), current = new Float64Array(length + 1);
@@ -155,7 +155,7 @@ function subsequenceDtw(live, reference, first, last) {
     [previous, current] = [current, previous]; [starts, nextStarts] = [nextStarts, starts];
   }
   let best = null;
-  for (let j = 1; j <= length; j++) {
+  for (let j = Math.max(1, endpointFirst - first + 1); j <= length; j++) {
     const span = j - starts[j];
     if (span < live.length * A.minSpanRatio || span > live.length * A.maxSpanRatio) continue;
     const error = previous[j] / live.length;
@@ -234,15 +234,19 @@ class AcousticFollower {
       const last = Math.min(this.reference.count, Math.ceil(segment.end * 1000 / FRAME_MS));
       // Limit search to a moving 12-second window for unusually long cues.
       const center = this.lastPosition?.lineId === segment.lineId ? this.lastPosition.referenceSeconds * 1000 / FRAME_MS : first;
-      const from = Math.max(first, Math.floor(center - A.searchBehindFrames));
+      // Include prior dialogue in the matching window, but constrain its
+      // endpoint to this cue. Short cues no longer compress a whole live
+      // window into their own tiny range.
+      const contextFirst = Math.max(0, first - Math.ceil(A.maxLiveFrames * A.maxSpanRatio));
+      const from = Math.max(contextFirst, Math.floor(center - A.searchBehindFrames));
       const to = Math.min(last, Math.max(from + A.searchMinFrames, Math.ceil(center + A.searchAheadFrames)));
-      ranges.push({index: segment.index, fromFrame: from, toFrame: to, referenceFrames: Math.max(0, to - from)});
+      ranges.push({index: segment.index, fromFrame: from, endpointFromFrame: first, toFrame: to, referenceFrames: Math.max(0, to - from)});
       let match = null;
       const jump = segment.index > currentIndex + 1 && segment.previousDialogueIndex !== currentIndex;
       const requiredFrames = jump ? A.jumpLiveFrames : segment.index > currentIndex ? A.forwardLiveFrames : A.minLiveFrames;
       const lengths = A.liveLengths.filter(length => length <= this.live.length && (this.live.length < requiredFrames || length >= requiredFrames));
       for (const length of lengths) {
-        const candidate = subsequenceDtw(this.live.slice(-length), this.reference, from, to);
+        const candidate = subsequenceDtw(this.live.slice(-length), this.reference, from, to, first);
         if (candidate && (!match || candidate.error < match.error)) match = {...candidate, liveLength: length};
       }
       if (match) candidates.push({...match, ...segment, referenceSeconds: (match.frame + 1) * FRAME_MS / 1000});

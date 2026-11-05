@@ -293,3 +293,33 @@ test('stalled acoustic searches expand beyond four cues but wider candidates alo
   assert.ok(results.some(result => result.index === 10 && result.diagnostics.searchAhead >= 12));
   assert.ok(results.every(result => result.status !== 'verified'));
 });
+
+test('continuous audio crosses a sub-second cue using preceding context without skipping it', () => {
+  const sequence = [...phrases[0], ...phrases[1], ...phrases[0]];
+  const reference = extractFeatures(phrasePcm(sequence)).features;
+  const segments = [
+    {lineId: 'a', index: 0, start: 0, end: 1.44, status: 'auto'},
+    {lineId: 'short', index: 1, start: 1.44, end: 2.16, status: 'review'},
+    {lineId: 'c', index: 2, start: 2.16, end: 4.32, status: 'auto'},
+  ];
+  const matcher = new AcousticFollower(reference, segments);
+  const frontend = new StreamingFeatures(24000), take = phrasePcm(sequence, 24000);
+  let current = 0;
+  const entered = [], results = [];
+  for (let offset = 0; offset + 960 <= take.length; offset += 960) {
+    for (const frame of frontend.push(take.subarray(offset, offset + 960), (offset + 960) / 48)) {
+      const result = matcher.feed(frame, current);
+      if (!result) continue;
+      results.push(result);
+      if (result.status === 'verified' && result.index > current) {
+        entered.push(result.index);
+        current = result.index;
+        matcher.advance(current);
+      }
+    }
+  }
+  assert.deepEqual(entered, [1, 2]);
+  const short = results.find(result => result.status === 'verified' && result.index === 1);
+  assert.ok(short.diagnostics.matchedLiveFrames * 0.04 > 0.72);
+  assert.ok(short.referenceSeconds >= 1.44 && short.referenceSeconds <= 2.2);
+});

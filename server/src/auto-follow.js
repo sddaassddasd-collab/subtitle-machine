@@ -197,8 +197,21 @@ function matchContextualShort(tracker, script, currentIndex, text, event) {
 
 // Only a recently established local position permits filler/trailing-word
 // tolerance. Full-script relocation keeps the strict, ordered edit distance.
+function recoveryAnchor(tracker, currentIndex) {
+  const confirmed = tracker.lastLocated;
+  if (confirmed?.index === currentIndex) return confirmed;
+  const prediction = tracker.prediction;
+  // A pending onset is not a confirmation. It can, however, retain the
+  // established path from the immediately preceding confirmed dialogue.
+  if (confirmed?.index === currentIndex - 1 && prediction?.index === currentIndex &&
+    prediction.fromIndex === confirmed.index && tracker.sequence?.index === currentIndex) {
+    return {index: currentIndex, atMs: confirmed.atMs};
+  }
+  return null;
+}
+
 function localCandidates(tracker, script, currentIndex, text, event) {
-  const anchor = tracker.lastLocated || tracker.sequence;
+  const anchor = recoveryAnchor(tracker, currentIndex) || tracker.sequence;
   const predicted = tracker.prediction?.index === currentIndex && event.endMs >= tracker.prediction.onsetMs &&
     event.endMs - tracker.prediction.onsetMs <= SEQUENCE_TTL_MS;
   const fresh = anchor?.index === currentIndex && event.endMs >= (anchor.atMs ?? anchor.endMs) &&
@@ -220,8 +233,8 @@ function localCandidates(tracker, script, currentIndex, text, event) {
 }
 
 function canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous) {
-  const anchor = tracker.lastLocated;
-  return Boolean(anchor?.index === currentIndex && !ambiguous && best && !best.trailingCharacters &&
+  const anchor = recoveryAnchor(tracker, currentIndex);
+  return Boolean(anchor?.index === currentIndex && !ambiguous && best &&
     best.index > currentIndex + 1 && best.index <= currentIndex + T.recoveryAhead &&
     event.endMs - anchor.atMs >= T.recoveryAfterMs && event.endMs - anchor.atMs <= T.recoveryTtlMs &&
     event.startMs >= anchor.atMs && best.confidence >= T.recoveryMinimumConfidence &&
@@ -465,7 +478,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
   if (Number.isFinite(event.order)) tracker.latestOrder = event.order;
   const old = tracker.items.get(event.itemId);
   if (old?.final) return {ignored: true, reason: 'item_already_final'};
-  if (old && event.endMs < old.endMs && !event.isFinal) return {ignored: true, reason: 'audio_end_regressed'};
+  // Ordered interim revisions may correct an overestimated word timestamp.
+  // Display fences and maxIndex below still prevent stale audio rewinding cues.
   if (old?.text === text && !event.isFinal) return {ignored: true, reason: 'duplicate_interim'};
   tracker.latestStartMs = event.startMs;
   const item = { ...event, text, final: event.isFinal === true, maxIndex: old?.maxIndex ?? null };
@@ -507,6 +521,11 @@ function followTranscript(tracker, lines, currentIndex, event) {
     }
     candidates = [...byIndex.values()].sort((a, b) => b.rank - a.rank || Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex));
   }
+  // An isolated first character of a future cue must not hide a viable
+  // completed preceding cue in the same growing utterance.
+  const viableCandidates = candidates.filter(candidate => candidate.index === currentIndex ||
+    candidate.offset >= Math.min(2, candidate.length));
+  if (!opening && !waitingForOpening && viableCandidates.length) candidates = viableCandidates;
   let best = candidates[0];
   const short = matchContextualShort(tracker, script, currentIndex, text, event);
   if (short && (!best || best.index === currentIndex || best.confidence <= short.confidence)) {

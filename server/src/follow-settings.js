@@ -45,7 +45,7 @@ const DIAGNOSTIC_SETTINGS = Object.freeze({
   maxPendingEvents: 5000, maxPendingBytes: 8 * 1024 * 1024, flushMs: 250,
 });
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 3, onset: 1, acoustic: 3, diagnostics: 2}),
+  versions: Object.freeze({text: 4, onset: 1, acoustic: 4, diagnostics: 2}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
 });
 module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, FOLLOW_SETTINGS};
