@@ -51,7 +51,13 @@ function prepareScript(lines, previous) {
   const phones = pinyin(chars.join(''), {toneType: 'none', type: 'array', nonZh: 'consecutive'});
   // Preserve one token per character even for Latin text and digits.
   const phonemes = phones.length === chars.length ? phones : chars.map(char => pinyin(char, {toneType: 'none'}));
-  return { entries, chars, phonemes, positions, starts, exactLines };
+  const bigrams = new Map();
+  for (let i = 0; i + 1 < chars.length; i++) {
+    const gram = chars[i] + chars[i + 1];
+    if (!bigrams.has(gram)) bigrams.set(gram, new Set());
+    bigrams.get(gram).add(positions[i + 1].index);
+  }
+  return { entries, chars, phonemes, bigrams, positions, starts, exactLines };
 }
 
 function normalizeText(text) {
@@ -421,12 +427,20 @@ function evaluateCorrection(tracker, script, currentIndex, text, event) {
   if (text.length < T.relocationEvidence || (!event.isFinal && !growingPending &&
     event.endMs - lane.lastScanMs < T.correctionIntervalMs)) return null;
   lane.lastScanMs = event.endMs;
-  const candidates = rankRecentCandidates([{ text: text.slice(-MAX_HEARD), context: false }],
-    script, currentIndex, 0, script.entries.length - 1, currentIndex);
+  const windows = correctionWindows(script, text);
+  const byIndex = new Map();
+  for (const [from, to] of windows) {
+    for (const candidate of rankRecentCandidates([{text: text.slice(-MAX_HEARD), context: false}],
+      script, currentIndex, from, to, currentIndex)) {
+      if (!byIndex.has(candidate.index) || candidate.rank > byIndex.get(candidate.index).rank)
+        byIndex.set(candidate.index, candidate);
+    }
+  }
+  const candidates = [...byIndex.values()].sort((a, b) => b.rank - a.rank || b.evidence - a.evidence);
   lane.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
   const best = candidates[0];
-  const exactUnique = best?.confidence === 1 && text === script.entries[best.index].text &&
+  const exactUnique = best?.confidence === 1 && script.exactLines.get(text)?.length === 1 && text === script.entries[best.index].text &&
     !candidates.some(candidate => candidate.index !== best.index && candidate.confidence === 1);
   if (!best || best.confidence < T.strongConfidence || best.offset < Math.min(2, best.length) ||
     (candidates[1] && best.rank - candidates[1].rank < T.minimumMargin && !exactUnique)) {
@@ -443,6 +457,32 @@ function evaluateCorrection(tracker, script, currentIndex, text, event) {
     canCatchUp(tracker, script, currentIndex, best, event);
   lane.status = accepted ? 'verified' : 'pending';
   return { candidates, accepted, exactUnique };
+}
+
+function correctionWindows(script, text) {
+  if (script.chars.length <= T.fullScanCharacters) return [[0, script.entries.length - 1]];
+  const scores = new Map(), chars = Array.from(text).slice(-MAX_HEARD), seen = new Set();
+  for (let i = 0; i + 1 < chars.length; i++) {
+    const gram = chars[i] + chars[i + 1];
+    if (seen.has(gram)) continue;
+    seen.add(gram);
+    const hits = script.bigrams.get(gram);
+    if (!hits) continue;
+    for (const index of hits) scores.set(index, (scores.get(index) || 0) + 1 / hits.size);
+  }
+  const ranked = [...scores].sort((a, b) => b[1] - a[1]);
+  // Do not arbitrarily discard equally plausible repeated material and then
+  // mistake the remaining subset for a unique global match.
+  if (ranked.length > T.correctionWindowCount && ranked[T.correctionWindowCount - 1][1] === ranked[T.correctionWindowCount][1]) return [];
+  const windows = ranked.slice(0, T.correctionWindowCount).map(([index]) => [Math.max(0, index - 2),
+    Math.min(script.entries.length - 1, index + 2)]).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const window of windows) {
+    const last = merged.at(-1);
+    if (last && window[0] <= last[1] + 1) last[1] = Math.max(last[1], window[1]);
+    else merged.push(window);
+  }
+  return merged;
 }
 
 function followTranscript(tracker, lines, currentIndex, event) {
@@ -579,7 +619,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     candidates[1] && best.rank - candidates[1].rank < T.minimumMargin);
   // One arbiter owns the display. A confirmed correction can override a local
   // guess, while an ambiguous/pending search cannot block a usable sequence.
-  const useCorrection = correction && (
+  const useCorrection = correction?.candidates.length > 0 && (
     (!tracker.sequence && !opening && !localRecovery && !(localSequential && best.colloquial)) ||
     (correction.accepted && (!localSequential || !best ||
       corrected.confidence > best.confidence ||
@@ -839,4 +879,21 @@ function applyReferencePosition(tracker, lines, index, evidence) {
   return true;
 }
 
-module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, followAudio, applyReferencePosition };
+function applySemanticLocation(tracker, lines, index, event) {
+  const script = prepareScript(lines, tracker.script);
+  if (!script.entries[index]?.text || script.entries[index].source.music ||
+    event.endMs <= tracker.ignoreBeforeMs) return false;
+  clearPreparation(tracker);
+  tracker.script = script; tracker.located = true; tracker.progressIndex = index; tracker.progress = 0;
+  tracker.prediction = null; tracker.referenceFence = null; tracker.referenceProgress = null;
+  tracker.path = {hypotheses: [], lastMs: event.endMs};
+  tracker.correction = createCorrection();
+  tracker.lastLocated = {index, atMs: event.endMs};
+  tracker.sequence = {index, atMs: event.endMs, observed: {itemId: event.itemId,
+    text: normalizeText(event.text), endMs: event.endMs}};
+  const item = tracker.items.get(event.itemId);
+  if (item) item.maxIndex = Math.max(item.maxIndex ?? index, index);
+  return true;
+}
+
+module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, followAudio, applyReferencePosition, applySemanticLocation };

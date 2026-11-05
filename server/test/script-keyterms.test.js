@@ -40,3 +40,13 @@ test('missing configure acknowledgements disable optional updates without throwi
   assert.equal(stream.scriptKeyterms.disabled, true);
   assert.deepEqual(events, ['requested', 'timeout']);
 });
+
+test('manual programme phrases retain whole words and are prioritized over generic script terms', () => {
+  const {normalizeVocabulary} = require('../src/script-keyterms');
+  assert.deepEqual(normalizeVocabulary('完整術語\n完整術語，另一個詞組'), ['完整術語', '另一個詞組']);
+  const terms = scriptKeyterms([{role: '角色', text: '我們都是他的朋友現在可以開始'}], 0, '', ['完整術語']);
+  assert.equal(terms[0], '完整術語');
+  assert.ok(!terms.includes('都是') && !terms.includes('他的') && !terms.includes('現在'));
+  const other = scriptKeyterms([{role: '另一角色', text: '完全不同的故事'}], 0);
+  assert.ok(!other.includes('完整術語'));
+});

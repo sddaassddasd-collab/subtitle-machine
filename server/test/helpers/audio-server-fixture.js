@@ -84,6 +84,11 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         projector: () => getProjectorPayload(session),
         resetPosition: () => resetAutoFollowPosition(session),
         speechStarted: startMs => handleAutoFollowSpeechStarted(session.id, startMs),
+        enableSemantic: request => {
+          ensureTranscriptionState(session).semanticFollow = true;
+          semanticFollower.cooldownMs = 0;
+          stream.translationClient = {chat: {completions: {create: request}}};
+        },
         dispose() {
           for (const timer of currentIndexPersistTimers.values()) clearTimeout(timer);
           for (const timer of latestRoomStateKeyframes.values()) clearTimeout(timer);

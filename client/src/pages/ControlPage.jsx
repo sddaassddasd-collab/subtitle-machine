@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import ProjectorLanguageSettings from '../components/ProjectorLanguageSettings'
 import RecordingsPanel from '../components/RecordingsPanel'
+import ScriptRecognitionSettings from '../components/ScriptRecognitionSettings'
 import WorkspaceDialog from '../components/WorkspaceDialog'
 import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
 import { io } from 'socket.io-client'
@@ -245,6 +246,9 @@ const normalizeTranscriptionState = (raw) => {
       typeof raw.transcriptionContext === 'string'
         ? raw.transcriptionContext
         : '',
+    scriptVocabulary: Array.isArray(raw.scriptVocabulary) ? raw.scriptVocabulary.filter(word => typeof word === 'string') : [],
+    acousticDiagnostics: raw.acousticDiagnostics === true,
+    semanticFollow: raw.semanticFollow === true,
     semanticSegmentationEnabled: raw.semanticSegmentationEnabled !== false,
     dualChannelEnabled: raw.dualChannelEnabled !== false,
     speakerRecognitionEnabled: raw.speakerRecognitionEnabled === true,
@@ -5403,6 +5407,7 @@ const ControlPage = () => {
 <ControlSection panel="recordings" activePanel={activePanel} title="彩排錄音與比對診斷" defaultOpen>
               <RecordingsPanel sessionId={sessionId} cellId={selectedCellId} lines={lines}
                 referenceAudio={autoFollow.referenceAudio} microphoneActive={micDiagnostics.active} visible={activePanel === 'recordings'}
+                diagnosticsEnabled={transcription.acousticDiagnostics}
                 performanceLanguage={transcription.language || 'zh-TW'} sourceLanguages={transcription.sourceLanguages}
                 followingScript={transcription.followingScript || sessionMeta?.followingScript} languages={languages} apiKey={apiKey}/>
             </ControlSection>
@@ -5502,6 +5507,8 @@ const ControlPage = () => {
                   原文永遠保留。取消語言後，正在使用的觀眾會立即切回原文，且停止新的翻譯工作。
                 </span>
               </fieldset>
+              {activePanel !== 'live' && <ScriptRecognitionSettings key={sessionId} sessionId={sessionId} socketRef={socketRef}
+                vocabulary={transcription.scriptVocabulary} diagnostics={transcription.acousticDiagnostics} semantic={transcription.semanticFollow}/>}
               <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
               <textarea
                 id="transcription-context"

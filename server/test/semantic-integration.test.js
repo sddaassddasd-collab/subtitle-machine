@@ -1,0 +1,33 @@
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const createFixture = require('./helpers/audio-server-fixture');
+const flush = () => new Promise(resolve => setImmediate(resolve));
+test('server semantic fallback changes location only after two independent proposals and records no completion', async t => {
+  const f = createFixture({allowCueChanges: true, texts: ['現在原本停留的地方', '專家提出一種新的治療方法', '另一位專家反對這個說法']});
+  t.after(() => f.dispose());
+  let index = 1;
+  f.enableSemantic(async () => ({choices: [{message: {content: JSON.stringify({index, confidence: .95})}}]}));
+  f.stream.autoFollowAudioMs = 1000;
+  f.transcript('第一段完全換句話說', {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
+  await flush();
+  assert.equal(f.session.currentIndex, 0);
+  index = 2; f.stream.autoFollowAudioMs = 3000;
+  f.transcript('第二段說法也完全不一樣', {streamId: 's', itemId: 'b', startMs: 2000, endMs: 3000, isFinal: true});
+  await flush();
+  assert.equal(f.session.currentIndex, 2);
+  assert.equal(f.state().lastDecision.source, 'semantic');
+  assert.equal(f.state().armedIndex, null);
+});
+test('manual relocation while semantic inference is running discards the stale result', async t => {
+  const f = createFixture({allowCueChanges: true, texts: ['目前的台詞內容', '下一句的內容', '最後一句的內容']});
+  t.after(() => f.dispose());
+  let resolve;
+  f.enableSemantic(() => new Promise(done => {resolve = done}));
+  f.stream.autoFollowAudioMs = 1000;
+  f.transcript('完全不同的說法需要協助定位', {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
+  f.session.currentIndex = 1; f.resetPosition();
+  resolve({choices: [{message: {content: '{"index":2,"confidence":1}'}}]});
+  await flush();
+  assert.equal(f.session.currentIndex, 1);
+  assert.equal(f.state().lastDecision, null);
+});

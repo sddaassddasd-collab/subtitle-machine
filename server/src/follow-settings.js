@@ -17,6 +17,7 @@ const TEXT_SETTINGS = Object.freeze({
   pathWidth: 4, pathTtlMs: 12000, pathMinimumEvidence: 3, pathMinimumSteps: 2,
   pathMaximumStep: 2, pathSkipPenalty: 0.025, pathRetention: 0.7,
   phoneticCost: 0.35, phoneticMinimumMatches: 4,
+  fullScanCharacters: 2000, correctionWindowCount: 12,
   normalization: 'NFKC/opencc-cn-twp/remove-parentheses-punctuation',
 });
 const ONSET_SETTINGS = Object.freeze({
@@ -48,8 +49,12 @@ const DIAGNOSTIC_SETTINGS = Object.freeze({
   summaryMs: 5000, maxTranscriptChars: 2000, maxWords: 256,
   maxPendingEvents: 5000, maxPendingBytes: 8 * 1024 * 1024, flushMs: 250,
 });
+const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, cooldownMs: 3000,
+  maximumResultAgeMs: 5000, minimumConfidence: .88, supportTtlMs: 15000, maximumStep: 2,
+  minimumTextLength: 6, ahead: 18, cueCharacters: 300, heardCharacters: 500});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 5, onset: 1, acoustic: 4, diagnostics: 3}),
+  versions: Object.freeze({text: 6, onset: 1, acoustic: 4, diagnostics: 3, semantic: 1}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
+  semantic: SEMANTIC_SETTINGS,
 });
-module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, FOLLOW_SETTINGS};
+module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS};

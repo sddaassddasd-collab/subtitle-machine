@@ -42,11 +42,13 @@ function runRecordingTask(message, timeoutMs = 180000, signal) {
 }
 
 class RecordingRuntime {
-  constructor({loadAsset = getRecordingAsset, onResult, onStatus, onDiagnostic} = {}) {
+  constructor({loadAsset = getRecordingAsset, onResult, onStatus, onDiagnostic, shouldAnalyze = () => true} = {}) {
     this.loadAsset = loadAsset; this.onResult = onResult; this.onStatus = onStatus; this.onDiagnostic = onDiagnostic;
     this.sessions = new Map();
+    this.shouldAnalyze = shouldAnalyze;
   }
   async ensure(session) {
+    if (!this.shouldAnalyze(session)) { this.stop(session.id); return; }
     const recording = session.recordings?.find(r => r.id === session.activeRecordingId && r.cellId === session.selectedCellId);
     if (!recording || !isRecordingCompatible(session, recording) || recording.status !== 'ready') { this.stop(session.id); return; }
     const key = `${recording.id}:${recording.revision}:${session.selectedCellId}`;
@@ -179,6 +181,7 @@ class RecordingRuntime {
     }
   }
   feed(session, stream, audio, audioEndMs) {
+    if (!this.shouldAnalyze(session)) { this.stop(session.id); return; }
     if (!session.activeRecordingId || session.subtitleControlMode !== 'auto') return;
     void this.ensure(session);
     const entry = this.sessions.get(session.id);

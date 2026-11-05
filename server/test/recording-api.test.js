@@ -47,6 +47,7 @@ function fixture({recordingTask, recordingStorage, recordingRequest} = {}) {
       const session=createSessionRecord(user.id);
       session.cells[0].lines=[createLineRecord({id:'a',text:'我們今晚開始演出'}),createLineRecord({id:'direction',type:'direction',text:'（離場）'}),createLineRecord({id:'b',text:'可是我答應過你'})];
       syncSelectedCellLines(session); sessions.set(session.id,session);
+      ensureTranscriptionState(session).acousticDiagnostics = true;
       persistApplicationStore=async()=>{}; persistSession=s=>storeSessionInMemory(s);
       const stream={provider:'deepgram',socketId:'reference-test-socket',ready:true,closing:false,autoFollowAudioMs:0,
         liveTranslationStreamId:'recording-live', pendingAudioChunks:[], socket:{readyState:1,bufferedAmount:0,send(){},close(){this.readyState=3}}};
@@ -852,4 +853,28 @@ test('the controller refuses an acoustic skip over dialogue without a fresh text
   assert.equal(f.session.currentIndex, 0, 'expired text evidence cannot authorize a jump');
   f.audioResult({...result, diagnostics: {...result.diagnostics, textHint: {index: 2, confidence: 0.9, expiresAudioMs: 3000}}});
   assert.equal(f.session.currentIndex, 0, 'diagnostic mode never applies even text-supported acoustic results');
+});
+
+test('owned script settings persist per programme and turning diagnostics off stops the worker', async t => {
+  const f = fixture(); t.after(() => f.dispose());
+  const reply = f.socket('transcription:set-script-settings', {sessionId: f.session.id,
+    scriptVocabulary: '特殊角色\n完整術語\n特殊角色', acousticDiagnostics: false});
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.scriptVocabulary, ['特殊角色', '完整術語']);
+  assert.deepEqual(f.store().transcription.scriptVocabulary, ['特殊角色', '完整術語']);
+  assert.equal(f.store().transcription.acousticDiagnostics, false);
+  await f.runtime.ensure(f.session);
+  assert.equal(f.runtime.sessions.size, 0);
+  assert.equal(f.state().referenceAudio, null);
+  const forbidden = f.socket('transcription:set-script-settings', {sessionId: 'another-programme', scriptVocabulary: ['不得寫入']});
+  assert.equal(forbidden.ok, false);
+  assert.deepEqual(f.store().transcription.scriptVocabulary, ['特殊角色', '完整術語']);
+});
+
+test('semantic preference persists as opt-in without contacting a model during settings changes', async t => {
+  const f = fixture(); t.after(() => f.dispose());
+  assert.equal(f.store().transcription.semanticFollow, false);
+  const reply = f.socket('transcription:set-script-settings', {sessionId: f.session.id, semanticFollow: true});
+  assert.equal(reply.semanticFollow, true);
+  assert.equal(f.store().transcription.semanticFollow, true);
 });

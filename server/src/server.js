@@ -11,10 +11,11 @@ const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
-const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition } = require('./auto-follow');
+const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation } = require('./auto-follow');
+const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
 const {trackerSnapshot, clientMetadata} = require('./follow-trace');
-const {ACOUSTIC_SETTINGS} = require('./follow-settings');
-const {scriptKeyterms, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
+const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
+const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
@@ -115,8 +116,11 @@ app.get('/healthz', (_req, res) => {
 
 const sessions = new Map();
 const transcriptionStreams = new Map();
+const semanticFollower = new SemanticFollower({request: (observation, signal) =>
+  requestSemanticCandidate(observation.client, observation, signal, process.env.SEMANTIC_FOLLOW_MODEL || SEMANTIC_SETTINGS.model)});
 const autoFollowHistory = new AutoFollowHistory();
 const referenceRuntime = new RecordingRuntime({
+  shouldAnalyze: session => ACOUSTIC_SETTINGS.decisionMode !== 'diagnostic' || session.transcription?.acousticDiagnostics === true,
   onResult: handleReferenceAudioResult,
   onDiagnostic: (sessionId, type, data) => {
     if (type === 'audio_observation') { recordReferenceObservation(sessionId, data, data.reason, false); return; }
@@ -343,6 +347,9 @@ const defaultTranscriptionState = () => ({
   model: DEFAULT_TRANSCRIPTION_MODEL,
   provider: DEFAULT_TRANSCRIPTION_PROVIDER,
   transcriptionContext: '',
+  scriptVocabulary: [],
+  acousticDiagnostics: false,
+  semanticFollow: false,
   semanticSegmentationEnabled:
     DEFAULT_TRANSCRIPTION_SEMANTIC_SEGMENTATION_ENABLED,
   dualChannelEnabled: DEFAULT_TRANSCRIPTION_DUAL_CHANNEL_ENABLED,
@@ -4124,6 +4131,9 @@ function serializeSessionForStorage(session) {
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
     transcription: {
+      scriptVocabulary: normalizeVocabulary(normalized.transcription?.scriptVocabulary),
+      acousticDiagnostics: normalized.transcription?.acousticDiagnostics === true,
+      semanticFollow: normalized.transcription?.semanticFollow === true,
       transcriptionContext: normalizeTranscriptionContextValue(
         normalized.transcription?.transcriptionContext,
       ),
@@ -7205,6 +7215,9 @@ function ensureTranscriptionState(session) {
   normalized.transcriptionContext = normalizeTranscriptionContextValue(
     normalized.transcriptionContext,
   );
+  normalized.scriptVocabulary = normalizeVocabulary(normalized.scriptVocabulary);
+  normalized.acousticDiagnostics = normalized.acousticDiagnostics === true;
+  normalized.semanticFollow = normalized.semanticFollow === true;
   normalized.speakerRecognitionEnabled = normalizeSpeakerRecognitionEnabled(
     normalized.speakerRecognitionEnabled,
   );
@@ -7235,6 +7248,9 @@ function getPublicTranscriptionState(session) {
     transcriptionContext: normalizeTranscriptionContextValue(
       state.transcriptionContext,
     ),
+    scriptVocabulary: normalizeVocabulary(state.scriptVocabulary),
+    acousticDiagnostics: state.acousticDiagnostics === true,
+    semanticFollow: state.semanticFollow === true,
     semanticSegmentationEnabled: state.semanticSegmentationEnabled !== false,
     dualChannelEnabled: state.dualChannelEnabled === true,
     speakerRecognitionEnabled: state.speakerRecognitionEnabled === true,
@@ -7847,6 +7863,7 @@ function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
   stream.autoFollowAudioMs = (stream.autoFollowAudioMs || 0) + durationMs;
   if (stream?.provider === 'deepgram') {
     const session = getSessionRecord(stream.sessionId);
+    stream.scriptVocabularyActive = session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
     if (session)
       refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? getFollowingLines(session) : [], session.currentIndex,
         (status, data) => autoFollowHistory.event(session.id, 'keyterms_update', {status, ...data, ...followHistoryClock(session.id)}));
@@ -9365,6 +9382,32 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     return;
   }
   state.lastAlignmentMs = Math.max(0, Date.now() - alignmentStartedAt);
+  if (!result.ignored && !Number.isInteger(result.index) && options.isFinal &&
+    session.transcription?.semanticFollow === true && stream?.translationClient && normalizeText(transcript).length >= SEMANTIC_SETTINGS.minimumTextLength) {
+    const tracker = state.tracker, fromIndex = session.currentIndex, cellId = session.selectedCellId,
+      verifiedAt = state.lastVerifiedAt;
+    const candidates = followingLines.slice(fromIndex, fromIndex + SEMANTIC_SETTINGS.ahead + 1).flatMap((line, offset) =>
+      line.type !== 'direction' && !line.music ? [{index: fromIndex + offset, lineId: line.id,
+        text: String(line.text || '').slice(0, SEMANTIC_SETTINGS.cueCharacters)}] : []);
+    const context = JSON.stringify([cellId, session.transcriptionLanguage, candidates]);
+    void semanticFollower.observe(stream, {client: stream.translationClient, text: transcript.slice(-SEMANTIC_SETTINGS.heardCharacters),
+      currentIndex: fromIndex, context, candidates, itemId: options.itemId, startMs: options.startMs, endMs: options.endMs}, {
+      isCurrent: () => getSessionRecord(sessionId) === session && transcriptionStreams.get(sessionId) === stream && !stream.closing &&
+        session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && ensureTranscriptionState(session).semanticFollow &&
+        session.currentIndex === fromIndex && session.selectedCellId === cellId && getAutoFollowState(sessionId).tracker === tracker &&
+        stream.autoFollowAudioMs - options.endMs <= SEMANTIC_SETTINGS.maximumResultAgeMs && state.lastVerifiedAt === verifiedAt &&
+        getFollowingLines(session) === followingLines,
+      record: (status, data) => autoFollowHistory.event(sessionId, 'semantic_candidate', {status, ...data, ...followHistoryClock(sessionId)}),
+      accept: candidate => {
+        if (!applySemanticLocation(tracker, followingLines, candidate.index, {...options, text: transcript})) return;
+        recordAutoFollowDecision(sessionId, candidate.index, 'semantic', {transcriptReceivedAt: receivedAt,
+          transcriptAudioEndMs: options.endMs, semanticSupported: true});
+        updateAutoFollowState(sessionId, {lastAdvancedAt: Date.now(), status: AUTO_FOLLOW_STATUS.ADVANCED,
+          message: '已由兩段連續語意證據恢復位置，等待文字核對。'});
+        applyCurrentIndexChange(session, candidate.index);
+      },
+    });
+  }
   if (!result.ignored && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
     referenceRuntime.hint?.(session, result.candidate, options.endMs);
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
@@ -11983,7 +12026,8 @@ function startDeepgramTranscription({
   }
   const followSession = getSessionRecord(sessionId);
   const initialKeyterms = followSession?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
-    ? scriptKeyterms(getFollowingLines(followSession), followSession.currentIndex, selectedContext) : [];
+    ? scriptKeyterms(getFollowingLines(followSession), followSession.currentIndex, selectedContext,
+      ensureTranscriptionState(followSession).scriptVocabulary) : [];
   for (const term of initialKeyterms) query.append('keyterm', term);
   const socket = new WebSocket(
     `wss://api.deepgram.com/v1/listen?${query.toString()}`,
@@ -12006,6 +12050,7 @@ function startDeepgramTranscription({
     model: DEEPGRAM_MODEL,
     language: selectedLanguage,
     scriptKeyterms: {terms: initialKeyterms, pending: null, checkedAt: 0, disabled: false},
+    scriptVocabulary: normalizeVocabulary(followSession?.transcription?.scriptVocabulary),
     transcriptionContext: selectedContext,
     semanticSegmentationEnabled: true,
     dualChannelEnabled: false,
@@ -12063,6 +12108,8 @@ function startDeepgramTranscription({
       providerSettings: {semanticSegmentationEnabled: stream.semanticSegmentationEnabled, dualChannelEnabled: stream.dualChannelEnabled,
         speakerRecognitionEnabled: stream.speakerRecognitionEnabled,
         keyterms: initialKeyterms, acousticDecisionMode: ACOUSTIC_SETTINGS.decisionMode,
+        semantic: {...SEMANTIC_SETTINGS, enabled: followSession?.transcription?.semanticFollow === true,
+          model: process.env.SEMANTIC_FOLLOW_MODEL || SEMANTIC_SETTINGS.model},
         query: Object.fromEntries(query)}});
   }
   queueRequestedLiveTranslations(
@@ -13369,6 +13416,29 @@ io.on('connection', (socket) => {
     syncPerformanceFollowing(session); persistSession(session);
     broadcastControlState(sessionId); broadcastAutoFollowState(sessionId); broadcastTranscriptionState(sessionId);
     reply({ok: true, followingScript: describeFollowingScript(session)});
+  });
+
+  socket.on('transcription:set-script-settings', ({sessionId, scriptVocabulary, acousticDiagnostics, semanticFollow} = {}, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return reply({ok: false, reason: 'session_not_allowed'});
+    const state = ensureTranscriptionState(session);
+    if (scriptVocabulary !== undefined) state.scriptVocabulary = normalizeVocabulary(scriptVocabulary);
+    if (typeof acousticDiagnostics === 'boolean') state.acousticDiagnostics = acousticDiagnostics;
+    if (typeof semanticFollow === 'boolean') state.semanticFollow = semanticFollow;
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream) { stream.scriptVocabulary = state.scriptVocabulary; semanticFollower.reset(stream); }
+    if (!state.acousticDiagnostics && ACOUSTIC_SETTINGS.decisionMode === 'diagnostic') {
+      referenceRuntime.stop(sessionId);
+      updateAutoFollowState(sessionId, {referenceAudio: null});
+    }
+    autoFollowHistory.event(sessionId, 'script_settings', {scriptVocabulary: state.scriptVocabulary,
+      acousticDiagnostics: state.acousticDiagnostics, semantic: {...SEMANTIC_SETTINGS,
+        enabled: state.semanticFollow, model: process.env.SEMANTIC_FOLLOW_MODEL || SEMANTIC_SETTINGS.model}});
+    persistSession(session); broadcastTranscriptionState(sessionId); broadcastAutoFollowState(sessionId);
+    reply({ok: true, scriptVocabulary: state.scriptVocabulary, acousticDiagnostics: state.acousticDiagnostics, semanticFollow: state.semanticFollow,
+      semanticReady: Boolean(stream?.translationClient),
+      keyterms: scriptKeyterms(getFollowingLines(session), session.currentIndex, state.transcriptionContext, state.scriptVocabulary)});
   });
 
   socket.on(

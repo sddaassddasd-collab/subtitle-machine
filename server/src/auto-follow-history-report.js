@@ -1,4 +1,4 @@
-const SOURCE_LABELS = Object.freeze({audio: '參考錄音比對', transcript: '文字辨識', onset: '起音預推',
+const SOURCE_LABELS = Object.freeze({audio: '參考錄音比對', transcript: '文字辨識', onset: '起音預推', semantic: '語意恢復（待文字確認）',
   correction: '跳詞校正', silence: '靜默切換', manual: '人工操作', initial: '起始位置',
   context: '場次／版本切換', resume: '恢復位置', system: '系統定位'});
 const STATUS_LABELS = Object.freeze({confirmed: '已確認', pending: '已進入、未確認',
@@ -59,7 +59,7 @@ function historyReport({run, events, scope}) {
     else if (row.type !== 'direction' && row.skips.length)
       row.status = row.skips.every(skip => skip.source === 'manual') ? 'skipped_manual' : 'skipped_auto';
     row.entryCount = row.visits.length;
-    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'correction', 'silence'].includes(visit.source)).length;
+    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'correction', 'silence', 'semantic'].includes(visit.source)).length;
     row.confirmedCount = row.visits.filter(visit => visit.confirmations.length).length;
   }
   let seenAudio = false, hasGaps = false, stoppedNormally = false;

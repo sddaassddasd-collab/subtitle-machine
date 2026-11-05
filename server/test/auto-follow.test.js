@@ -901,3 +901,18 @@ test('ordered short cue observations recover a stalled position without a long s
   assert.equal(second.index, 4);
   assert.ok(second.candidate.pathSteps >= 2);
 });
+
+test('indexed correction locates distant distinctive speech in a large unrelated script', () => {
+  const lines = Array.from({length: 400}, (_, i) => `第${i}段普通敘述和共同背景內容`);
+  lines[250] = '請立刻停止機器並打開緊急出口';
+  const s = show(lines);
+  const result = s.transcript(lines[250], {isFinal: true});
+  assert.equal(result.index, 250);
+});
+
+test('many equal indexed global candidates do not hide a verified local ending', () => {
+  const lines = Array.from({length: 400}, (_, i) => `這是第${i}句舞台演出的台詞需要持續跟隨演員說話`);
+  const s = show(lines);
+  s.transcript(lines[0]);
+  assert.equal(s.tracker.armedIndex, 1);
+});

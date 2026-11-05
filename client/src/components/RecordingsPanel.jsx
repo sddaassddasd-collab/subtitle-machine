@@ -14,7 +14,7 @@ const timeLabel = seconds => {
 }
 
 export default function RecordingsPanel({sessionId, cellId, lines, referenceAudio, microphoneActive,
-  performanceLanguage, sourceLanguages, followingScript, languages, apiKey, visible = true}) {
+  performanceLanguage, sourceLanguages, followingScript, languages, apiKey, diagnosticsEnabled = false, visible = true}) {
   const [recordings, setRecordings] = useState([])
   const [selectedId, setSelectedId] = useState('')
   const [activeId, setActiveId] = useState(null)
@@ -302,7 +302,7 @@ export default function RecordingsPanel({sessionId, cellId, lines, referenceAudi
         </div>
         <small>重新切段會保留人工校正。AI 使用設定中的 OpenAI 金鑰，僅送辨識文字及附近劇本，依用量計費。</small>
         {!(apiKey || canAlignWithAI) && <small>如需 AI 補對齊，請先在設定填入 OpenAI 金鑰。</small>}
-        <p className="recording-note">{activeId === selectedId ? '此錄音已啟用比對診斷；有有效時間範圍的待確認片段也參與分析。聲音結果不會換格、確認字幕或準備下一格。' : '此錄音尚未啟用診斷，現場由文字與劇本位置追蹤跟戲。'}</p>
+        <p className="recording-note">{!diagnosticsEnabled ? '頻譜診斷目前關閉，不執行聲音比對。可在「自動跟戲與收音設定」按需開啟；試聽與範圍校正不受影響。' : activeId === selectedId ? '此錄音已啟用比對診斷；有有效時間範圍的待確認片段也參與分析。聲音結果不會換格、確認字幕或準備下一格。' : '請選用錄音以執行診斷，現場由文字與劇本位置追蹤跟戲。'}</p>
         {!compatible && <p className="recording-note">此錄音的語言或劇本欄與目前演出設定不同，無法啟用；請選擇對應錄音，或確認劇本欄後重新自動切段。</p>}
         {referenceAudio?.recordingId === selectedId && <p className="recording-live-status">
           音訊比對：{{loading:'載入中', listening:'等待人聲', searching:'尚未可靠定位', candidate:'核對中', verified:'已確認', diagnostic:'僅供診斷', error:'沿用文字跟戲'}[referenceAudio.status] || '等待收音'}
