@@ -916,3 +916,21 @@ test('many equal indexed global candidates do not hide a verified local ending',
   s.transcript(lines[0]);
   assert.equal(s.tracker.armedIndex, 1);
 });
+
+test('three imperfect fresh utterances recover a locally anchored path without inventing completion', () => {
+  const lines = ['今天大家一起準備演出', '紅色花朵正在窗邊綻放', '城堡外面停著一輛馬車', '森林深處傳來清脆鳥鳴', '演出已經正式開始了']
+    .map(text => ({text}));
+  const tracker = createTracker();
+  const heard = ['今天大家一起準備演出', '紅色石頭正在門邊綻放', '城堡前面停過一台馬車', '森林遠處傳出清脆琴鳴'];
+  let result;
+  for (let i = 0; i < heard.length; i++) {
+    result = followTranscript(tracker, lines, 0, {streamId: 's', itemId: `a${i}`, startMs: i * 1500,
+      endMs: i * 1500 + 1000, text: heard[i], isFinal: false});
+    if (i === 1 || i === 2) assert.equal(result.index, undefined);
+  }
+  assert.equal(result.index, 3);
+  assert.equal(result.reason, 'weak_path_recovery');
+  assert.equal(result.completed, false);
+  assert.equal(result.armedIndex, null);
+  assert.deepEqual(result.spans, []);
+});

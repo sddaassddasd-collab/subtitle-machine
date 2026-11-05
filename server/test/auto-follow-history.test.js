@@ -234,9 +234,10 @@ test('trigger timestamps remain exact while queued, with UTC/Taipei millisecond 
 test('all transcript revisions, ignored reasons, word timing and post-marker traces persist without an open panel', async () => {
   const {session: s, history: h, advance} = fixture('revisions');
   const id = await h.start(s);
+  const revisionIds = Array.from({length: 3}, () => require('node:crypto').randomUUID());
   for (let i = 0; i < 3; i++) {
     advance(100);
-    h.revision(s.id, i === 0 ? '第一句' : '第一句台詞', {itemId: 'same', streamId: 'provider', isFinal: i === 2,
+    h.revision(s.id, i === 0 ? '第一句' : '第一句台詞', {itemId: 'same', streamId: 'provider', revisionId: revisionIds[i], isFinal: i === 2,
       words: [{word: '第一句', start: 1, end: 1.4, confidence: 0.91}]},
     {reason: i === 1 ? 'duplicate_interim' : 'text_matched', ignored: i === 1, before: {currentIndex: 0}, after: {currentIndex: 0}});
   }
@@ -246,6 +247,8 @@ test('all transcript revisions, ignored reasons, word timing and post-marker tra
   assert.equal(report.diagnostics.transcriptRevisions, 3);
   assert.deepEqual(report.events.filter(event => event.type === 'transcript_revision').map(event => event.isFinal), [false, false, true]);
   assert.equal(report.events.find(event => event.type === 'transcript_revision').words[0].startMs, 1000);
+  assert.deepEqual(report.events.filter(event => event.type === 'transcript_revision').map(event => event.id), revisionIds);
+  assert.ok(report.events.filter(event => event.type === 'transcript_revision').every(event => event.id === event.revisionId));
   advance(1000);
   h.observe(s.id, 'audio', 'below_threshold', {confidence: 0.7, candidateIndex: 0, acoustic: {supportCount: 0}});
   report = historyReport(await h.read(s.id, id));

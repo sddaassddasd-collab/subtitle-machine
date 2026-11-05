@@ -11,7 +11,7 @@ const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
-const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation } = require('./auto-follow');
+const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates } = require('./auto-follow');
 const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
 const {trackerSnapshot, clientMetadata} = require('./follow-trace');
 const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
@@ -7337,6 +7337,7 @@ function stopTranscriptionStream(sessionId, options = {}) {
     return;
   }
 
+  semanticFollower.reset(stream, 'stream_stopped');
   transcriptionStreams.delete(sessionId);
   if (typeof stream.startAcknowledge === 'function') {
     stream.startAcknowledge({
@@ -8979,6 +8980,8 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
       onsetDetectionMs: decision.onsetDetectionMs, transcriptReceivedAt: decision.transcriptReceivedAt,
       transcriptAudioLagMs: decision.transcriptAudioLagMs, transcriptAudioEndMs: decision.transcriptAudioEndMs,
       audioEndMs: decision.audioEndMs, onsetAudioMs: decision.onsetAudioMs, silenceAudioMs: decision.silenceAudioMs,
+      supportSource: decision.supportSource, proposalInputId: decision.proposalInputId,
+      supportingInputId: decision.supportingInputId,
     } : null,
   });
   const continuous = !manualOverride && nextIndex === session.currentIndex + 1 &&
@@ -9187,6 +9190,7 @@ function maybeBroadcastAutoFollowDiagnostics(sessionId, now = Date.now()) {
 
 function resetAutoFollowPosition(session, message = '') {
   const stream = transcriptionStreams.get(session.id);
+  if (stream) semanticFollower.reset(stream, 'position_reset');
   resetAutoFollowState(session.id, {
     tracker: createTracker({ ignoreBeforeMs: stream?.autoFollowAudioMs ?? -1 }),
     listening: Boolean(stream?.ready),
@@ -9352,6 +9356,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const state = getAutoFollowState(sessionId);
   const before = trackerSnapshot(state.tracker, session.currentIndex);
   const receivedAt = Number.isFinite(options.receivedAt) ? options.receivedAt : Date.now();
+  options = {...options, receivedAt, revisionId: crypto.randomUUID()};
   const alignmentStartedAt = Date.now();
   if ((options.language && normalizePerformanceLanguage(options.language) !== session.transcriptionLanguage) ||
     (options.streamId && stream?.liveTranslationStreamId && options.streamId !== stream.liveTranslationStreamId)) {
@@ -9382,32 +9387,6 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     return;
   }
   state.lastAlignmentMs = Math.max(0, Date.now() - alignmentStartedAt);
-  if (!result.ignored && !Number.isInteger(result.index) && options.isFinal &&
-    session.transcription?.semanticFollow === true && stream?.translationClient && normalizeText(transcript).length >= SEMANTIC_SETTINGS.minimumTextLength) {
-    const tracker = state.tracker, fromIndex = session.currentIndex, cellId = session.selectedCellId,
-      verifiedAt = state.lastVerifiedAt;
-    const candidates = followingLines.slice(fromIndex, fromIndex + SEMANTIC_SETTINGS.ahead + 1).flatMap((line, offset) =>
-      line.type !== 'direction' && !line.music ? [{index: fromIndex + offset, lineId: line.id,
-        text: String(line.text || '').slice(0, SEMANTIC_SETTINGS.cueCharacters)}] : []);
-    const context = JSON.stringify([cellId, session.transcriptionLanguage, candidates]);
-    void semanticFollower.observe(stream, {client: stream.translationClient, text: transcript.slice(-SEMANTIC_SETTINGS.heardCharacters),
-      currentIndex: fromIndex, context, candidates, itemId: options.itemId, startMs: options.startMs, endMs: options.endMs}, {
-      isCurrent: () => getSessionRecord(sessionId) === session && transcriptionStreams.get(sessionId) === stream && !stream.closing &&
-        session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && ensureTranscriptionState(session).semanticFollow &&
-        session.currentIndex === fromIndex && session.selectedCellId === cellId && getAutoFollowState(sessionId).tracker === tracker &&
-        stream.autoFollowAudioMs - options.endMs <= SEMANTIC_SETTINGS.maximumResultAgeMs && state.lastVerifiedAt === verifiedAt &&
-        getFollowingLines(session) === followingLines,
-      record: (status, data) => autoFollowHistory.event(sessionId, 'semantic_candidate', {status, ...data, ...followHistoryClock(sessionId)}),
-      accept: candidate => {
-        if (!applySemanticLocation(tracker, followingLines, candidate.index, {...options, text: transcript})) return;
-        recordAutoFollowDecision(sessionId, candidate.index, 'semantic', {transcriptReceivedAt: receivedAt,
-          transcriptAudioEndMs: options.endMs, semanticSupported: true});
-        updateAutoFollowState(sessionId, {lastAdvancedAt: Date.now(), status: AUTO_FOLLOW_STATUS.ADVANCED,
-          message: '已由兩段連續語意證據恢復位置，等待文字核對。'});
-        applyCurrentIndexChange(session, candidate.index);
-      },
-    });
-  }
   if (!result.ignored && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
     referenceRuntime.hint?.(session, result.candidate, options.endMs);
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
@@ -9419,6 +9398,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true,
       colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0,
       phonetic: result.candidate.phonetic === true, pathConfirmed: result.candidate.pathConfirmed === true,
+      weakPath: result.candidate.weakPath === true,
       pathSteps: result.candidate.pathSteps || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
@@ -9461,6 +9441,49 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     result.status === 'corrected' ? 'correction' : 'transcript',
     {...evidence, completed: result.completed === true});
   else autoFollowHistory.diagnostic(sessionId, 'text', result.status || 'searching', evidence);
+  handleSemanticFollow(session, stream, followingLines, state, transcript, options, result, receivedAt);
+}
+
+function handleSemanticFollow(session, stream, lines, state, transcript, options, result, receivedAt) {
+  if (!stream || session.transcription?.semanticFollow !== true || !stream.translationClient) return;
+  const sessionId = session.id, tracker = state.tracker, fromIndex = session.currentIndex,
+    cellId = session.selectedCellId, verifiedAt = state.lastVerifiedAt;
+  if (lines[fromIndex]?.music || lines[fromIndex]?.type === 'direction') {
+    semanticFollower.reset(stream, 'music_or_direction_barrier'); return;
+  }
+  const candidates = [];
+  for (let index = fromIndex; index <= Math.min(lines.length - 1, fromIndex + SEMANTIC_SETTINGS.ahead); index++) {
+    const line = lines[index];
+    if (line.music || line.type === 'direction') break;
+    candidates.push({index, lineId: line.id, text: String(line.text || '').slice(0, SEMANTIC_SETTINGS.cueCharacters)});
+  }
+  const context = JSON.stringify([cellId, session.transcriptionLanguage, options.streamId, candidates]);
+  void semanticFollower.observe(stream, {...options, client: stream.translationClient, text: transcript,
+    currentIndex: fromIndex, context, scope: tracker, scriptScope: lines, candidates, textResolved: Number.isInteger(result.index)}, {
+    isCurrent: () => {
+      if (getSessionRecord(sessionId) !== session) return 'session_changed';
+      if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return 'stream_changed';
+      if (session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO || !ensureTranscriptionState(session).semanticFollow) return 'feature_disabled';
+      if (session.currentIndex !== fromIndex) return 'display_position_changed';
+      if (session.selectedCellId !== cellId) return 'cell_changed';
+      if (getAutoFollowState(sessionId).tracker !== tracker) return 'tracker_reset';
+      if (state.lastVerifiedAt !== verifiedAt) return 'newer_verified_text';
+      if (getFollowingLines(session) !== lines) return 'script_or_language_changed';
+      if (stream.autoFollowAudioMs - options.endMs > SEMANTIC_SETTINGS.maximumResultAgeMs) return 'audio_result_expired';
+      return true;
+    },
+    textCandidates: speech => localSupportCandidates(tracker.script, fromIndex, speech.text),
+    record: (status, data) => autoFollowHistory.event(sessionId, 'semantic_candidate', {status, ...data, ...followHistoryClock(sessionId)}),
+    accept: (candidate, speech) => {
+      if (!applySemanticLocation(tracker, lines, candidate.index, speech)) return;
+      recordAutoFollowDecision(sessionId, candidate.index, 'semantic', {transcriptReceivedAt: receivedAt,
+        transcriptAudioEndMs: speech.endMs, semanticSupported: true, supportSource: speech.supportSource,
+        proposalInputId: speech.proposalInputId, supportingInputId: speech.inputId});
+      updateAutoFollowState(sessionId, {lastAdvancedAt: Date.now(), status: AUTO_FOLLOW_STATUS.ADVANCED,
+        message: '已由語意候選及後續獨立證據恢復位置，等待文字核對。'});
+      applyCurrentIndexChange(session, candidate.index);
+    },
+  });
 }
 
 function getAutoFollowTranscriptOptions(stream, itemId, isFinal, timing = {}) {
@@ -12332,6 +12355,7 @@ function startDeepgramTranscription({
       const pendingStartAcknowledge = stream.startAcknowledge;
       stream.startAcknowledge = null;
       stream.closing = true;
+      semanticFollower.reset(stream, 'provider_reconnecting');
       transcriptionStreams.delete(sessionId);
       updateTranscriptionState(sessionId, {
         active: true,
@@ -12383,6 +12407,7 @@ function startDeepgramTranscription({
       return;
     }
 
+    semanticFollower.reset(stream, 'provider_closed');
     transcriptionStreams.delete(sessionId);
     applyTranscriptionError(sessionId, message);
   });
@@ -12800,6 +12825,7 @@ function startRealtimeTranscription({
   rt.socket.on('close', (code, reason) => {
     if (!isCurrent()) return;
 
+    semanticFollower.reset(stream, 'provider_closed');
     transcriptionStreams.delete(sessionId);
     clearRealtimeForceCommitTimer(stream);
     resetRealtimePendingAudio(stream);
@@ -13427,7 +13453,7 @@ io.on('connection', (socket) => {
     if (typeof acousticDiagnostics === 'boolean') state.acousticDiagnostics = acousticDiagnostics;
     if (typeof semanticFollow === 'boolean') state.semanticFollow = semanticFollow;
     const stream = transcriptionStreams.get(sessionId);
-    if (stream) { stream.scriptVocabulary = state.scriptVocabulary; semanticFollower.reset(stream); }
+    if (stream) { stream.scriptVocabulary = state.scriptVocabulary; semanticFollower.reset(stream, 'settings_changed'); }
     if (!state.acousticDiagnostics && ACOUSTIC_SETTINGS.decisionMode === 'diagnostic') {
       referenceRuntime.stop(sessionId);
       updateAutoFollowState(sessionId, {referenceAudio: null});

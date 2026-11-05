@@ -245,8 +245,8 @@ class AutoFollowHistory {
   revision(sessionId, text, options, data) {
     const entry = this.entries.get(sessionId);
     if (!entry?.enabled) return;
-    const at = Number.isFinite(data.receivedAt) ? data.receivedAt : this.now(), revisionId = crypto.randomUUID();
-    const details = transcriptDetails(text, options);
+    const at = Number.isFinite(data.receivedAt) ? data.receivedAt : this.now(), revisionId = options.revisionId || crypto.randomUUID();
+    const details = transcriptDetails(text, {...options, revisionId});
     return this.queue(sessionId, entry => {
       if (!entry.run) return;
       this.append(entry, 'transcript_revision', {...details, ...data, at, eventId: revisionId});

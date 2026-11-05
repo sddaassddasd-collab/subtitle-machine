@@ -4,7 +4,7 @@ const {SemanticFollower, requestSemanticCandidate} = require('../src/semantic-fo
 const {createTracker, applySemanticLocation} = require('../src/auto-follow');
 const observation = (itemId, index = 0) => ({currentIndex: 0, context: 'same-script', text: '演員換了一種說法',
   candidates: [{index: 1, text: '台詞一'}, {index: 2, text: '台詞二'}], itemId,
-  startMs: index * 2000, endMs: index * 2000 + 1000});
+  startMs: index * 2000, endMs: index * 2000 + 1000, isFinal: true});
 test('semantic recovery requires two distinct ordered utterances, not a single confident answer', async () => {
   let target = 1, clock = 0;
   const f = new SemanticFollower({request: async () => ({index: target, confidence: .95}), now: () => clock, cooldownMs: 0});
@@ -50,5 +50,5 @@ test('hung semantic requests time out without delaying subsequent observations f
   const statuses = [];
   const f = new SemanticFollower({request: () => new Promise(() => {}), timeoutMs: 5});
   await f.observe({}, observation('a'), {isCurrent: () => true, accept: () => assert.fail(), record: s => statuses.push(s)});
-  assert.deepEqual(statuses, ['timeout']);
+  assert.deepEqual(statuses, ['requested', 'timeout']);
 });

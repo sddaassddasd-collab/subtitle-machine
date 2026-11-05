@@ -56,7 +56,8 @@ function trackerSnapshot(tracker, currentIndex) {
     referenceFence: tracker.referenceFence ? {index: tracker.referenceFence.index, audioMs: tracker.referenceFence.audioMs, decidedAudioMs: tracker.referenceFence.decidedAudioMs} : null,
     referenceProgress: tracker.referenceProgress ? {...tracker.referenceProgress} : null,
     lastLocated: tracker.lastLocated ? {...tracker.lastLocated} : null,
-    scriptPaths: (tracker.path?.hypotheses || []).map(({index, score, steps, endMs}) => ({index, score, steps, endMs})),
+    scriptPaths: (tracker.path?.hypotheses || []).map(({index, score, steps, endMs, weak}) => ({index, score, steps, endMs, weak: weak === true})),
+    weakScriptPaths: (tracker.weakPath?.hypotheses || []).map(({index, score, steps, endMs}) => ({index, score, steps, endMs})),
     ignoreBeforeMs: tracker.ignoreBeforeMs, latestStartMs: tracker.latestStartMs, latestOrder: tracker.latestOrder,
     quietMs: tracker.quietMs, loudMs: tracker.loudMs};
 }
@@ -64,7 +65,7 @@ function trackerSnapshot(tracker, currentIndex) {
 function transcriptDetails(text, options) {
   const raw = String(text || ''), words = Array.isArray(options.words) ? options.words : [];
   return {text: raw.slice(0, D.maxTranscriptChars), textLength: raw.length, textTruncated: raw.length > D.maxTranscriptChars,
-    itemId: options.itemId ?? null, providerStreamId: options.streamId ?? null, order: options.order ?? null,
+    itemId: options.itemId ?? null, revisionId: options.revisionId ?? null, providerStreamId: options.streamId ?? null, order: options.order ?? null,
     isFinal: options.isFinal === true, speechFinal: options.speechFinal === true,
     audioStartMs: options.startMs ?? null, audioEndMs: options.endMs ?? null,
     confidence: Number.isFinite(options.confidence) ? options.confidence : null,

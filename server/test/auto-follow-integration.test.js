@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio } = require('../src/auto-follow');
 const {trackerSnapshot} = require('../src/follow-trace');
 const {ACOUSTIC_SETTINGS} = require('../src/follow-settings');
+const {SemanticFollower} = require('../src/semantic-follow');
 const performanceLanguage = require('../src/performance-language');
 const captionMode = require('../src/caption-mode');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
@@ -34,6 +35,7 @@ function fixture(mode = 'auto') {
     LINE_TYPES: { DIRECTION: 'direction', DIALOGUE: 'dialogue' },
     sessions: new Map([[session.id, session]]),
     autoFollowStates: new Map(), transcriptionStreams: new Map(),
+    semanticFollower: new SemanticFollower({request: () => assert.fail('This fixture must not call a model')}),
     autoFollowHistory: {enter() {}, confirm() {}, heard() {}, observe() {}, revision() {}, sync() {}, diagnostic() {}, event() {}, status: () => ({})},
     referenceRuntime: {position() {}, invalidate() {}},
     getSession: () => session, getSessionRecord: () => session,
