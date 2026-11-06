@@ -163,7 +163,9 @@ function initializeSqliteDatabase(db) {
     CREATE UNIQUE INDEX IF NOT EXISTS follow_runs_open ON follow_runs(session_id) WHERE ended_at IS NULL;
     CREATE TABLE IF NOT EXISTS follow_events (
     session_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
-    event_type TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id, run_id, sequence));`);
+    event_type TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id, run_id, sequence));
+    CREATE INDEX IF NOT EXISTS follow_events_identity
+    ON follow_events(session_id, run_id, json_extract(data, '$.id'));`);
 }
 
 function getSqliteDatabase() {
@@ -204,6 +206,8 @@ async function initializePostgresDatabase(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS follow_events (
     session_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
     event_type TEXT NOT NULL, data JSONB NOT NULL, PRIMARY KEY(session_id, run_id, sequence))`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS follow_events_identity
+    ON follow_events(session_id, run_id, (data->>'id'))`);
 }
 
 async function getPostgresPool() {
@@ -654,20 +658,46 @@ async function deleteRecordingChunks(sessionId, recordingId = null) {
   }
 }
 
-// History is independent of the frequently rewritten session store and audio assets.
-// A batch commits its append-only events and recovery cursor atomically. Retrying
-// the same batch is safe, including after a lost PostgreSQL acknowledgement.
-async function saveFollowHistory(run, events) {
-  const values = [run.sessionId, run.id, run.startedAt, run.endedAt, JSON.stringify(run)];
+const followData = row => row ? (typeof row.data === 'string' ? JSON.parse(row.data) : row.data) : null;
+const historyLock = sessionId => `follow-history:${sessionId}`;
+const historyValues = run => [run.sessionId, run.id, run.startedAt, run.endedAt, JSON.stringify(run)];
+
+// Reserve the run before assigning any event sequences. A cached "no open run"
+// is not sufficient: Render's old and new processes can overlap during deploys.
+async function openFollowRun(proposed, {fresh = false} = {}) {
+  const started = {id: crypto.randomUUID(), type: 'run_start', at: proposed.startedAt,
+    recordedAt: proposed.startedAt, sequence: 1, contextId: null};
+  const initial = {...proposed, nextSequence: 2};
+  const finish = current => {
+    const at = Math.max(proposed.startedAt, current.updatedAt);
+    const event = {id: crypto.randomUUID(), type: 'run_end', reason: 'new_run',
+      at, recordedAt: at, sequence: current.nextSequence, contextId: current.cursor?.contextId || null};
+    return {run: {...current, endedAt: at, updatedAt: at, endReason: 'new_run', nextSequence: current.nextSequence + 1}, event};
+  };
+  let current, context = null, created = false;
   if (PERSISTENCE_BACKEND === 'postgres') {
     const client = await (await getPostgresPool()).connect();
     try {
       await client.query('BEGIN');
-      await client.query(`INSERT INTO follow_runs VALUES ($1,$2,$3,$4,$5::jsonb)
-        ON CONFLICT(session_id,run_id) DO UPDATE SET ended_at=EXCLUDED.ended_at,data=EXCLUDED.data`, values);
-      if (events.length) await client.query(`INSERT INTO follow_events(session_id,run_id,sequence,event_type,data)
-        SELECT $1,$2,(event->>'sequence')::int,event->>'type',event FROM jsonb_array_elements($3::jsonb) event
-        ON CONFLICT DO NOTHING`, [run.sessionId, run.id, JSON.stringify(events)]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [historyLock(proposed.sessionId)]);
+      current = followData((await client.query('SELECT data FROM follow_runs WHERE session_id=$1 AND ended_at IS NULL', [proposed.sessionId])).rows[0]);
+      if (current && fresh) {
+        const closed = finish(current);
+        await client.query('UPDATE follow_runs SET ended_at=$3,data=$4::jsonb WHERE session_id=$1 AND run_id=$2',
+          [current.sessionId, current.id, closed.run.endedAt, JSON.stringify(closed.run)]);
+        await client.query('INSERT INTO follow_events VALUES ($1,$2,$3,$4,$5::jsonb)',
+          [current.sessionId, current.id, closed.event.sequence, closed.event.type, JSON.stringify(closed.event)]);
+        current = null;
+      }
+      if (!current) {
+        current = initial; created = true;
+        await client.query('INSERT INTO follow_runs VALUES ($1,$2,$3,$4,$5::jsonb)', historyValues(current));
+        await client.query('INSERT INTO follow_events VALUES ($1,$2,$3,$4,$5::jsonb)',
+          [current.sessionId, current.id, started.sequence, started.type, JSON.stringify(started)]);
+      } else {
+        context = followData((await client.query(`SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2
+          AND event_type='context' ORDER BY sequence DESC LIMIT 1`, [current.sessionId, current.id])).rows[0]);
+      }
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
@@ -675,15 +705,109 @@ async function saveFollowHistory(run, events) {
     const db = getSqliteDatabase();
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.prepare(`INSERT INTO follow_runs VALUES (?,?,?,?,?) ON CONFLICT(session_id,run_id)
-        DO UPDATE SET ended_at=excluded.ended_at,data=excluded.data`).run(...values);
-      const insert = db.prepare('INSERT OR IGNORE INTO follow_events VALUES (?,?,?,?,?)');
-      for (const event of events) insert.run(run.sessionId, run.id, event.sequence, event.type, JSON.stringify(event));
+      current = followData(db.prepare('SELECT data FROM follow_runs WHERE session_id=? AND ended_at IS NULL').get(proposed.sessionId));
+      if (current && fresh) {
+        const closed = finish(current);
+        db.prepare('UPDATE follow_runs SET ended_at=?,data=? WHERE session_id=? AND run_id=?')
+          .run(closed.run.endedAt, JSON.stringify(closed.run), current.sessionId, current.id);
+        db.prepare('INSERT INTO follow_events VALUES (?,?,?,?,?)')
+          .run(current.sessionId, current.id, closed.event.sequence, closed.event.type, JSON.stringify(closed.event));
+        current = null;
+      }
+      if (!current) {
+        current = initial; created = true;
+        db.prepare('INSERT INTO follow_runs VALUES (?,?,?,?,?)').run(...historyValues(current));
+        db.prepare('INSERT INTO follow_events VALUES (?,?,?,?,?)')
+          .run(current.sessionId, current.id, started.sequence, started.type, JSON.stringify(started));
+      } else {
+        context = followData(db.prepare(`SELECT data FROM follow_events WHERE session_id=? AND run_id=?
+          AND event_type='context' ORDER BY sequence DESC LIMIT 1`).get(current.sessionId, current.id));
+      }
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
+  return {run: current, context, created};
 }
-const followData = row => row ? (typeof row.data === 'string' ? JSON.parse(row.data) : row.data) : null;
+
+// Rebase concurrent writers on the committed cursor, deduplicating by stable
+// event ID rather than silently discarding events with the same sequence.
+function mergeFollowHistory(run, stored, events, existing) {
+  const saved = structuredClone(stored);
+  const seen = new Set(existing.map(event => event.id));
+  const appended = [];
+  for (const event of events) {
+    if (seen.has(event.id) || (event.type === 'run_start' && saved.nextSequence > 1)
+        || (event.type === 'run_end' && stored.endedAt !== null)) continue;
+    seen.add(event.id);
+    const next = {...event, sequence: saved.nextSequence++};
+    appended.push(next);
+    if (event.type === 'cue_enter') saved.cursor = {contextId: event.contextId, index: event.index, visitId: event.visitId};
+    const totals = saved.diagnostics ||= {transcriptRevisions: 0, traceSamples: 0, traceWindows: 0,
+      acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
+    const key = {transcript_revision: 'transcriptRevisions', acoustic_summary: 'acousticSummaries',
+      capture_summary: 'captureSummaries', problem_mark: 'problemMarks'}[event.type];
+    if (key) totals[key]++;
+    if (event.type === 'decision_trace') {
+      totals.traceSamples += event.samples.length;
+      if (saved.lastTraceWindowId !== event.windowId) { totals.traceWindows++; saved.lastTraceWindowId = event.windowId; }
+    }
+  }
+  saved.updatedAt = Math.max(saved.updatedAt, run.updatedAt);
+  // An old process may flush after another process has explicitly ended a run.
+  // Preserve those late events, but never reopen or rename the completed run.
+  if (stored.endedAt === null && run.endedAt !== null) {
+    saved.endedAt = run.endedAt; saved.endReason = run.endReason;
+  }
+  return {run: saved, events: appended};
+}
+
+// History is independent of the frequently rewritten session store and audio assets.
+// Reservation, append and explicit replacement share the same database lock.
+// Retrying a batch remains safe after a lost PostgreSQL acknowledgement.
+async function saveFollowHistory(run, events) {
+  const ids = events.map(event => event.id);
+  let saved, context;
+  if (PERSISTENCE_BACKEND === 'postgres') {
+    const client = await (await getPostgresPool()).connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [historyLock(run.sessionId)]);
+      const stored = followData((await client.query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2', [run.sessionId, run.id])).rows[0]);
+      // Deletion is explicit. A stale writer must not recreate the removed run.
+      if (!stored) { await client.query('COMMIT'); return {run: null, context: null}; }
+      const existing = (await client.query(`SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2
+        AND data->>'id'=ANY($3::text[])`, [run.sessionId, run.id, ids])).rows.map(followData);
+      saved = mergeFollowHistory(run, stored, events, existing);
+      await client.query('UPDATE follow_runs SET ended_at=$3,data=$4::jsonb WHERE session_id=$1 AND run_id=$2',
+        [run.sessionId, run.id, saved.run.endedAt, JSON.stringify(saved.run)]);
+      if (saved.events.length) await client.query(`INSERT INTO follow_events(session_id,run_id,sequence,event_type,data)
+        SELECT $1,$2,(event->>'sequence')::int,event->>'type',event FROM jsonb_array_elements($3::jsonb) event`,
+        [run.sessionId, run.id, JSON.stringify(saved.events)]);
+      context = followData((await client.query(`SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2
+        AND event_type='context' ORDER BY sequence DESC LIMIT 1`, [run.sessionId, run.id])).rows[0]);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  } else {
+    const db = getSqliteDatabase();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const stored = followData(db.prepare('SELECT data FROM follow_runs WHERE session_id=? AND run_id=?').get(run.sessionId, run.id));
+      if (!stored) { db.exec('COMMIT'); return {run: null, context: null}; }
+      const existing = db.prepare(`SELECT data FROM follow_events WHERE session_id=? AND run_id=?
+        AND json_extract(data, '$.id') IN (SELECT value FROM json_each(?))`).all(run.sessionId, run.id, JSON.stringify(ids)).map(followData);
+      saved = mergeFollowHistory(run, stored, events, existing);
+      db.prepare('UPDATE follow_runs SET ended_at=?,data=? WHERE session_id=? AND run_id=?')
+        .run(saved.run.endedAt, JSON.stringify(saved.run), run.sessionId, run.id);
+      const insert = db.prepare('INSERT INTO follow_events VALUES (?,?,?,?,?)');
+      for (const event of saved.events) insert.run(run.sessionId, run.id, event.sequence, event.type, JSON.stringify(event));
+      context = followData(db.prepare(`SELECT data FROM follow_events WHERE session_id=? AND run_id=?
+        AND event_type='context' ORDER BY sequence DESC LIMIT 1`).get(run.sessionId, run.id));
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  }
+  return {run: saved.run, context};
+}
 async function getOpenFollowRun(sessionId) {
   const row = PERSISTENCE_BACKEND === 'postgres'
     ? (await (await getPostgresPool()).query('SELECT data FROM follow_runs WHERE session_id=$1 AND ended_at IS NULL', [sessionId])).rows[0]
@@ -745,6 +869,7 @@ async function deleteFollowHistory(sessionId, runId = null) {
     const where = `session_id=$1${runId ? ' AND run_id=$2' : ''}`;
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [historyLock(sessionId)]);
       await client.query(`DELETE FROM follow_events WHERE ${where}`, values);
       await client.query(`DELETE FROM follow_runs WHERE ${where}`, values);
       await client.query('COMMIT');
@@ -823,6 +948,7 @@ module.exports = {
   getRecordingChunks,
   deleteRecordingChunks,
   saveFollowHistory,
+  openFollowRun,
   getOpenFollowRun,
   listOpenFollowSessionIds,
   listFollowRuns,

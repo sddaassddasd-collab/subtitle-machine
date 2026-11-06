@@ -141,15 +141,18 @@ class AutoFollowHistory {
       if (fresh && entry.run) await this.finishEntry(entry, 'new_run');
       if (!entry.run) {
         const at = this.now();
-        entry.run = {id: crypto.randomUUID(), sessionId, name, startedAt: at, updatedAt: at,
-          endedAt: null, nextSequence: 1, cursor: null};
-        entry.context = null; entry.transport = null; entry.lastPacket = null;
+        const opened = await this.store.openFollowRun({id: crypto.randomUUID(), sessionId, name, startedAt: at, updatedAt: at,
+          endedAt: null, nextSequence: 1, cursor: null}, {fresh});
+        entry.run = opened.run; entry.context = opened.context; entry.transport = null; entry.lastPacket = null;
         entry.trace = new FollowTrace(); entry.acousticSummary = null; entry.captureSummary = null;
-        this.append(entry, 'run_start');
+        if (!opened.created) {
+          this.append(entry, 'interruption', {reason: 'concurrent_service', message: '服務交接；沿用已建立的跟戲紀錄。'});
+        }
         this.context(entry, context, index);
         // Initial display is a position, not an automatic trigger.
         const initial = entry.pending.at(-1);
-        if (initial?.type === 'cue_enter') initial.source = 'initial';
+        if (opened.created && initial?.type === 'cue_enter') initial.source = 'initial';
+        if (!opened.created && entry.run.cursor?.index !== index) this.visit(entry, index, 'resume');
       } else {
         this.context(entry, context, index);
         if (entry.run.cursor?.index !== index) this.visit(entry, index, 'resume');
@@ -339,9 +342,11 @@ class AutoFollowHistory {
     }
     if (!entry.pending.length) return;
     const batch = entry.pending.slice();
-    await this.store.saveFollowHistory(structuredClone(entry.run), batch);
+    const saved = await this.store.saveFollowHistory(structuredClone(entry.run), batch);
+    if (saved.run?.cursor?.visitId !== entry.run.cursor?.visitId) entry.confirmGate.clear();
+    entry.run = saved.run; entry.context = saved.context;
     entry.pending.splice(0, batch.length); entry.pendingBytes = 0; entry.error = '';
-    if (entry.run.endedAt !== null) {
+    if (!entry.run || entry.run.endedAt !== null) {
       entry.run = null; entry.context = null; entry.confirmGate.clear();
       return;
     }
@@ -362,6 +367,7 @@ class AutoFollowHistory {
       await this.flushEntry(entry);
       if (entry.pending.length) await this.flushEntry(entry);
     }
+    if (!entry.run) return;
     this.append(entry, 'run_end', {reason});
     entry.run.endedAt = this.now(); entry.run.endReason = reason;
     await this.flushEntry(entry);

@@ -335,3 +335,116 @@ test('SQLite to an empty PostgreSQL migrates run cursors and every event with th
     assert.ok((await recovered.read(s.id, child.stdout)).events.some(event => event.type === 'interruption'));
     await recovered.end(s.id);
   });
+
+test('services starting together share one open run without overwriting either event stream', async () => {
+  const a = fixture('concurrent-start'), b = fixture('concurrent-start');
+  // Both services have already cached an empty history before either starts.
+  await Promise.all([a.history.list(a.session.id), b.history.list(b.session.id)]);
+  const ids = await Promise.all([a.history.start(a.session), b.history.start(b.session)]);
+  a.history.enter(a.session, 1, {source: 'audio'});
+  b.history.enter(b.session, 2, {source: 'transcript'});
+  await Promise.all([a.history.flush(a.session.id), b.history.flush(b.session.id)]);
+  assert.equal(ids[0], ids[1]);
+  const saved = await store.getFollowRun(a.session.id, ids[0]);
+  assert.equal(saved.events.filter(event => event.type === 'run_start').length, 1);
+  assert.ok(saved.events.some(event => event.type === 'cue_enter' && event.index === 1 && event.source === 'audio'));
+  assert.ok(saved.events.some(event => event.type === 'cue_enter' && event.index === 2 && event.source === 'transcript'));
+  assert.equal(new Set(saved.events.map(event => event.id)).size, saved.events.length);
+  assert.equal(new Set(saved.events.map(event => event.sequence)).size, saved.events.length);
+  assert.equal(saved.run.nextSequence, saved.events.at(-1).sequence + 1);
+  assert.equal((await store.listFollowRuns(a.session.id)).length, 1);
+  await a.history.end(a.session.id);
+  await b.history.close();
+  assert.deepEqual(a.errors, []);
+  assert.deepEqual(b.errors, []);
+});
+
+test('a late flush cannot reopen an ended run or replace the new active run', async () => {
+  const a = fixture('late-old-service'), b = fixture('late-old-service');
+  const oldId = await a.history.start(a.session);
+  await a.history.flush(a.session.id);
+  await b.history.restore(b.session);
+  b.history.event(b.session.id, 'late_test', {message: '尚未保存的舊服務事件'});
+  const newId = await a.history.start(a.session, {fresh: true});
+  await a.history.flush(a.session.id);
+  await b.history.flush(b.session.id);
+  const old = await store.getFollowRun(a.session.id, oldId);
+  assert.equal(old.run.endReason, 'new_run');
+  assert.ok(old.run.endedAt !== null);
+  assert.ok(old.events.some(event => event.type === 'late_test'));
+  assert.equal((await store.getOpenFollowRun(a.session.id)).run.id, newId);
+  assert.equal((await store.listFollowRuns(a.session.id)).length, 2);
+  await a.history.end(a.session.id);
+  assert.deepEqual(b.errors, []);
+});
+
+test('retry after a lost commit acknowledgement preserves both writers, totals and the latest cursor', async () => {
+  let loseAcknowledgement = true;
+  const unreliable = {...store, saveFollowHistory: async (...args) => {
+    const saved = await store.saveFollowHistory(...args);
+    if (loseAcknowledgement) { loseAcknowledgement = false; throw new Error('lost acknowledgement'); }
+    return saved;
+  }};
+  const a = fixture('concurrent-retry', {store: unreliable}), b = fixture('concurrent-retry');
+  const id = await a.history.start(a.session);
+  a.history.revision(a.session.id, '第一句台詞', {revisionId: 'revision-a'}, {reason: 'text_matched'});
+  await assert.rejects(a.history.flush(a.session.id), /lost acknowledgement/);
+  await b.history.start(b.session);
+  b.history.revision(b.session.id, '第三句台詞', {revisionId: 'revision-b'}, {reason: 'text_matched'});
+  b.history.enter(b.session, 2, {source: 'transcript'});
+  await b.history.flush(b.session.id);
+  const beforeRetry = await store.getFollowRun(a.session.id, id);
+  await a.history.flush(a.session.id);
+  const saved = await store.getFollowRun(a.session.id, id);
+  assert.deepEqual(saved, beforeRetry); // no old cursor, totals or sequence can overwrite the newer commit
+  assert.equal(saved.run.cursor.index, 2);
+  assert.equal(saved.run.diagnostics.transcriptRevisions, 2);
+  assert.equal(saved.events.filter(event => event.type === 'transcript_revision').length, 2);
+  await a.history.end(a.session.id);
+  await b.history.close();
+});
+
+test('fresh start replaces the database run even after this service cached an empty history', async () => {
+  const a = fixture('fresh-stale-cache'), b = fixture('fresh-stale-cache');
+  await b.history.list(b.session.id);
+  const old = await a.history.start(a.session);
+  await a.history.flush(a.session.id);
+  const next = await b.history.start(b.session, {fresh: true});
+  await b.history.flush(b.session.id);
+  assert.notEqual(old, next);
+  const closed = await store.getFollowRun(a.session.id, old);
+  assert.equal(closed.run.endReason, 'new_run');
+  assert.equal(closed.events.filter(event => event.type === 'run_end').length, 1);
+  assert.equal((await store.getOpenFollowRun(a.session.id)).run.id, next);
+  await a.history.close();
+  await b.history.end(b.session.id);
+});
+
+test('a reserved run retains its start event when the process stops before its first flush', async () => {
+  const a = fixture('reserved-run'), b = fixture('reserved-run');
+  const id = await a.history.start(a.session);
+  const reserved = await store.getFollowRun(a.session.id, id);
+  assert.deepEqual(reserved.events.map(event => event.type), ['run_start']);
+  assert.equal(await b.history.start(b.session), id);
+  await b.history.flush(b.session.id);
+  assert.equal((await store.getFollowRun(a.session.id, id)).events.filter(event => event.type === 'run_start').length, 1);
+  await b.history.end(b.session.id);
+  await a.history.close();
+});
+
+test('explicit deletion is not undone by a stale writer and its late batch cannot conflict with a new run', async () => {
+  const a = fixture('deleted-stale-run'), b = fixture('deleted-stale-run');
+  const old = await a.history.start(a.session);
+  await a.history.flush(a.session.id);
+  await b.history.start(b.session);
+  b.history.event(b.session.id, 'late_test');
+  await a.history.remove(a.session.id);
+  const next = await a.history.start(a.session);
+  await a.history.flush(a.session.id);
+  await b.history.flush(b.session.id);
+  assert.equal(await store.getFollowRun(a.session.id, old), null);
+  assert.equal((await store.getOpenFollowRun(a.session.id)).run.id, next);
+  assert.equal((await store.listFollowRuns(a.session.id)).length, 1);
+  assert.equal(b.history.status(b.session.id).runId, null);
+  await a.history.end(a.session.id);
+});

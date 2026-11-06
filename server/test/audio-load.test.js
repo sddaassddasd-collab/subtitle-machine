@@ -14,7 +14,14 @@ test('enabled diagnostics retain revisions and bounded traces without writing a 
   let clock = 1760000000000;
   history.now = () => clock;
   history.store = {getOpenFollowRun: async () => null,
-    saveFollowHistory: async (_run, batch) => { events.push(...batch); }};
+    openFollowRun: async run => {
+      events.push({id: 'run-start', type: 'run_start', at: run.startedAt, sequence: 1});
+      return {run: {...run, nextSequence: 2}, context: null, created: true};
+    },
+    saveFollowHistory: async (run, batch) => {
+      events.push(...batch);
+      return {run, context: [...events].reverse().find(event => event.type === 'context')};
+    }};
   await history.start(fixture.session);
   const started = performance.now();
   for (let sequence = 1; sequence <= 3000; sequence++) {
