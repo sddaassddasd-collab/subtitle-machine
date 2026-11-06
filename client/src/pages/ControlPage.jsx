@@ -5520,6 +5520,11 @@ const ControlPage = () => {
               </fieldset>
               {activePanel !== 'live' && <ScriptRecognitionSettings key={sessionId} sessionId={sessionId} socketRef={socketRef}
                 vocabulary={transcription.scriptVocabulary} diagnostics={transcription.acousticDiagnostics} semantic={transcription.semanticFollow}/>}
+              {activePanel === 'follow' && sessionMeta &&
+                <PerformanceFollowPanel key={`${sessionId}:${sessionMeta.selectedCellId}`} session={sessionMeta} lines={lines} socketRef={socketRef}
+                  runtime={autoFollow.performance} currentIndex={liveCurrentIndex}
+                  onManual={() => handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.MANUAL)}
+                  active={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && transcription.active}/>}
               <label htmlFor="transcription-context">辨識主題 / 術語提示</label>
               <textarea
                 id="transcription-context"
@@ -5921,7 +5926,7 @@ const ControlPage = () => {
             </label>
             <span>{isLiveOutput ? '座談語言' : '演出語言'}：{transcription.sourceLanguages.find(language => language.code === transcription.language)?.name || '中文'}</span>
             {!isLiveOutput && <span>跟戲劇本：{transcription.followingScript?.languageName || '尚未指定'}</span>}
-            <button type="button" className="subtle-button" onClick={() => setActivePanel(isLiveOutput ? 'live' : 'follow')}>{isLiveOutput ? '即時字幕設定' : '跟戲設定'}</button>
+            <button type="button" className="subtle-button" onClick={() => setActivePanel(isLiveOutput && !sessionMeta?.automaticLive ? 'live' : 'follow')}>{isLiveOutput && !sessionMeta?.automaticLive ? '即時字幕設定' : '跟戲設定'}</button>
           </div>
           <div className="script-toolbar" hidden={!editingModeEnabled}>
 
@@ -5956,13 +5961,6 @@ const ControlPage = () => {
           </div>
         </header>
 
-
-
-        {sessionMeta && (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || activePanel === 'follow') &&
-          <PerformanceFollowPanel key={`${sessionId}:${sessionMeta.selectedCellId}`} session={sessionMeta} lines={lines} socketRef={socketRef}
-            runtime={autoFollow.performance} currentIndex={liveCurrentIndex}
-            onManual={() => handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.MANUAL)}
-            active={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && transcription.active}/>}
         {isLiveOutput && !editingModeEnabled && <div className="workspace-live-captions" aria-live="polite">
           <div className="workspace-live-heading"><h2>{sessionMeta?.automaticLive ? '演出即時字幕' : '座談內容'}</h2><span>劇本位置保留在 CUE {(sessionMeta?.resumeCue ?? liveCurrentIndex) + 1}</span></div>
           {(transcription.liveEntries?.length ? transcription.liveEntries : transcription.text?.trim()

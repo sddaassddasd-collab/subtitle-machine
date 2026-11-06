@@ -169,3 +169,54 @@ test('distinctive final script evidence returns immediately; the hold prevents t
   p.observe(event('x', 9100, 11000), null, 11000);
   assert.equal(p.observe(event('y', 11100, 12000), null, 12000), null);
 });
+
+test('short distinctive interim speech can settle without waiting for an ASR final', () => {
+  const {p} = fixture(); enterLive(p);
+  const e = {...event('short', 8500, 10000, '你們的論點'), isFinal: false};
+  const m = match(3, {evidence: 5, offset: 5, length: 5});
+  assert.equal(p.observe(e, m, 10000), null);
+  assert.equal(p.observe(e, m, 10500), null);
+  assert.equal(p.observe(e, m, 11000).index, 3);
+});
+
+test('a later interim and its final cannot overwrite a separate preceding cue witness', () => {
+  const {p} = fixture(); enterLive(p);
+  const weak = i => match(i, {confidence: .82, evidence: 5});
+  p.observe(event('first', 8500, 10000), weak(1), 10000);
+  p.observe({...event('second', 11000, 12000), isFinal: false}, weak(3), 12000);
+  const action = p.observe(event('second', 11000, 13000), weak(3), 13000);
+  assert.equal(action.index, 3);
+  assert.equal(action.returnEvidence.supportingIndex, 1);
+});
+
+test('locked-live tracking advances its confirmed background cursor without moving foreground position', () => {
+  const {p, lines} = fixture(); enterLive(p);
+  p.command('lock-live', 0, 8000, 8000);
+  lines[2].type = 'direction';
+  p.observe(event('forward', 9000, 10000, texts[3]), match(3), 10000);
+  assert.equal(p.source, 'live'); assert.equal(p.lastReliable.index, 0);
+  assert.equal(p.searchWindow(10000).origin, 3);
+  assert.equal(p.publicState().backgroundConfirmedIndex, 3);
+});
+
+test('live search expands after a missed passage but remains bounded and cannot cross music', () => {
+  const {p} = fixture();
+  p.bind(p.settings, 'c', Array.from({length: 200}, (_, i) => ({id: `wide-${i}`, text: `字幕格${i}`})));
+  enterLive(p);
+  assert.equal(p.searchWindow(8000).to, 18);
+  assert.equal(p.searchWindow(16000).to, 36);
+  assert.equal(p.searchWindow(999999).to, 72);
+  p.lines[25].music = true;
+  assert.equal(p.searchWindow(999999).to, 24);
+});
+
+test('withdrawn interims and an unfinished opening do not qualify as continuously stable return evidence', () => {
+  const {p} = fixture(); enterLive(p);
+  const e = {...event('revised', 8500, 10000, '你們的論點'), isFinal: false};
+  const m = match(3, {evidence: 5, offset: 5, length: 5});
+  p.observe(e, m, 10000);
+  p.observe({...e, text: '你們登論點'}, null, 10500);
+  assert.equal(p.observe(e, m, 11000), null);
+  assert.equal(p.observe(e, {...m, length: 20}, 12000), null);
+  assert.equal(p.source, 'live');
+});

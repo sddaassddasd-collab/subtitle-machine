@@ -23,7 +23,7 @@ function vocabularyIndex(lines) {
   scriptCache.set(lines, result); return result;
 }
 
-function scriptKeyterms(lines, currentIndex, context = '', vocabulary = []) {
+function scriptKeyterms(lines, currentIndex, context = '', vocabulary = [], {nearby = true} = {}) {
   const terms = [], seen = new Set();
   let bytes = 0;
   const add = value => {
@@ -36,8 +36,9 @@ function scriptKeyterms(lines, currentIndex, context = '', vocabulary = []) {
   };
   normalizeVocabulary(vocabulary).forEach(add);
   String(context).split(/[\s,，、;；\n]+/u).forEach(add);
-  const nearby = lines.slice(Math.max(0, currentIndex - 1), currentIndex + 9).filter(l => l.type !== 'direction' && !l.music);
-  nearby.forEach(line => add(line.role));
+  const localLines = lines.slice(Math.max(0, currentIndex - 1), currentIndex + 9).filter(l => l.type !== 'direction' && !l.music);
+  localLines.forEach(line => add(line.role));
+  if (!nearby) return terms;
   const index = vocabularyIndex(lines), ranked = new Map();
   for (let i = Math.max(0, currentIndex - 1); i < Math.min(lines.length, currentIndex + 9); i++) {
     for (const word of index.entries[i]) {
@@ -60,7 +61,7 @@ function refreshKeyterms(stream, lines, currentIndex, emit, now = Date.now()) {
     return;
   }
   const terms = scriptKeyterms(lines, currentIndex, stream.transcriptionContext,
-    stream.scriptVocabularyActive === false ? [] : stream.scriptVocabulary);
+    stream.scriptVocabularyActive === false ? [] : stream.scriptVocabulary, {nearby: stream.scriptContextUncertain !== true});
   if (JSON.stringify(terms) === JSON.stringify(state.terms)) return;
   try {
     stream.socket.send(JSON.stringify({type: 'Configure', keyterms: terms}));

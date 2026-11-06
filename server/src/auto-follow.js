@@ -959,13 +959,16 @@ function recoverWordPosition(tracker, script, lines, currentIndex, event) {
 
 // Isolated new speech only: no earlier ASR items, expectation bonus or global
 // correction. Competing nearby lines remain present for ambiguity checks.
-function localSupportCandidates(script, currentIndex, text) {
+function localSupportCandidates(script, currentIndex, text, {ahead = T.nearbyAhead, behind = T.nearbyBehind, crossDirections = false} = {}) {
   const heard = normalizeText(text).slice(-MAX_HEARD);
-  let to = Math.min(script.entries.length - 1, currentIndex + T.nearbyAhead);
+  let to = Math.min(script.entries.length - 1, currentIndex + ahead);
   for (let i = currentIndex + 1; i <= to; i++) {
-    if (script.entries[i].source.music || script.entries[i].source.type === 'direction') { to = i - 1; break; }
+    if (script.entries[i].source.music || (!crossDirections && script.entries[i].source.type === 'direction')) { to = i - 1; break; }
   }
-  const from = Math.max(0, currentIndex - T.nearbyBehind);
+  let from = Math.max(0, currentIndex - behind);
+  if (crossDirections) for (let i = currentIndex - 1; i >= from; i--) {
+    if (script.entries[i].source.music) { from = i + 1; break; }
+  }
   const byIndex = new Map(align(heard, script, from, to, {local: true}).map(c => [c.index, c]));
   for (const c of align(heard, script, from, to, {local: true, phonetic: true})) {
     if (c.phoneticMatches > 0 && c.confidence >= S.phoneticConfidence && c.matchedCharacters >= T.phoneticMinimumMatches &&

@@ -60,9 +60,10 @@ const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, 
   textConfidence: .86, phoneticConfidence: .90, textEvidence: 5, literalMatches: 4, textMargin: .10,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 8, onset: 1, acoustic: 4, diagnostics: 6, semantic: 4, performance: 1}),
+  versions: Object.freeze({text: 8, onset: 1, acoustic: 4, diagnostics: 7, semantic: 4, performance: 2, captionCorrection: 1}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,
+  captionCorrection: require('./script-caption-correction').CAPTION_CORRECTION_SETTINGS,
 });
 module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS};

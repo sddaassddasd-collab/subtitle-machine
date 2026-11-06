@@ -94,6 +94,8 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         projector: () => getProjectorPayload(session),
         resetPosition: () => resetAutoFollowPosition(session),
         speechStarted: startMs => handleAutoFollowSpeechStarted(session.id, startMs),
+        correctLive: (client, itemId) => queueScriptCaptionCorrection(session, stream, client, itemId,
+          () => transcriptionStreams.get(session.id) === stream && !stream.closing),
         enableSemantic: request => {
           ensureTranscriptionState(session).semanticFollow = true;
           semanticFollower.cooldownMs = 0;

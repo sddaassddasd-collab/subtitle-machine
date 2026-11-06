@@ -18,7 +18,7 @@ function setup(t, extra = {}) {
     f.transcript(text, {itemId: id, streamId: 's', startMs, endMs, receivedAt, isFinal: true, ...extraOptions});
   };
   const begin = () => {
-    say(texts[0], 'anchor', 0, 1000, 1000);
+    say(f.session.lines[0].text, 'anchor', 0, 1000, 1000);
     say('今天突然想先跟大家聊一件事情', 'x', 1100, 3000, 3000);
     say('外面下著雨不曉得大家帶了傘沒有', 'y', 4000, 8000, 8000);
   };
@@ -169,4 +169,99 @@ test('editing an overlap cue invalidates the running pace and deleted anchors do
   f.session.sharedLines = f.session.lines;
   const p = f.follower(); assert.equal(p.groups[0].valid, false);
   assert.throws(() => p.command('start-overlap', 1, 1000), /有效交疊段/);
+});
+
+test('live reacquisition crosses a silent stage direction and preserves an added spoken particle', t => {
+  const f = setup(t, {texts: [texts[0], {text: '（兩人倒抽一口氣。）', type: 'direction'},
+    '究竟他為什麼不快樂？', '另外兩名專家看著國王。']});
+  f.begin();
+  assert.equal(f.session.automaticLive, true);
+  f.say('為什麼不快樂呢？', 'return-with-particle', 12000, 14000, 14000);
+  assert.equal(f.session.automaticLive, false);
+  assert.equal(f.session.currentIndex, 2);
+  assert.equal(f.state().lastDecision.source, 'script_return');
+});
+
+test('an ASR final spanning two cues uses recent word ranges to reacquire the later phrase', t => {
+  const f = setup(t, {texts: [texts[0], '究竟他為什麼不快樂？', '太可怕了你竟然說這個詞。']});
+  f.begin();
+  f.say('為什麼不快樂呢太可怕了你竟然說這個詞', 'two-cues', 12000, 15500, 15500, {words: [
+    {word: '為什麼不快樂呢', start: 12, end: 13.5}, {word: '太可怕了你竟然說這個詞', start: 13.6, end: 15.5}]});
+  assert.equal(f.session.automaticLive, false);
+  assert.equal(f.session.currentIndex, 2);
+  assert.ok(f.confirmations.some(c => c.index === 2 && c.audioStartMs === 13600));
+});
+
+test('a provisional background text candidate does not cancel a pending semantic request as resolved', async t => {
+  const f = setup(t, {texts: [texts[0], texts[1], texts[2], '因為你們都沒有根據現在的情境解決問題。']});
+  f.begin();
+  let resolve;
+  f.enableSemantic(() => new Promise(r => { resolve = r; }));
+  f.say('因為你們根本就沒有根據現在的情境來解決問題', 'weak-text', 12000, 14000, 14000);
+  assert.equal(f.session.automaticLive, true);
+  assert.equal(f.state().performance.backgroundIndex, 3);
+  assert.equal(typeof resolve, 'function');
+  resolve({choices: [{message: {content: JSON.stringify({matches: [], ambiguous: true})}}]});
+  await new Promise(r => setImmediate(r));
+  assert.ok(f.events.some(e => e.status === 'uncertain' && e.reason === 'ambiguous_model'));
+  assert.ok(!f.events.some(e => e.status === 'stale' && e.reason === 'text_resolved'));
+});
+
+test('switching to automatic live keeps nearby script vocabulary on the same ASR connection', t => {
+  const f = setup(t);
+  f.begin();
+  const p = f.follower(); p.switchedAt = Date.now();
+  f.stream.sessionId = f.session.id;
+  f.stream.scriptKeyterms = {terms: [], pending: null, checkedAt: 0};
+  const before = f.sent.length;
+  assert.equal(f.send({sessionId: f.session.id, audio: Buffer.alloc(960).toString('base64'),
+    sequence: 1, durationMs: 20, level: .01}).ok, true);
+  const configure = f.sent.slice(before).filter(x => typeof x === 'string').map(x => JSON.parse(x));
+  assert.equal(configure[0].type, 'Configure');
+  assert.ok(configure[0].keyterms.length > 0);
+  assert.equal(f.stream.ready, true);
+});
+
+test('caption correction updates output only, skips concurrent jobs, and retains raw alignment text', async t => {
+  const f = setup(t, {texts: [texts[0], '更核心的問題應該是什麼', '大家都有不同的意見']});
+  f.begin(); f.follower().switchedAt = Date.now();
+  f.say('其實跟核心的問題應該是這樣吧', 'caption', 12000, 14000);
+  assert.equal(f.session.automaticLive, true);
+  let resolve, calls = 0;
+  const client = {responses: {create: () => { calls++; return new Promise(r => {resolve = r; }); }}};
+  f.correctLive(client, 'caption'); f.correctLive(client, 'caption');
+  assert.equal(calls, 1);
+  assert.match(f.viewer().text, /其實跟核心/);
+  resolve({status: 'completed', output_text: JSON.stringify({edits: [{from: '跟核心', to: '更核心'}]})});
+  await new Promise(r => setImmediate(r));
+  assert.match(f.viewer().text, /其實更核心的問題應該是這樣吧/);
+  assert.match(f.projector().text, /其實更核心/);
+  assert.match(f.follower().buffer.find(e => e.itemId === 'caption').text, /其實跟核心/);
+  assert.equal(f.session.currentIndex, 0); assert.equal(f.session.automaticLive, true);
+  assert.ok(f.events.some(e => e.type === 'caption_correction' && e.displayOnly === true));
+});
+
+test('a late correction cannot overwrite a cue after script reacquisition', async t => {
+  const f = setup(t, {texts: [texts[0], '更核心的問題應該是什麼', texts[2]]});
+  f.begin(); f.follower().switchedAt = Date.now() - 5000;
+  f.say('其實跟核心的問題應該是這樣吧', 'caption', 12000, 14000);
+  let resolve;
+  f.correctLive({responses: {create: () => new Promise(r => { resolve = r; })}}, 'caption');
+  f.say(texts[2], 'return', 15000, 17000);
+  assert.equal(f.session.automaticLive, false);
+  resolve({status: 'completed', output_text: JSON.stringify({edits: [{from: '跟核心', to: '更核心'}]})});
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.viewer().text, texts[2]);
+  assert.ok(!f.events.some(e => e.type === 'caption_correction' && e.status === 'applied'));
+});
+
+test('a longer improvisation expands reacquisition beyond the original eighteen cues', t => {
+  const lines = Array.from({length: 45}, () => '請開始今天的舞台演出');
+  lines[0] = texts[0]; lines[4] = {text: '（兩人倒抽一口氣。）', type: 'direction'};
+  lines[25] = '另外兩名專家看著國王，國王沉思了一會兒。';
+  const f = setup(t, {texts: lines}); f.begin();
+  f.say(lines[25], 'beyond-old-window', 15000, 17000, 17000);
+  assert.equal(f.session.automaticLive, false);
+  assert.equal(f.session.currentIndex, 25);
+  assert.equal(f.state().lastDecision.source, 'script_return');
 });

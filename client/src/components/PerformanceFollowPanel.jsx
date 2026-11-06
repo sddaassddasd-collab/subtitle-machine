@@ -15,7 +15,7 @@ export default function PerformanceFollowPanel({session, lines, socketRef, runti
   const [message, setMessage] = useState('')
   const revision = useRef(0), mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-  const settings = draft || session.performanceFollowing || {automaticLive: false, overlapGroups: []}
+  const settings = draft || session.performanceFollowing || {automaticLive: false, scriptCorrection: true, overlapGroups: []}
   const groups = settings.overlapGroups.filter(g => g.cellId === session.selectedCellId)
   const edit = value => { revision.current++; setDraft(value) }
   const emit = (event, data, saved) => {
@@ -54,6 +54,7 @@ export default function PerformanceFollowPanel({session, lines, socketRef, runti
       <strong>演出輔助</strong>
       <span>{runtime?.source === 'live' ? '即時字幕 · 背景持續定位' : '劇本字幕'} · {reasons[runtime?.reason] || '持續比對台詞'}</span>
       {Number.isInteger(runtime?.backgroundIndex) && runtime?.source === 'live' && <span>背景候選：第 {runtime.backgroundIndex + 1} 格</span>}
+      {runtime?.source === 'live' && runtime?.searchWindow && <span>搜尋範圍：第 {runtime.searchWindow.from + 1}～{runtime.searchWindow.to + 1} 格</span>}
       {Number.isInteger(runtime?.preparedIndex) && <span>語意候選：第 {runtime.preparedIndex + 1} 格（尚未換格）</span>}
       {runtime?.group && <span>第 {runtime.group.start + 1}～{runtime.group.end + 1} 格 · {runtime.group.speed.toFixed(2)} 倍 · {runtime.group.paused ? '暫停' : '估計中'}</span>}
     </div>
@@ -76,6 +77,9 @@ export default function PerformanceFollowPanel({session, lines, socketRef, runti
       <label className="checkbox-row"><input type="checkbox" checked={settings.automaticLive}
         onChange={e => edit({...settings, automaticLive: e.target.checked})}/>持續偏離劇本時自動顯示即時字幕，找到可靠台詞後接回（實驗功能）</label>
       <p className="input-note">先確認過劇本位置，持續收到可用發話且附近台詞對不上時才會切換。短暫改詞交由文字／語意比對；沒有辨識文字時不自動判定為即興。鎖定輸出只固定字幕來源，仍持續定位；人工跳格會取消估計並鎖定劇本來源。</p>
+      <label className="checkbox-row"><input type="checkbox" checked={settings.scriptCorrection !== false}
+        onChange={e => edit({...settings, scriptCorrection: e.target.checked})}/>即時字幕參考附近劇本校正同音／近音錯字</label>
+      <p className="input-note">劇本詞彙提示在即時字幕期間也會持續更新。文字校正需 OpenAI 金鑰與後端文字校正功能，依用量計費；先顯示辨識文字，再於背景校正。保留演員的改詞、語尾及即興，原始辨識與時間仍供定位使用，校正文字不作為換格證據。</p>
       <ul>{groups.map(g => {
         const a = lines.findIndex(l => l.id === g.startLineId), b = lines.findIndex(l => l.id === g.endLineId)
         const invalid = a < 0 || b <= a || b - a >= 12 || !lines[b + 1] || lines.slice(a, b + 2).some(l => l.type === 'direction' || l.music)

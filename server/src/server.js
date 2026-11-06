@@ -16,6 +16,8 @@ const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow'
 const {trackerSnapshot, clientMetadata} = require('./follow-trace');
 const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
 const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
+const {locateLiveScript: locateBackgroundScript, liveCandidates} = require('./live-script');
+const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
@@ -5724,8 +5726,8 @@ function getOutputTranscriptionEntries(session, stream) {
   if (!session.automaticLive) return buildTranscriptionDisplayEntries(stream);
   return (getAutoFollowState(session.id).performance.buffer || []).map(entry => {
     const fragment = stream?.fragmentByItemId?.get(entry.itemId);
-    const fullText = fragment?.text === entry.text || stream?.draftByItemId?.get(entry.itemId) === entry.text;
-    return {id: entry.id, text: entry.text, isFinal: entry.isFinal, speakerId: fragment?.speakerId ?? null,
+    const fullText = fragment?.text === (entry.displayText || entry.text) || stream?.draftByItemId?.get(entry.itemId) === entry.text;
+    return {id: entry.id, text: entry.displayText || entry.text, isFinal: entry.isFinal, speakerId: fragment?.speakerId ?? null,
       // A translation of a whole ASR item must not accompany a trimmed suffix.
       translations: fullText ? {...fragment?.provisionalTranslations, ...fragment?.translations,
         ...stream?.draftTranslationsByItemId?.get(entry.itemId)?.translations} : {}};
@@ -5735,6 +5737,39 @@ function getOutputTranscriptionEntries(session, stream) {
 function getOutputTranscriptionText(session, stream) {
   return session.automaticLive ? getOutputTranscriptionEntries(session, stream).map(e => e.text).join('\n')
     : sanitizeTranscriptionMultilineText(ensureTranscriptionState(session).text);
+}
+
+function queueScriptCaptionCorrection(session, stream, client, itemId, isCurrent) {
+  if (!session.automaticLive || !client || stream.scriptCaptionBusy || !getPerformanceFollower(session).settings.scriptCorrection) return;
+  const performance = getPerformanceFollower(session), entry = performance.buffer.find(e => e.itemId === itemId && e.isFinal);
+  if (!performance.hasRecentScriptContext()) return;
+  if (!entry) return;
+  const lines = getFollowingLines(session), window = performance.searchWindow(), origin = window.origin;
+  const nearby = lines.slice(Math.max(window.from, origin - 2), Math.min(window.to + 1, origin + 10))
+    .filter(l => l.type !== 'direction' && !l.music).map(l => ({text: String(l.text).slice(0, 300), role: l.role || ''}));
+  const original = entry.text;
+  stream.scriptCaptionBusy = true;
+  void correctScriptCaption(client, original, nearby, TRANSCRIPTION_CORRECTION_MODEL).then(corrected => {
+    if (!isCurrent() || stream.closing || !session.automaticLive || getAutoFollowState(session.id).performance !== performance ||
+      performance.lines !== getFollowingLines(session) || !performance.settings.scriptCorrection || !performance.buffer.includes(entry) || entry.text !== original) return;
+    if (corrected !== original) {
+      entry.displayText = corrected;
+      const fragment = stream.fragmentByItemId?.get(itemId);
+      if (fragment?.text === original) {
+        fragment.rawTranscript = original; fragment.text = corrected;
+        fragment.provisionalTranslations = {...fragment.provisionalTranslations, ...fragment.translations};
+        fragment.translations = {};
+        clearMergedLineOverridesForItem(stream, itemId);
+        queueRequestedLiveTranslations(stream, session.id, [itemId], 'live');
+      }
+    }
+    autoFollowHistory.event(session.id, 'caption_correction', {status: corrected === original ? 'unchanged' : 'applied',
+      original, corrected, itemId, displayOnly: true, rules: CAPTION_CORRECTION_SETTINGS, ...followHistoryClock(session.id)});
+    if (corrected !== original) { broadcastLiveTranscriptionState(session.id, stream); broadcastTranscriptionState(session.id); }
+  }).catch(error => {
+    if (isCurrent() && session.automaticLive) autoFollowHistory.event(session.id, 'caption_correction',
+      {status: 'failed', itemId, reason: String(error?.message || '').slice(0, 150), ...followHistoryClock(session.id)});
+  }).finally(() => { stream.scriptCaptionBusy = false; });
 }
 
 function getTranscriptionDisplayParts(stream) {
@@ -7892,8 +7927,10 @@ function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
   if (stream?.provider === 'deepgram') {
     const session = getSessionRecord(stream.sessionId);
     stream.scriptVocabularyActive = session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
+    stream.scriptContextUncertain = session?.automaticLive === true && !getPerformanceFollower(session).hasRecentScriptContext();
     if (session)
-      refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && !session.automaticLive ? getFollowingLines(session) : [], session.currentIndex,
+      refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? getFollowingLines(session) : [],
+        session.automaticLive ? getPerformanceFollower(session).searchWindow().origin : session.currentIndex,
         (status, data) => autoFollowHistory.event(session.id, 'keyterms_update', {status, ...data, ...followHistoryClock(session.id)}));
     sendDeepgramAudioChunk(stream, audio, durationMs, level);
     return;
@@ -9166,10 +9203,11 @@ function resetAutoFollowState(sessionId, patch = {}) {
     const previous = autoFollowStates.get(sessionId)?.performance;
     nextState.performance.source = 'live';
     nextState.performance.lock = previous?.lock || 'auto';
-    nextState.performance.originIndex = previous?.lastReliable?.index ?? previous?.originIndex ?? session.currentIndex;
+    nextState.performance.originIndex = previous?.backgroundConfirmed?.index ?? previous?.lastReliable?.index ?? previous?.originIndex ?? session.currentIndex;
     nextState.performance.backgroundIndex = nextState.performance.originIndex;
     nextState.performance.reason = 'provider_reconnecting';
     nextState.performance.switchedAt = Date.now();
+    nextState.performance.searchAt = nextState.performance.switchedAt;
   }
   if (session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
     nextState.tracker.script = prepareScript(getFollowingLines(session), autoFollowStates.get(sessionId)?.tracker.script);
@@ -9314,6 +9352,8 @@ function applyPerformanceAction(session, action) {
 
 function performanceTextMatch(state, lines, result, transcript, options) {
   if (!Number.isInteger(result.index)) return null;
+  if (state.performance.source === 'live' && result.candidate)
+    return {...result.candidate, index: result.index, startMs: result.evidence.startMs, endMs: result.evidence.endMs};
   const speech = result.candidate?.speech || options;
   const heard = result.candidate?.speech?.text || transcript;
   const origin = state.performance.source === 'live'
@@ -9327,17 +9367,7 @@ function performanceTextMatch(state, lines, result, transcript, options) {
 }
 
 function locateLiveScript(state, lines, transcript, options) {
-  const performance = state.performance;
-  const speech = freshSpeech({...options, text: transcript}, performance.lastConfirmedEnd);
-  if (!speech) return {status: 'searching', reason: 'no_fresh_script_evidence'};
-  const origin = performance.lastReliable?.index ?? performance.originIndex ?? 0;
-  const candidates = localSupportCandidates(prepareScript(lines, state.tracker.script), origin, speech.text)
-    .sort((a, b) => b.confidence - a.confidence);
-  const best = candidates[0], margin = best ? best.confidence - (candidates[1]?.confidence || 0) : 0;
-  const accepted = best && best.evidence >= 4 && best.confidence >= .8 && margin >= .07;
-  return {status: 'searching', reason: accepted ? 'background_script_candidate' : 'background_script_uncertain',
-    ...(accepted ? {index: best.index} : {}), candidate: best ? {...best, speech} : null,
-    evidence: {startMs: speech.startMs, endMs: speech.endMs}, completed: false};
+  return locateBackgroundScript(state.performance, lines, transcript, options, state.tracker.script);
 }
 
 function switchCaptionMode(session, mode, language, {stopStream = true} = {}) {
@@ -9554,11 +9584,15 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
   applyPerformanceAction(session, performanceAction);
   if (wasLive || session.automaticLive) {
+    autoFollowHistory.observe(sessionId, 'script_return', performance.returnDecision?.reason || 'script_reacquired',
+      {...followHistoryClock(sessionId), searchWindow: result.searchWindow, decision: performanceAction?.returnEvidence || performance.returnDecision,
+        itemId: options.itemId, isFinal: options.isFinal, backgroundIndex: performance.backgroundIndex});
     if (wasLive && !session.automaticLive && Number.isInteger(performanceAction?.index)) {
+      const speech = result.candidate?.speech || {...options, text: transcript};
       applySemanticLocation(state.tracker, followingLines, performanceAction.index,
-        {...options, text: transcript, endMs: performance.lastReliable.endMs});
+        {...speech, startMs: performanceAction.audioStartMs, endMs: performance.lastReliable.endMs});
       if (performanceAction.matchSource === 'transcript') autoFollowHistory.confirm(sessionId, performanceAction.index, 'transcript',
-        {...followHistoryClock(sessionId), text: transcript, audioMs: performanceAction.audioEndMs,
+        {...followHistoryClock(sessionId), text: speech.text, audioMs: performanceAction.audioEndMs,
           audioStartMs: performanceAction.audioStartMs, itemId: options.itemId, completed: false, reason: 'script_reacquired'});
     }
     updateAutoFollowState(sessionId, {listening: true, lastHeardText: sanitizeLineText(transcript),
@@ -9621,25 +9655,29 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
 
 function handleSemanticFollow(session, stream, lines, state, transcript, options, result, receivedAt) {
   if (!stream || session.transcription?.semanticFollow !== true || !stream.translationClient) return;
-  const sessionId = session.id, tracker = state.tracker, fromIndex = session.currentIndex,
+  const performance = getPerformanceFollower(session), live = session.automaticLive;
+  const window = live ? performance.searchWindow(receivedAt) : null;
+  const sessionId = session.id, tracker = state.tracker, displayIndex = session.currentIndex, fromIndex = window?.origin ?? session.currentIndex,
     cellId = session.selectedCellId, verifiedAt = state.lastVerifiedAt;
   if (lines[fromIndex]?.music || lines[fromIndex]?.type === 'direction') {
     semanticFollower.reset(stream, 'music_or_direction_barrier'); return;
   }
   const candidates = [];
-  for (let index = fromIndex; index <= Math.min(lines.length - 1, fromIndex + SEMANTIC_SETTINGS.ahead); index++) {
+  for (let index = fromIndex; index <= (window?.to ?? Math.min(lines.length - 1, fromIndex + SEMANTIC_SETTINGS.ahead)); index++) {
     const line = lines[index];
-    if (line.music || line.type === 'direction') break;
+    if (line.music || (!live && line.type === 'direction')) break;
+    if (line.type === 'direction') continue;
     candidates.push({index, lineId: line.id, text: String(line.text || '').slice(0, SEMANTIC_SETTINGS.cueCharacters)});
   }
   const context = JSON.stringify([cellId, session.transcriptionLanguage, options.streamId, candidates]);
   void semanticFollower.observe(stream, {...options, client: stream.translationClient, text: transcript,
-    currentIndex: fromIndex, context, scope: tracker, scriptScope: lines, candidates, textResolved: Number.isInteger(result.index)}, {
+    currentIndex: fromIndex, context, scope: tracker, scriptScope: lines, candidates, textResolved: !live && Number.isInteger(result.index)}, {
     isCurrent: () => {
       if (getSessionRecord(sessionId) !== session) return 'session_changed';
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return 'stream_changed';
       if (session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO || !ensureTranscriptionState(session).semanticFollow) return 'feature_disabled';
-      if (session.currentIndex !== fromIndex) return 'display_position_changed';
+      if (session.currentIndex !== displayIndex || session.automaticLive !== live) return 'display_position_changed';
+      if (live && performance.searchWindow(receivedAt).origin !== fromIndex) return 'background_position_changed';
       if (session.selectedCellId !== cellId) return 'cell_changed';
       if (getAutoFollowState(sessionId).tracker !== tracker) return 'tracker_reset';
       if (state.lastVerifiedAt !== verifiedAt) return 'newer_verified_text';
@@ -9647,7 +9685,8 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
       if (stream.autoFollowAudioMs - options.endMs > SEMANTIC_SETTINGS.maximumResultAgeMs) return 'audio_result_expired';
       return true;
     },
-    textCandidates: speech => localSupportCandidates(tracker.script, fromIndex, speech.text),
+    textCandidates: speech => live ? liveCandidates(prepareScript(lines, tracker.script), window, speech)
+      : localSupportCandidates(tracker.script, fromIndex, speech.text),
     record: (status, data) => {
       const performance = getPerformanceFollower(session);
       if (['pending', 'current_support'].includes(status)) performance.semanticAt = Date.now();
@@ -12469,7 +12508,9 @@ function startDeepgramTranscription({
             [fragment.itemId],
             'live',
           );
-          if (correctionClient) {
+          if (correctionClient && getSessionRecord(sessionId)?.automaticLive) {
+            queueScriptCaptionCorrection(getSessionRecord(sessionId), stream, correctionClient, fragment.itemId, isCurrent);
+          } else if (correctionClient) {
             queueTranscriptionCorrection({
               stream,
               isCurrent,
@@ -12935,7 +12976,9 @@ function startRealtimeTranscription({
     syncTranscriptionStateFromStream(sessionId, stream);
     handleAutoFollowTranscript(sessionId, transcript,
       getAutoFollowTranscriptOptions(stream, event.item_id, true));
-    queueTranscriptionCorrection({
+    if (getSessionRecord(sessionId)?.automaticLive && TRANSCRIPTION_CORRECTION_ENABLED) {
+      queueScriptCaptionCorrection(getSessionRecord(sessionId), stream, client, event.item_id, isCurrent);
+    } else queueTranscriptionCorrection({
       stream,
       isCurrent,
       client,
@@ -12951,7 +12994,7 @@ function startRealtimeTranscription({
     );
 
     const mergedLine = stream.finalizedLineByItemId.get(event.item_id) || null;
-    if (mergedLine?.itemIds?.length > 1) {
+    if (mergedLine?.itemIds?.length > 1 && !getSessionRecord(sessionId)?.automaticLive) {
       queueMergedLineCorrection({
         stream,
         isCurrent,

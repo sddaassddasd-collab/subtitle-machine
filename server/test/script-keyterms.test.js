@@ -50,3 +50,9 @@ test('manual programme phrases retain whole words and are prioritized over gener
   const other = scriptKeyterms([{role: '另一角色', text: '完全不同的故事'}], 0);
   assert.ok(!other.includes('完整術語'));
 });
+
+test('uncertain background location keeps programme terms and roles without repeatedly biasing old dialogue', () => {
+  const terms = scriptKeyterms([{role: '國王', text: '搔癢治療有很大的進展'}], 0, '快樂王國', ['隔離所'], {nearby: false});
+  assert.ok(terms.includes('國王') && terms.includes('隔離所') && terms.includes('快樂王國'));
+  assert.ok(!terms.includes('治療') && !terms.includes('進展'));
+});
