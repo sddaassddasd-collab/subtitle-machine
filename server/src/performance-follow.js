@@ -16,6 +16,7 @@ const number = (value, fallback, min, max) => Number.isFinite(Number(value))
 function normalizePerformanceSettings(value) {
   if (value && typeof value === 'object' && normalized.has(value)) return normalized.get(value);
   const result = {automaticLive: value?.automaticLive === true, scriptCorrection: value?.scriptCorrection !== false,
+    captionAnimation: value?.captionAnimation !== false,
     overlapGroups: (Array.isArray(value?.overlapGroups) ? value.overlapGroups : []).slice(0, PERFORMANCE_SETTINGS.maximumGroups)
       .filter(g => g && ['id', 'cellId', 'startLineId', 'endLineId'].every(k => typeof g[k] === 'string' && g[k].trim().length > 0 && g[k].length <= 100))
       .map(g => ({id: g.id, cellId: g.cellId, startLineId: g.startLineId, endLineId: g.endLineId,
@@ -71,7 +72,7 @@ class PerformanceFollower {
     this.mismatch = null; this.returnWitnesses = []; this.stableMatches.clear();
     this.backgroundConfirmed = null; this.searchAt = now; this.returnDecision = null;
     if (source === 'live') { this.group = null; this.backgroundIndex = this.lastReliable?.index ?? this.originIndex; }
-    else this.buffer = [];
+    else { this.returnBuffer = this.buffer; this.buffer = []; }
     return {type: 'source', from, source, reason};
   }
   searchWindow(now = Date.now()) {

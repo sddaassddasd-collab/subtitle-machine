@@ -52,14 +52,15 @@ export default function PerformanceFollowPanel({session, lines, socketRef, runti
   return <section className="performance-follow-panel" aria-label="演出輔助">
     <div className="performance-follow-status" aria-live="polite">
       <strong>演出輔助</strong>
-      <span>{runtime?.source === 'live' ? '即時字幕 · 背景持續定位' : '劇本字幕'} · {reasons[runtime?.reason] || '持續比對台詞'}</span>
+      <span>{Number.isInteger(runtime?.pendingReturnIndex) ? `已定位第 ${runtime.pendingReturnIndex + 1} 格，觀眾保留目前文字，換句後接回`
+        : runtime?.source === 'live' ? '即時字幕 · 背景持續定位' : '劇本字幕'} · {reasons[runtime?.reason] || '持續比對台詞'}</span>
       {Number.isInteger(runtime?.backgroundIndex) && runtime?.source === 'live' && <span>背景候選：第 {runtime.backgroundIndex + 1} 格</span>}
       {runtime?.source === 'live' && runtime?.searchWindow && <span>搜尋範圍：第 {runtime.searchWindow.from + 1}～{runtime.searchWindow.to + 1} 格</span>}
       {Number.isInteger(runtime?.preparedIndex) && <span>語意候選：第 {runtime.preparedIndex + 1} 格（尚未換格）</span>}
       {runtime?.group && <span>第 {runtime.group.start + 1}～{runtime.group.end + 1} 格 · {runtime.group.speed.toFixed(2)} 倍 · {runtime.group.paused ? '暫停' : '估計中'}</span>}
     </div>
     <div className="transcription-actions">
-      <button type="button" className="subtle-button" disabled={busy || (!active && !session.automaticLive)} onClick={() => command('lock-script')}>鎖定劇本輸出</button>
+      <button type="button" className="subtle-button" disabled={busy || (!active && !session.automaticLive && !Number.isInteger(runtime?.pendingReturnIndex))} onClick={() => command('lock-script')}>鎖定劇本輸出</button>
       <button type="button" className="subtle-button" disabled={busy || !active} onClick={() => command('lock-live')}>鎖定即時字幕</button>
       <button type="button" disabled={busy || !active} onClick={() => command('auto')}>恢復自動輔助</button>
       {session.subtitleControlMode === 'auto' && <button type="button" className="subtle-button" disabled={busy} onClick={onManual}>手動接管</button>}
@@ -80,6 +81,9 @@ export default function PerformanceFollowPanel({session, lines, socketRef, runti
       <label className="checkbox-row"><input type="checkbox" checked={settings.scriptCorrection !== false}
         onChange={e => edit({...settings, scriptCorrection: e.target.checked})}/>即時字幕參考附近劇本校正同音／近音錯字</label>
       <p className="input-note">劇本詞彙提示在即時字幕期間也會持續更新。文字校正需 OpenAI 金鑰與後端文字校正功能，依用量計費；先顯示辨識文字，再於背景校正。保留演員的改詞、語尾及即興，原始辨識與時間仍供定位使用，校正文字不作為換格證據。</p>
+      <label className="checkbox-row"><input type="checkbox" checked={settings.captionAnimation !== false}
+        onChange={e => edit({...settings, captionAnimation: e.target.checked})}/>字幕換句使用輕微淡入（120 毫秒）</label>
+      <p className="input-note">演出即時字幕沿用劇本的字級與位置，每次顯示目前一段。已顯示的同句定位成功後保留原本說法，等實際進入下一格再接回；鎖定劇本可立即切回。系統的減少動態效果設定也會停用淡入。</p>
       <ul>{groups.map(g => {
         const a = lines.findIndex(l => l.id === g.startLineId), b = lines.findIndex(l => l.id === g.endLineId)
         const invalid = a < 0 || b <= a || b - a >= 12 || !lines[b + 1] || lines.slice(a, b + 2).some(l => l.type === 'direction' || l.music)

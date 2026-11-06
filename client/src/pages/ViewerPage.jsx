@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import FollowPrompter from '../components/FollowPrompter'
+import CaptionSurface from '../components/CaptionSurface'
+import {latestCaptionRows} from '../lib/caption-frame'
 import { PublicDisplayGate, publicViewMode, preventPrompterScroll } from '../lib/public-display'
 import { io } from 'socket.io-client'
 import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
@@ -52,6 +54,7 @@ const ViewerPage = () => {
   const [musicText, setMusicText] = useState('此處有音樂')
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
+  const [captionPresentation, setCaptionPresentation] = useState({performance: false, animation: true, languageCodes: {}})
   const [waitingMessage, setWaitingMessage] = useState('')
   const [transcriptionIsFinal, setTranscriptionIsFinal] = useState(true)
   const [liveTranslationLanguages, setLiveTranslationLanguages] = useState([])
@@ -85,7 +88,9 @@ const ViewerPage = () => {
   const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef, `${resolvedViewerToken}:${mode}`)
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
-  const selectedLiveLanguageRef = useRef(selectedLiveLanguage)
+  const effectiveLiveLanguage = captionPresentation.performance
+    ? captionPresentation.languageCodes[selectedLanguageId] || selectedLiveLanguage : selectedLiveLanguage
+  const selectedLiveLanguageRef = useRef(effectiveLiveLanguage)
   const lineSourceRef = useRef(lineSource)
   const liveTranslationPatchRef = useRef({ streamId: '', revision: 0 })
   const liveTranscriptionPatchRef = useRef({ streamId: '', revision: 0 })
@@ -153,6 +158,7 @@ const ViewerPage = () => {
     setMusicActive(next.musicActive)
     setMusicText(next.musicText)
     lineSourceRef.current = next.source
+    setCaptionPresentation(next.captionPresentation)
     setLineSource(next.source)
     setLanguages(next.languages)
     setViewerDefaultLanguageId(
@@ -281,7 +287,8 @@ const ViewerPage = () => {
       const revision = Number.isSafeInteger(payload?.revision)
         ? payload.revision
         : 0
-      if (!streamId || revision <= 0 || payload?.active !== true) return
+      if (!streamId || revision <= 0 || payload?.active !== true ||
+        !gateRef.current.notePatch(payload)) return
       const previous = liveTranscriptionPatchRef.current
       if (previous.streamId === streamId && revision <= previous.revision) {
         return
@@ -300,6 +307,7 @@ const ViewerPage = () => {
       setTranscriptionLanguage(next.transcriptionLanguage)
       setTranscriptionSourceLanguages(next.transcriptionSourceLanguages)
       lineSourceRef.current = 'transcription'
+      setCaptionPresentation(next.captionPresentation)
       setLineSource('transcription')
       setWaitingMessage('')
       hasLoadedStateRef.current = true
@@ -387,7 +395,7 @@ const ViewerPage = () => {
   ])
 
   useEffect(() => {
-    selectedLiveLanguageRef.current = selectedLiveLanguage
+    selectedLiveLanguageRef.current = effectiveLiveLanguage
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(
         VIEWER_LIVE_LANGUAGE_STORAGE_KEY,
@@ -396,9 +404,9 @@ const ViewerPage = () => {
     }
     socketRef.current?.emit('viewer:live-language', {
       languageCode:
-        lineSource === 'transcription' ? selectedLiveLanguage : 'source',
+        lineSource === 'transcription' ? effectiveLiveLanguage : 'source',
     })
-  }, [lineSource, selectedLiveLanguage])
+  }, [lineSource, selectedLiveLanguage, effectiveLiveLanguage])
 
   useEffect(() => {
     lineSourceRef.current = lineSource
@@ -446,7 +454,7 @@ const ViewerPage = () => {
   }, [liveTranslationLanguages, selectedLiveLanguage, transcriptionLanguage])
 
   useEffect(() => {
-    if (lineSource !== 'transcription') return
+    if (lineSource !== 'transcription' || captionPresentation.performance) return
     const container = liveFeedRef.current
     if (!container) return
 
@@ -458,7 +466,7 @@ const ViewerPage = () => {
     })
 
     return () => window.cancelAnimationFrame(frameId)
-  }, [lineSource, liveEntries, liveLines])
+  }, [lineSource, liveEntries, liveLines, captionPresentation.performance])
 
   const fontPercent = isPrompter ? prompterFontPercent : viewerFontPercent
   const adjustViewerFontSize = (delta) => {
@@ -551,9 +559,9 @@ const ViewerPage = () => {
     .map((entry) => ({
       ...entry,
       displayText:
-        selectedLiveLanguage === 'source'
+        effectiveLiveLanguage === 'source'
           ? entry.text
-          : entry.translations?.[selectedLiveLanguage] || '',
+          : entry.translations?.[effectiveLiveLanguage] || '',
     }))
     .filter((entry) => entry.displayText)
 
@@ -596,11 +604,11 @@ const ViewerPage = () => {
             </button>
           </div>
 
-          {(lineSource === 'transcription' || languages.length > 1) && (
+          {(lineSource === 'transcription' && !captionPresentation.performance || languages.length > 1) && (
             <label
               className="viewer-language-menu"
               title={
-                lineSource === 'transcription'
+                lineSource === 'transcription' && !captionPresentation.performance
                   ? selectedLiveLanguageName
                   : selectedLanguageName
               }
@@ -609,12 +617,12 @@ const ViewerPage = () => {
               <span aria-hidden="true">▾</span>
               <select
                 value={
-                  lineSource === 'transcription'
+                  lineSource === 'transcription' && !captionPresentation.performance
                     ? selectedLiveLanguage
                     : selectedLanguageId
                 }
                 onChange={(event) => {
-                  if (lineSource === 'transcription') {
+                  if (lineSource === 'transcription' && !captionPresentation.performance) {
                     setSelectedLiveLanguage(event.target.value)
                   } else {
                     setSelectedLanguageId(event.target.value)
@@ -623,7 +631,7 @@ const ViewerPage = () => {
                 }}
                 aria-label="切換語言"
               >
-                {lineSource === 'transcription' ? (
+                {lineSource === 'transcription' && !captionPresentation.performance ? (
                   <>
                     <option value="source">{sourceLanguageLabel}</option>
                     {availableLiveTranslationLanguages.map((language) => (
@@ -669,7 +677,7 @@ const ViewerPage = () => {
           </div>
         )}
 
-        {lineSource === 'transcription' && displayEnabled && (
+        {lineSource === 'transcription' && displayEnabled && !captionPresentation.performance && (
           <div className="viewer-live-badge">
             {selectedLiveLanguage === 'source'
               ? transcriptionIsFinal
@@ -688,7 +696,7 @@ const ViewerPage = () => {
           cueWindow={cueWindow} languageId={resolveAvailableLanguageId(languages, selectedLanguageId)}
           roleColorEnabled={roleColorEnabled} live={lineSource === 'transcription'}
           liveEntries={visibleLiveEntries} fontPercent={prompterFontPercent} />
-      ) : lineSource === 'transcription' && displayEnabled ? (
+      ) : lineSource === 'transcription' && displayEnabled && !captionPresentation.performance ? (
         <div className={liveFeedClassName} ref={liveFeedRef}>
           {visibleLiveEntries.map((liveEntry, index, entries) => {
             const isLatest = index === entries.length - 1
@@ -713,9 +721,14 @@ const ViewerPage = () => {
           })}
         </div>
       ) : (
-        <div className={textClass} style={roleColor ? { color: roleColor } : undefined}>
-          {displayText}
-        </div>
+        <CaptionSurface scope={`${resolvedViewerToken}:${mode}:${selectedLanguageId}`} enabled={hasLoadedState && displayEnabled}
+          source={isStageDirection && lineSource !== 'transcription' ? 'direction' : lineSource}
+          scriptRows={[{id: selectedLanguageId, text: displayText}]} entryId={lineSource === 'transcription' ? liveEntries.at(-1)?.id || '' : line?.id || ''}
+          liveRows={latestCaptionRows(liveEntries.length ? liveEntries : liveLines.map(text => ({text})),
+            [{id: selectedLanguageId, source: effectiveLiveLanguage === 'source', code: effectiveLiveLanguage}])}
+          color={lineSource === 'transcription' ? '' : roleColor} animation={captionPresentation.performance && captionPresentation.animation}
+          className={textClass}/>
+
       )}
     </div>
   )

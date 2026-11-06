@@ -10,6 +10,7 @@ const {SemanticFollower} = require('../src/semantic-follow');
 const performanceFollow = require('../src/performance-follow');
 const performanceLanguage = require('../src/performance-language');
 const captionMode = require('../src/caption-mode');
+const {CaptionPresentation} = require('../src/caption-presentation');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
 
 // Execute the real server functions, replacing only IO/persistence dependencies.
@@ -28,7 +29,8 @@ function fixture(mode = 'auto') {
   const emissions = [];
   const context = vm.createContext({
     Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS,
-    ...performanceLanguage, ...captionMode, ...performanceFollow, console: { error() {} },
+    ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation,
+    TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
     AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS: 250, DEFAULT_SESSION_ID: 'test',
@@ -51,6 +53,9 @@ function fixture(mode = 'auto') {
     broadcastTranscriptionState: () => emissions.push('transcription'),
     broadcastAutoFollowState: () => emissions.push('diagnostics'),
     getLiveTranscriptionPatchPayload: () => ({ active: true }),
+    getLiveTranslationPatchPayload: () => ({liveEntries: [{id: 'current', text: '目前台詞', translations: {en: 'Current line'}}]}),
+    LIVE_TRANSLATION_LANGUAGE_CODES: new Set(['en']), isLiveTranslationLanguageAllowed: () => true,
+    getLiveTranslationRoom: (id, language) => `viewer-live:${id}:${language}`,
     hasSocketRoomConnections: () => true,
     emitLatestRoomState: (room, event) => emissions.push(event),
     io: { to: () => ({ emit: event => emissions.push(event) }) },
@@ -61,8 +66,11 @@ function fixture(mode = 'auto') {
     }),
   });
   loadFunctions(context, 'applyCurrentIndexChange', 'broadcastProjectorState');
+  loadFunctions(context, 'holdingCaption', 'getOutputTranscriptionEntries');
+  loadFunctions(context, 'performanceCaptionLanguages', 'getViewerPayload');
   loadFunctions(context, 'getViewerPayload', 'getProjectorLayoutPayload');
   loadFunctions(context, 'broadcastLiveTranscriptionState', 'getLiveTranslationPatchPayload');
+  loadFunctions(context, 'broadcastLiveTranslationState', 'broadcastViewerState');
   return { session, context, emissions };
 }
 
@@ -111,6 +119,19 @@ test('live patches still reach manual live displays', () => {
   assert.ok(emissions.includes('viewer:live-update'));
   assert.ok(emissions.includes('prompter:live-update'));
   assert.ok(emissions.includes('projector:live-update'));
+});
+
+test('a located cue still waiting for its display handoff receives translations until the next script cue', () => {
+  const {session, context, emissions} = fixture();
+  context.getAutoFollowState(session.id).captionDisplay.held = {index: 0, cellId: session.selectedCellId,
+    entry: {id: 'current', text: '目前台詞'}};
+  context.broadcastLiveTranslationState(session.id, {}, 'en');
+  assert.ok(emissions.includes('viewer:translation-patch'));
+  assert.ok(emissions.includes('projector:translation-patch'));
+  const count = emissions.length;
+  session.currentIndex = 1;
+  context.broadcastLiveTranslationState(session.id, {}, 'en');
+  assert.equal(emissions.length, count);
 });
 
 test('hidden displays stay hidden while following', () => {

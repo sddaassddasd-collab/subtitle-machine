@@ -183,6 +183,10 @@ export const normalizeDisplayPayload = (payload) => {
 
   return {
     enabled,
+    captionPresentation: {performance: payload?.captionPresentation?.performance === true,
+      animation: payload?.captionPresentation?.animation !== false,
+      languageCodes: payload?.captionPresentation?.languageCodes || {},
+      handoffIndex: Number.isInteger(payload?.captionPresentation?.handoffIndex) ? payload.captionPresentation.handoffIndex : null},
     line: nextLine,
     lines,
     currentIndex,

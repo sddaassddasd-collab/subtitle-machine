@@ -1602,6 +1602,17 @@ textarea.script-line-text.editing {
   line-height: 1.25;
 }
 
+.caption-surface {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 2.8em;
+  width: 100%;
+}
+
+.caption-surface-stack { line-height: 1.25; }
+.caption-language-line { min-height: 1.28em; }
+
 .viewer-text.viewer-live {
   color: #f8fafc;
 }

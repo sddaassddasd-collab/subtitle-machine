@@ -265,3 +265,55 @@ test('a longer improvisation expands reacquisition beyond the original eighteen 
   assert.equal(f.session.currentIndex, 25);
   assert.equal(f.state().lastDecision.source, 'script_return');
 });
+
+test('already displayed spoken wording remains until the next actual cue after script reacquisition', t => {
+  const f = setup(t); f.begin();
+  const spoken = texts[3] + '呢';
+  f.say(spoken, 'spoken', 12000, 14000, 14000, {isFinal: false});
+  assert.equal(f.viewer().text, spoken);
+  f.say(spoken, 'spoken', 12000, 14100, 14500);
+  assert.equal(f.session.currentIndex, 3); assert.equal(f.session.automaticLive, false);
+  assert.equal(f.state().performance.pendingReturnIndex, 3);
+  for (const out of [f.viewer(), f.projector()]) {
+    assert.equal(out.source, 'transcription'); assert.equal(out.text, spoken);
+    assert.equal(out.captionPresentation.handoffIndex, 3); assert.equal(out.autoFollowDecision, null);
+  }
+  f.say(texts[4], 'next', 15000, 17000, 17000);
+  assert.equal(f.session.currentIndex, 4);
+  assert.equal(f.viewer().source, 'script'); assert.equal(f.viewer().text, texts[4]);
+  assert.equal(f.projector().text, texts[4]); assert.equal(f.state().performance.pendingReturnIndex, null);
+  assert.ok(f.events.some(e => e.type === 'caption_handoff' && e.phase === 'next_cue'));
+});
+
+test('manual script lock and display masking override a pending caption handoff immediately', t => {
+  const f = setup(t); f.begin();
+  f.say(texts[3] + '呢', 'spoken', 12000, 14000, 14000, {isFinal: false});
+  f.say(texts[3] + '呢', 'spoken', 12000, 14100, 14500);
+  f.session.displayEnabled = false;
+  assert.equal(f.viewer().source, 'hidden'); assert.equal(f.viewer().text, '');
+  assert.equal(f.projector().source, 'hidden');
+  f.session.displayEnabled = true;
+  assert.equal(f.event('performance:action', {action: 'lock-script'}).ok, true);
+  assert.equal(f.viewer().source, 'script'); assert.equal(f.viewer().text, texts[3]);
+});
+
+test('automatic performance output selects the current utterance instead of dumping retained recognition history', t => {
+  const f = setup(t); f.begin();
+  const out = f.viewer();
+  assert.equal(out.liveEntries.length, 1);
+  assert.equal(out.text, '外面下著雨不曉得大家帶了傘沒有');
+  assert.equal(out.captionPresentation.performance, true);
+  assert.equal(f.projector().captionPresentation.animation, true);
+  assert.equal(f.event('performance:set-settings', {settings: {automaticLive: true, captionAnimation: false, overlapGroups: []}}).ok, true);
+  assert.equal(f.projector().captionPresentation.animation, false);
+});
+
+test('reselecting the located cue manually clears a pending handoff without advancing to another cue', t => {
+  const f = setup(t); f.begin();
+  f.say(texts[3] + '呢', 'spoken', 12000, 14000, 14000, {isFinal: false});
+  f.say(texts[3] + '呢', 'spoken', 12000, 14100, 14500);
+  assert.equal(f.viewer().source, 'transcription');
+  f.event('setCurrentIndex', {index: 3});
+  assert.equal(f.session.currentIndex, 3);
+  assert.equal(f.viewer().source, 'script'); assert.equal(f.viewer().text, texts[3]);
+});

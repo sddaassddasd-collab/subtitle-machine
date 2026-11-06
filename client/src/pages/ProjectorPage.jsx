@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { io } from 'socket.io-client'
+import CaptionSurface from '../components/CaptionSurface'
+import {latestCaptionRows} from '../lib/caption-frame'
 import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
 import {
   DEFAULT_PROJECTOR_LAYOUT,
@@ -33,6 +35,7 @@ const ProjectorPage = () => {
   const [, setMusicText] = useState('此處有音樂')
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [lineSource, setLineSource] = useState('script')
+  const [captionPresentation, setCaptionPresentation] = useState({performance: false, animation: true, languageCodes: {}})
   const [languages, setLanguages] = useState([])
   const [projectorLanguageId, setProjectorLanguageId] = useState('primary')
   const [projectorSecondaryLanguageId, setProjectorSecondaryLanguageId] = useState(undefined)
@@ -41,7 +44,7 @@ const ProjectorPage = () => {
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [, setFatalError] = useState('')
   const [, setConnectionIssue] = useState('')
-  const [, setHasLoadedState] = useState(false)
+  const [hasLoadedState, setHasLoadedState] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
   const socketRef = useRef(null)
@@ -133,6 +136,7 @@ const ProjectorPage = () => {
 
   const applyProjectorDisplayPayload = useCallback(
     (payload) => {
+      if (Number.isSafeInteger(payload?.revision) && payload.revision < layoutRevisionRef.current) return
       const next = normalizeDisplayPayload(payload)
       setDisplayEnabled(next.enabled)
       setLine(next.line)
@@ -140,6 +144,7 @@ const ProjectorPage = () => {
       setLiveLines(next.liveLines)
       setMusicActive(next.musicActive)
       setMusicText(next.musicText)
+      setCaptionPresentation(next.captionPresentation)
       setLineSource(next.source)
       setLanguages(next.languages)
       setProjectorLanguageId(
@@ -320,18 +325,21 @@ const ProjectorPage = () => {
       const revision = Number.isSafeInteger(payload?.revision)
         ? payload.revision
         : 0
-      if (!streamId || revision <= 0 || payload?.active !== true) return
+      if (!streamId || revision <= 0 || payload?.active !== true ||
+        (payload.projectorRevision && payload.projectorRevision < layoutRevisionRef.current)) return
       const previous = liveTranscriptionPatchRef.current
       if (previous.streamId === streamId && revision <= previous.revision) {
         return
       }
       liveTranscriptionPatchRef.current = { streamId, revision }
+      if (Number.isSafeInteger(payload.projectorRevision)) layoutRevisionRef.current = Math.max(layoutRevisionRef.current, payload.projectorRevision)
 
       const next = normalizeDisplayPayload(payload)
       setDisplayEnabled(next.enabled)
       setLine(next.line)
       setLiveEntries(next.liveEntries)
       setLiveLines(next.liveLines)
+      setCaptionPresentation(next.captionPresentation)
       setLineSource('transcription')
       hasLoadedStateRef.current = true
       setHasLoadedState(true)
@@ -591,7 +599,7 @@ const ProjectorPage = () => {
 
       <div className="projector-stage">
         <div className="projector-subtitle-block">
-          {shouldRenderLiveFeed ? (
+          {shouldRenderLiveFeed && !captionPresentation.performance ? (
             <div className="projector-live-feed">
               {entries.map((entry, index) => {
                 const isLatest = index === entries.length - 1
@@ -608,20 +616,14 @@ const ProjectorPage = () => {
               })}
             </div>
           ) : (
-            <div
-              className={`projector-text${
-                scriptText.length > 1 ? ' projector-text-stack' : ''
-              }`}
-              style={scriptTextColor ? { color: scriptTextColor } : undefined}
-            >
-              {scriptText.length > 0
-                ? scriptText.map((entry) => (
-                    <div key={entry.id} className="projector-language-line">
-                      <strong>{entry.text}</strong>
-                    </div>
-                  ))
-                : ''}
-            </div>
+            <CaptionSurface scope={`${resolvedProjectorToken}:${projectorLanguageId}:${projectorSecondaryLanguageId || ''}:${projectorLanguageMode}`}
+              enabled={hasLoadedState && displayEnabled} source={line?.type === 'direction' && lineSource !== 'transcription' ? 'direction' : lineSource}
+              scriptRows={scriptText} entryId={lineSource === 'transcription' ? entries.at(-1)?.id || '' : line?.id || ''}
+              liveRows={latestCaptionRows(entries, resolveLanguageDisplayList(languages, projectorLanguageId, projectorLanguageMode, projectorSecondaryLanguageId)
+                .map(l => ({id: l.id, source: captionPresentation.languageCodes[l.id] === 'source', code: captionPresentation.languageCodes[l.id]})))}
+              color={scriptTextColor} animation={captionPresentation.performance && captionPresentation.animation}
+              className="projector-text" strong/>
+
           )}
         </div>
       </div>

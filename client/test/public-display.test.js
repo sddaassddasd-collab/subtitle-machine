@@ -9,6 +9,18 @@ test('ordinary links always default to viewer; only explicit mode selects prompt
   assert.equal(publicViewMode('?mode=prompter'), 'prompter')
 })
 
+test('live patch epochs fence old HTTP responses while allowing the matching full source-change payload', () => {
+  const gate = new PublicDisplayGate()
+  const payload = viewerRevision => ({sessionId: 'show', viewerRevision})
+  assert.equal(gate.accepts(payload(10)), true)
+  assert.equal(gate.notePatch(payload(12)), true)
+  assert.equal(gate.accepts(payload(11)), false)
+  assert.equal(gate.accepts(payload(12)), true)
+  assert.equal(gate.accepts(payload(13)), true)
+  assert.equal(gate.notePatch(payload(12)), false)
+  assert.equal(gate.notePatch({sessionId: 'other', viewerRevision: 14}), false)
+})
+
 test('switching modes accepts the same cue revision but rejects late recovery responses and older cues', () => {
   const gate = new PublicDisplayGate()
   const cue = revision => ({sessionId: 'show', viewerRevision: revision})

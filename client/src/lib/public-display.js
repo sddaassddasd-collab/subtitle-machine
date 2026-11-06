@@ -6,6 +6,15 @@ export class PublicDisplayGate {
   constructor(mode = 'viewer') { this.mode = mode; this.generation = 0; this.reset() }
   reset() { this.generation++; this.sessionId = ''; this.revision = 0; this.appliedGeneration = -1 }
   select(mode) { if (mode !== this.mode) { this.mode = mode; this.generation++ } }
+  notePatch(payload) {
+    const sessionId = payload?.sessionId || ''
+    const revision = Number.isSafeInteger(payload?.viewerRevision) ? payload.viewerRevision : 0
+    if (this.sessionId && sessionId && this.sessionId !== sessionId) return false
+    if (revision > 0 && revision < this.revision) return false
+    if (revision > this.revision) { this.revision = revision; this.appliedGeneration = -1 }
+    if (sessionId) this.sessionId = sessionId
+    return true
+  }
   accepts(payload, mode = this.mode, generation = this.generation) {
     if (mode !== this.mode || generation !== this.generation) return false
     const sessionId = payload?.sessionId || ''

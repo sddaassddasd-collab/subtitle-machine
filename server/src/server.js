@@ -18,6 +18,7 @@ const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
 const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
 const {locateLiveScript: locateBackgroundScript, liveCandidates} = require('./live-script');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
+const {CaptionPresentation} = require('./caption-presentation');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
@@ -5722,20 +5723,33 @@ function buildTranscriptionDisplayEntries(stream) {
   return mergedEntries;
 }
 
-function getOutputTranscriptionEntries(session, stream) {
-  if (!session.automaticLive) return buildTranscriptionDisplayEntries(stream);
-  return (getAutoFollowState(session.id).performance.buffer || []).map(entry => {
+function performanceCaptionEntries(buffer, stream) {
+  return buffer.map(entry => {
     const fragment = stream?.fragmentByItemId?.get(entry.itemId);
     const fullText = fragment?.text === (entry.displayText || entry.text) || stream?.draftByItemId?.get(entry.itemId) === entry.text;
-    return {id: entry.id, text: entry.displayText || entry.text, isFinal: entry.isFinal, speakerId: fragment?.speakerId ?? null,
-      // A translation of a whole ASR item must not accompany a trimmed suffix.
+    return {id: entry.id, text: entry.displayText || entry.text, startMs: entry.startMs, endMs: entry.endMs,
+      isFinal: entry.isFinal, speakerId: fragment?.speakerId ?? null,
       translations: fullText ? {...fragment?.provisionalTranslations, ...fragment?.translations,
         ...stream?.draftTranslationsByItemId?.get(entry.itemId)?.translations} : {}};
   });
 }
 
+function holdingCaption(session) {
+  return autoFollowStates.get(session.id)?.captionDisplay.holding(session.currentIndex, session.selectedCellId) === true;
+}
+
+function getOutputTranscriptionEntries(session, stream) {
+  if (holdingCaption(session)) {
+    const entry = getAutoFollowState(session.id).captionDisplay.held.entry, fragment = stream?.fragmentByItemId?.get(entry.id);
+    return [{...entry, translations: fragment?.text === entry.text
+      ? {...entry.translations, ...fragment.provisionalTranslations, ...fragment.translations} : entry.translations}];
+  }
+  if (!session.automaticLive) return buildTranscriptionDisplayEntries(stream);
+  return performanceCaptionEntries(getAutoFollowState(session.id).performance.buffer || [], stream);
+}
+
 function getOutputTranscriptionText(session, stream) {
-  return session.automaticLive ? getOutputTranscriptionEntries(session, stream).map(e => e.text).join('\n')
+  return session.automaticLive || holdingCaption(session) ? getOutputTranscriptionEntries(session, stream).map(e => e.text).join('\n')
     : sanitizeTranscriptionMultilineText(ensureTranscriptionState(session).text);
 }
 
@@ -5882,6 +5896,15 @@ function getLiveTranslationDemand(sessionId) {
       demand[languageCode] = room.size;
     }
   });
+  const session = getSessionRecord(sessionId);
+  if (session && (session.automaticLive || holdingCaption(session)) && hasSocketRoomConnections(`projector:${sessionId}`)) {
+    const codes = performanceCaptionLanguages(session);
+    const ids = normalizeProjectorLanguageMode(session.projectorLanguageMode) === 'bilingual'
+      ? [session.projectorDefaultLanguageId, session.projectorSecondaryLanguageId || session.languages.find(l => l.id !== session.projectorDefaultLanguageId)?.id]
+      : [session.projectorDefaultLanguageId];
+    for (const id of ids) if (codes[id] && codes[id] !== 'source' && isLiveTranslationLanguageAllowed(sessionId, codes[id]))
+      demand[codes[id]] = (demand[codes[id]] || 0) + 1;
+  }
   return demand;
 }
 
@@ -7286,11 +7309,11 @@ function getPublicTranscriptionState(session) {
   const stream = transcriptionStreams.get(session.id);
   return {
     active: Boolean(state.active),
-    liveEntries: getCaptionMode(session) === 'live' && stream ? getOutputTranscriptionEntries(session, stream)
+    liveEntries: (getCaptionMode(session) === 'live' || holdingCaption(session)) && stream ? getOutputTranscriptionEntries(session, stream)
       .map(entry => ({id: entry.id, text: entry.text, speakerId: entry.speakerId, isFinal: entry.isFinal !== false})) : [],
     followingScript: describeFollowingScript(session),
     status: state.status || 'idle',
-    text: session.automaticLive ? getOutputTranscriptionText(session, stream) : typeof state.text === 'string' ? state.text : '',
+    text: session.automaticLive || holdingCaption(session) ? getOutputTranscriptionText(session, stream) : typeof state.text === 'string' ? state.text : '',
     isFinal: state.isFinal !== false,
     language:
       typeof state.language === 'string' && state.language.trim().length > 0
@@ -8236,7 +8259,46 @@ function bumpViewerStateRevision(sessionId) {
   return next;
 }
 
+function performanceCaptionLanguages(session) {
+  const codes = {};
+  for (const language of TRANSCRIPTION_SOURCE_LANGUAGES) {
+    const selected = resolveFollowingLanguage(session, language.code);
+    if (selected.languageId) codes[selected.languageId] = language.code === session.transcriptionLanguage ? 'source' : language.code;
+  }
+  const source = resolveFollowingLanguage(session);
+  if (source.languageId) codes[source.languageId] = 'source';
+  return codes;
+}
+
+function withPerformanceCaption(session, payload) {
+  const state = autoFollowStates.get(session.id), presentation = state?.captionDisplay;
+  if (!presentation || session.captionMode === 'live') return payload;
+  if (session.subtitleControlMode !== 'auto') presentation.clear();
+  presentation.advance(session.currentIndex, session.selectedCellId);
+  const held = presentation.holding(session.currentIndex, session.selectedCellId);
+  const performance = session.automaticLive || held || (session.subtitleControlMode === 'auto' && state.performance.enabled);
+  payload.captionPresentation = {performance: Boolean(performance), animation: session.performanceFollowing?.captionAnimation !== false,
+    languageCodes: performanceCaptionLanguages(session), handoffIndex: held ? session.currentIndex : null};
+  if (!performance || payload.displayEnabled === false || ['hidden', 'waiting'].includes(payload.source)) return payload;
+  if (held) {
+    const entry = getOutputTranscriptionEntries(session, transcriptionStreams.get(session.id))[0];
+    return {...payload, source: 'transcription', line: {text: entry.text, type: 'dialogue'}, text: entry.text,
+      liveEntries: [entry], liveLines: [entry.text], cueWindow: null, autoFollowDecision: null,
+      displayMode: PROJECTOR_DISPLAY_MODES.TRANSCRIPTION};
+  }
+  if (session.automaticLive && payload.liveEntries?.length) {
+    presentation.publish(getOutputTranscriptionEntries(session, transcriptionStreams.get(session.id)));
+    const entry = payload.liveEntries.at(-1);
+    return {...payload, line: {text: entry.text, type: 'dialogue'}, text: entry.text, liveEntries: [entry], liveLines: [entry.text]};
+  }
+  return payload;
+}
+
 function getViewerPayload(session, viewerCellId = null, options = {}) {
+  return withPerformanceCaption(session, getViewerPayloadBase(session, viewerCellId, options));
+}
+
+function getViewerPayloadBase(session, viewerCellId = null, options = {}) {
   const {
     normalized,
     activeScriptLine,
@@ -8400,6 +8462,10 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
 }
 
 function getProjectorPayload(session) {
+  return withPerformanceCaption(session, getProjectorPayloadBase(session));
+}
+
+function getProjectorPayloadBase(session) {
   const {
     normalized,
     activeScriptLine,
@@ -8829,7 +8895,7 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
   const revision = (stream.liveTranscriptionRevision || 0) + 1;
   stream.liveTranscriptionRevision = revision;
 
-  return {
+  return withPerformanceCaption(session, {
     sessionId,
     streamId: stream.liveTranslationStreamId,
     revision,
@@ -8837,6 +8903,7 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
     displayEnabled: session.displayEnabled !== false,
     source: 'transcription',
     text: liveText,
+    viewerRevision: getViewerStateRevision(sessionId), projectorRevision: session.projectorRevision,
     line: liveLines.length > 0
       ? {
           text: liveLines[liveLines.length - 1],
@@ -8847,12 +8914,13 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
     liveLines,
     transcriptionIsFinal: state.isFinal !== false,
     transcription: getPublicTranscriptionState(session),
-  };
+  });
 }
 
 function broadcastLiveTranscriptionState(sessionId, stream) {
   const session = getSessionRecord(sessionId);
-  if (!session || getCaptionMode(session) !== 'live') return;
+  if (!session || (getCaptionMode(session) !== 'live' && !holdingCaption(session))) return;
+  if (session.automaticLive) getAutoFollowState(sessionId).captionDisplay.publish(getOutputTranscriptionEntries(session, stream));
   const payload = getLiveTranscriptionPatchPayload(sessionId, stream);
   if (!payload) return;
 
@@ -8881,8 +8949,8 @@ function broadcastLiveTranscriptionState(sessionId, stream) {
     emitLatestRoomState(`prompter-follow:${sessionId}`, 'prompter:live-update', payload);
 
   if (
-    normalizeProjectorDisplayMode(session.projectorDisplayMode) ===
-      PROJECTOR_DISPLAY_MODES.TRANSCRIPTION &&
+    (normalizeProjectorDisplayMode(session.projectorDisplayMode) ===
+      PROJECTOR_DISPLAY_MODES.TRANSCRIPTION || holdingCaption(session)) &&
     hasSocketRoomConnections(`projector:${sessionId}`)
   ) {
     io.to(`projector:${sessionId}`).emit('projector:live-update', payload);
@@ -8927,7 +8995,7 @@ function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
 
 function broadcastLiveTranslationState(sessionId, stream, languageCode) {
   const session = getSessionRecord(sessionId);
-  if (!session || getCaptionMode(session) !== 'live') return;
+  if (!session || (getCaptionMode(session) !== 'live' && !holdingCaption(session))) return;
   if (!LIVE_TRANSLATION_LANGUAGE_CODES.has(languageCode)) return;
   if (!isLiveTranslationLanguageAllowed(sessionId, languageCode)) return;
   const payload = getLiveTranslationPatchPayload(
@@ -9012,6 +9080,7 @@ function broadcastViewerState(sessionId) {
 
 function applyCurrentIndexChange(session, nextIndex, options = {}) {
   if (!session) return false;
+  const hadCaptionHandoff = options.manualOverride && holdingCaption(session);
   if (options.manualOverride && session.automaticLive) {
     const performance = getPerformanceFollower(session);
     applyPerformanceAction(session, performance.command('lock-script', nextIndex, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0));
@@ -9042,6 +9111,10 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
         {...followHistoryClock(session.id), source: 'manual', reason: 'reselect_current'});
       persistSession(session);
       broadcastControlState(session.id);
+      if (hadCaptionHandoff) {
+        session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
+        broadcastViewerState(session.id);
+      }
     }
     return false;
   }
@@ -9068,6 +9141,11 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   const continuous = !manualOverride && nextIndex === session.currentIndex + 1 &&
     decision?.index === nextIndex && ['audio', 'transcript', 'correction', 'onset', 'silence'].includes(decision.source);
   session.currentIndex = nextIndex;
+  const presentation = autoFollowStates.get(session.id)?.captionDisplay;
+  if (presentation?.held && !presentation.holding(nextIndex, session.selectedCellId)) {
+    presentation.clear();
+    autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'next_cue', index: nextIndex, ...followHistoryClock(session.id)});
+  }
   referenceRuntime.position(session, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0,
     {continuous, reason: manualOverride ? 'manual_position' : continuous ? 'sequential_advance' : 'cue_jump'});
   const selectedCell = getSelectedCell(session);
@@ -9122,6 +9200,7 @@ function createAutoFollowState() {
     updatedAt: null,
     referenceAudio: null,
     performance: new PerformanceFollower(),
+    captionDisplay: new CaptionPresentation(),
   };
 }
 
@@ -9245,7 +9324,7 @@ function getPublicAutoFollowState(session) {
       ? null : state.tracker.prediction?.index ?? null,
     lastDecision: state.lastDecision,
     history: autoFollowHistory.status(session.id),
-    performance: state.performance.publicState(),
+    performance: {...state.performance.publicState(), pendingReturnIndex: holdingCaption(session) ? session.currentIndex : null},
     referenceAudio: autoEnabled ? state.referenceAudio : null,
     lastTranscriptReceivedAt: state.lastTranscriptReceivedAt,
     lastTranscriptAudioLagMs: state.lastTranscriptAudioLagMs,
@@ -9326,6 +9405,12 @@ function applyPerformanceAction(session, action) {
   autoFollowHistory.event(session.id, 'performance_follow', {...action, action: action.type, ...followHistoryClock(session.id),
     fromIndex: session.currentIndex, at: Date.now(), state: performance.publicState()});
   if (action.type === 'source') {
+    if (action.source === 'script' && action.reason === 'script_reacquired') {
+      const entries = performanceCaptionEntries(performance.returnBuffer || [], transcriptionStreams.get(session.id));
+      const held = state.captionDisplay.reacquired(action.index, entries, action.audioStartMs, action.audioEndMs, session.selectedCellId);
+      if (held) autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'waiting_for_next_cue', index: action.index, ...followHistoryClock(session.id)});
+    } else state.captionDisplay.clear();
+    performance.returnBuffer = null;
     session.automaticLive = action.source === 'live';
     session.projectorDisplayMode = session.automaticLive ? 'transcription' : 'script';
     session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
@@ -9579,6 +9664,12 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
     return;
   }
+  const held = state.captionDisplay;
+  if (held.holding(session.currentIndex, session.selectedCellId) && options.endMs >= held.held.entry.endMs) {
+    const speech = freshSpeech({...options, text: transcript}, held.held.entry.startMs);
+    if (speech) held.held.entry = {id: options.itemId, text: speech.text, startMs: speech.startMs, endMs: speech.endMs,
+      isFinal: options.isFinal === true, translations: speech.text === held.held.entry.text ? held.held.entry.translations : {}};
+  }
   const wasLive = session.automaticLive === true;
   const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs},
     performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
@@ -9597,7 +9688,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     }
     updateAutoFollowState(sessionId, {listening: true, lastHeardText: sanitizeLineText(transcript),
       lastCandidateIndex: result.candidate?.index ?? null, lastCandidateText: followingLines[result.candidate?.index]?.text || '',
-      message: session.automaticLive ? '即時字幕輸出中，背景持續尋找可接回的劇本台詞。' : '已確認台詞，接回目前劇本位置。'});
+      message: session.automaticLive ? '即時字幕輸出中，背景持續尋找可接回的劇本台詞。'
+        : holdingCaption(session) ? `已定位第 ${session.currentIndex + 1} 格，觀眾保留目前文字，等待下一句接回。` : '已確認台詞，接回目前劇本位置。'});
     broadcastAutoFollowState(sessionId);
     if (session.automaticLive) {
       broadcastLiveTranscriptionState(sessionId, stream);
@@ -9651,6 +9743,9 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     {...evidence, completed: result.completed === true});
   else autoFollowHistory.diagnostic(sessionId, 'text', result.status || 'searching', evidence);
   handleSemanticFollow(session, stream, followingLines, state, transcript, options, result, receivedAt);
+  if (holdingCaption(session)) {
+    broadcastTranscriptionState(sessionId); broadcastLiveTranscriptionState(sessionId, stream);
+  }
 }
 
 function handleSemanticFollow(session, stream, lines, state, transcript, options, result, receivedAt) {
@@ -13674,6 +13769,11 @@ io.on('connection', (socket) => {
     session.performanceFollowing = value;
     const performance = getPerformanceFollower(session);
     performance.group = null; performance.mismatch = null;
+    if (!value.automaticLive && holdingCaption(session)) {
+      getAutoFollowState(sessionId).captionDisplay.clear();
+      session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
+      broadcastViewerState(sessionId);
+    }
     if (!value.automaticLive && session.automaticLive)
       applyPerformanceAction(session, performance.command('lock-script', session.currentIndex, stream?.autoFollowAudioMs || 0));
     autoFollowHistory.event(sessionId, 'performance_settings', {settings: value, rules: PERFORMANCE_SETTINGS, ...followHistoryClock(sessionId)});
@@ -13691,6 +13791,11 @@ io.on('connection', (socket) => {
     if (!['lock-live', 'lock-script', 'auto', 'start-overlap', 'cancel-overlap', 'pause', 'resume', 'faster', 'slower'].includes(action))
       return reply({ok: false, reason: '不支援的操作'});
     const performance = getPerformanceFollower(session);
+    if (action === 'lock-script' && holdingCaption(session)) {
+      getAutoFollowState(sessionId).captionDisplay.clear();
+      session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
+      broadcastControlState(sessionId); broadcastViewerState(sessionId); broadcastTranscriptionState(sessionId);
+    }
     try { applyPerformanceAction(session, performance.command(action, session.currentIndex, stream?.autoFollowAudioMs || 0)); }
     catch (error) { return reply({ok: false, reason: error.message}); }
     autoFollowHistory.event(sessionId, 'performance_operator', {action, ...followHistoryClock(sessionId), state: performance.publicState()});
