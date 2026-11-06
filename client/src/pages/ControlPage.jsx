@@ -1177,6 +1177,12 @@ const ControlPage = () => {
   const transcriptionAttemptRef = useRef(0)
   const [captureRecovery] = useState(() => new CaptureRecovery())
   const captureStartRef = useRef(null)
+  useEffect(() => {
+    captureRecovery.report = data => {
+      if (socketRef.current?.connected && captureRecovery.captureId)
+        socketRef.current.emit('transcription:health', {sessionId, captureId: captureRecovery.captureId, ...data})
+    }
+  }, [captureRecovery, sessionId])
   const projectorLayoutInputValues = useMemo(
     () => ({
       fontSizePercent: String(projectorLayout.fontSizePercent),
@@ -1498,9 +1504,11 @@ const ControlPage = () => {
     const captureId = captureStateRef.current.captureId
     if (captureId && rawTranscription?.captureId && rawTranscription.captureId !== captureId) return
     const nextTranscription = normalizeTranscriptionState(rawTranscription)
+    if (captureId && rawTranscription?.captureId === captureId && nextTranscription.active && nextTranscription.status === 'running')
+      captureStateRef.current.confirmReady?.()
     if (nextTranscription.status === 'error') {
-      if (rawTranscription?.recoverable) captureRecovery.request('provider_backpressure')
-      else captureRecovery.cancel()
+      if (rawTranscription?.recoverable) captureRecovery.request(rawTranscription.recoveryReason || 'provider_backpressure')
+      else captureRecovery.cancel('nonrecoverable_error')
     }
     setTranscription(() => {
       if (transcriptionContextDirtyRef.current) {
@@ -2657,7 +2665,7 @@ const ControlPage = () => {
           if (attemptId !== transcriptionAttemptRef.current) return
           const acknowledgedAt = Date.now()
           if (ack?.ok === true) captureStateRef.current.lastAckAt = acknowledgedAt
-          if (ack?.recoverable) captureRecovery.request('provider_backpressure')
+          if (ack?.recoverable) captureRecovery.request(ack.recoveryReason || 'provider_backpressure')
           if (ack?.ok === true && acknowledgedAt - lastAckDiagnosticAt < MIC_DIAGNOSTIC_UPDATE_MS) return
           lastAckDiagnosticAt = acknowledgedAt
           setMicDiagnostics((prev) => ({
@@ -2856,6 +2864,9 @@ const ControlPage = () => {
       const captureSettings = Object.fromEntries(['sampleRate', 'channelCount', 'echoCancellation', 'noiseSuppression', 'autoGainControl']
         .filter(key => key in trackSettings).map(key => [key, trackSettings[key]]))
       const startResult = await new Promise((resolve, reject) => {
+        // A matching running-state snapshot is an independent acknowledgement
+        // if the Socket.IO start ACK is delayed behind a large control update.
+        captureStateRef.current.confirmReady = () => resolve({ok: true})
         socketRef.current
           .timeout(10000)
           .emit(
@@ -2893,6 +2904,9 @@ const ControlPage = () => {
         throw new Error('麥克風收音已停止')
       }
       transcriptionReady = true
+      captureStateRef.current.confirmReady = null
+      captureRecovery.captureId = captureId
+      captureRecovery.report?.({reason: 'capture_client_ready', attempt: options.recovery?.attempt || 0})
       captureStateRef.current.starting = false
       captureStateRef.current.readyAt = Date.now()
       // Startup is a new provider clock; never replay the permission/connect backlog.
@@ -2943,6 +2957,11 @@ const ControlPage = () => {
   useEffect(() => {
     const timer = window.setInterval(async () => {
       const state = captureStateRef.current, now = Date.now()
+      if (captureRecovery.expire(now)) {
+        releaseMicrophoneCapture()
+        socketRef.current?.emit('transcription:stop', {sessionId, preserveText: true})
+        setStatus({kind: 'info', message: '恢復收音等待逾時，正在重試；若瀏覽器要求授權，請點選允許。'})
+      }
       if (captureRecovery.exhausted) {
         captureRecovery.cancel()
         releaseMicrophoneCapture()

@@ -1,5 +1,7 @@
-const TRANSPORT_SETTINGS = Object.freeze({version: 1, reportMs: 5000, stallMs: 5000,
-  maximumPacketAgeMs: 1000, maximumBufferedMs: 2000, sampleRate: 24000, bytesPerSample: 2});
+const TRANSPORT_SETTINGS = Object.freeze({version: 2, reportMs: 5000, stallMs: 5000,
+  maximumPacketAgeMs: 1000, networkWarningMs: 1000, sustainedNetworkAgeMs: 3000,
+  networkHoldMs: 5000, extremeNetworkAgeMs: 10000,
+  maximumBufferedMs: 2000, sampleRate: 24000, bytesPerSample: 2});
 
 class TranscriptionHealth {
   constructor(now = Date.now()) {
@@ -20,6 +22,18 @@ class TranscriptionHealth {
     this.maxNetworkAgeMs = Math.max(this.maxNetworkAgeMs, networkAgeMs);
     if (Number.isFinite(packet.captureAgeMs)) this.maxCaptureAgeMs = Math.max(this.maxCaptureAgeMs, packet.captureAgeMs);
     return networkAgeMs;
+  }
+  networkDecision(ageMs, now = Date.now()) {
+    // Receive jitter is not audio-thread backlog. One delayed packet must not
+    // tear down a healthy capture, especially when the queue is catching up.
+    if (ageMs >= TRANSPORT_SETTINGS.sustainedNetworkAgeMs) this.behindSince ??= now;
+    else this.behindSince = null;
+    const stop = ageMs >= TRANSPORT_SETTINGS.extremeNetworkAgeMs ||
+      (this.behindSince !== null && now - this.behindSince >= TRANSPORT_SETTINGS.networkHoldMs);
+    const delayed = ageMs >= TRANSPORT_SETTINGS.networkWarningMs;
+    const changed = this.networkDelayed !== delayed;
+    this.networkDelayed = delayed;
+    return {stop, changed, delayed, networkAgeMs: ageMs, behindMs: this.behindSince === null ? 0 : now - this.behindSince};
   }
   tick(bufferBytes = 0, now = Date.now()) {
     this.maxLoopDelayMs = Math.max(this.maxLoopDelayMs, now - this.lastTick - 1000);

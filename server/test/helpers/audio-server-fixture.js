@@ -77,6 +77,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         send.event = (name, payload) => {
           let result; handlers.get(name)({sessionId: session.id, ...payload}, value => {result = value}); return result;
         };
+        send.socketData = socket.data;
         return send;
       }
       const send = connect();

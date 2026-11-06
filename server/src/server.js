@@ -7318,6 +7318,7 @@ function getPublicTranscriptionState(session) {
     status: state.status || 'idle',
     captureId: stream?.captureId || state.captureId || '',
     recoverable: state.recoverable === true,
+    recoveryReason: state.recoverable === true ? state.recoveryReason || '' : '',
     text: session.automaticLive || holdingCaption(session) ? getOutputTranscriptionText(session, stream) : typeof state.text === 'string' ? state.text : '',
     isFinal: state.isFinal !== false,
     language:
@@ -7394,6 +7395,7 @@ function stopTranscriptionStream(sessionId, options = {}) {
   }
   autoFollowHistory.transport(sessionId, options.errorMessage ? 'error' : 'paused', {
     ...followHistoryClock(sessionId), reason: options.reason || 'transcription_stopped', message: options.errorMessage || '',
+    recoverable: options.recoverable === true, captureId: transcriptionStreams.get(sessionId)?.captureId || '',
   });
   referenceRuntime.stop(sessionId);
   clearLatestRoomStateKeyframesForSession(sessionId);
@@ -7415,6 +7417,7 @@ function stopTranscriptionStream(sessionId, options = {}) {
     state.status = options.errorMessage ? 'error' : 'idle';
     state.error = options.errorMessage || '';
     state.recoverable = options.recoverable === true;
+    state.recoveryReason = options.recoverable ? options.recoveryReason || options.reason || 'transport_error' : '';
     if (!shouldKeepText) {
       state.text = '';
       state.isFinal = true;
@@ -7504,6 +7507,7 @@ function stopTranscriptionStream(sessionId, options = {}) {
   state.status = options.errorMessage ? 'error' : 'idle';
   state.error = options.errorMessage || '';
   state.recoverable = options.recoverable === true;
+  state.recoveryReason = options.recoverable ? options.recoveryReason || options.reason || 'transport_error' : '';
   if (!shouldKeepText) {
     state.text = '';
     state.isFinal = true;
@@ -7958,7 +7962,7 @@ function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
     autoFollowHistory.event(stream.sessionId, 'transport_health', {...followHistoryClock(stream.sessionId),
       reason: 'provider_backpressure', providerBufferedBytes: transport.bufferedAmount,
       maximumBufferedMs: TRANSPORT_SETTINGS.maximumBufferedMs});
-    throw Object.assign(new Error('辨識連線傳送過慢，正在嘗試恢復收音。'), {recoverable: true});
+    throw Object.assign(new Error('辨識連線傳送過慢，正在嘗試恢復收音。'), {recoverable: true, recoveryReason: 'provider_backpressure'});
   }
   stream.autoFollowAudioMs = (stream.autoFollowAudioMs || 0) + durationMs;
   if (stream?.provider === 'deepgram') {
@@ -13615,6 +13619,7 @@ io.on('connection', (socket) => {
         });
         return;
       }
+      socket.data.capture = {sessionId, captureId: clientMetadata(clientInfo).captureId};
 
       if (active && active.socketId === socket.id) {
         if (preserveTextOnRestart === true) {
@@ -13719,9 +13724,13 @@ io.on('connection', (socket) => {
   socket.on('transcription:health', (data = {}) => {
     const session = getOwnedSocketSession(data.sessionId, {normalize: false});
     const stream = session && transcriptionStreams.get(session.id);
-    if (!stream || stream.socketId !== socket.id || stream.captureId !== data.captureId) return;
+    const owned = stream ? stream.socketId === socket.id && stream.captureId === data.captureId
+      : socket.data.capture?.sessionId === session?.id && socket.data.capture?.captureId === data.captureId;
+    if (!session || !owned) return;
     autoFollowHistory.event(session.id, 'capture_health', {...followHistoryClock(session.id),
-      reason: String(data.reason || '').slice(0, 80),
+      reason: String(data.reason || '').slice(0, 80), captureId: String(data.captureId || '').slice(0, 100),
+      cause: String(data.cause || '').slice(0, 100),
+      attempt: Math.max(0, Math.min(3, Number(data.attempt) || 0)),
       ...Object.fromEntries(['sampleAgeMs', 'ackAgeMs', 'captureAgeMs'].filter(k => Number.isFinite(data[k]))
         .map(k => [k, Math.max(0, Math.min(600000, data[k]))]))});
   });
@@ -13760,13 +13769,20 @@ io.on('connection', (socket) => {
     }
     stream.health ||= new TranscriptionHealth();
     const networkAgeMs = stream.health.receive({capturedAt, captureAgeMs, durationMs: normalizedDurationMs});
+    const network = stream.health.networkDecision(networkAgeMs);
     stream.captureStallReported = false;
+    if (stream.captureId && network.changed && network.delayed && Date.now() - (stream.delayWarningAt || 0) >= 5000) {
+      stream.delayWarningAt = Date.now();
+      autoFollowHistory.event(session.id, 'capture_health', {...followHistoryClock(session.id),
+        reason: 'network_delay_warning', ...network});
+    }
     if (stream.captureId && (stale === true || captureAgeMs > TRANSPORT_SETTINGS.maximumPacketAgeMs ||
-      networkAgeMs > TRANSPORT_SETTINGS.maximumPacketAgeMs)) {
+      network.stop)) {
       const message = '收到過期音訊，正在重新建立收音時間軸。';
       autoFollowHistory.event(session.id, 'capture_health', {...followHistoryClock(session.id),
-        reason: 'stale_capture', networkAgeMs, captureAgeMs});
-      acknowledge({ok: false, reason: message, recoverable: true});
+        reason: 'stale_capture', networkAgeMs, captureAgeMs, behindMs: network.behindMs});
+      socket.emit('control:capture-health', {captureId: stream.captureId, reason: 'stale_capture', recoverable: true});
+      acknowledge({ok: false, reason: message, recoverable: true, recoveryReason: 'stale_capture'});
       stopTranscriptionStream(session.id, {keepText: true, reason: 'stale_capture', errorMessage: message, recoverable: true});
       return;
     }
@@ -13855,12 +13871,13 @@ io.on('connection', (socket) => {
       const message =
         sanitizeLineText(error?.message || '') ||
         '傳送語音資料到辨識服務失敗';
-      acknowledge({ ok: false, reason: message, recoverable: error?.recoverable === true });
+      acknowledge({ ok: false, reason: message, recoverable: error?.recoverable === true, recoveryReason: error?.recoveryReason || '' });
       stopTranscriptionStream(sessionId, {
         keepText: true,
         reason: 'send audio failed',
         errorMessage: message,
         recoverable: error?.recoverable === true,
+        recoveryReason: error?.recoveryReason || '',
       });
     }
   });

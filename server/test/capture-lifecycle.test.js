@@ -70,6 +70,12 @@ test('the actual start never flushes its connection backlog into the new provide
   f.replyProvider({ok:true});assert.equal(await pending,true,JSON.stringify(f.statuses));assert.equal(f.calls.audio.length,0);
   emit();assert.equal(f.calls.audio.length,1);assert.ok(f.calls.audio[0].captureId);
 });
+test('a matching running snapshot can acknowledge capture readiness before the start ACK arrives',async()=>{
+  const f=fixture(),pending=f.begin();await new Promise(resolve=>setImmediate(resolve));
+  f.capture.current.confirmReady();assert.equal(await pending,true);
+  assert.equal(f.capture.current.starting,false);
+  f.replyProvider({ok:true});assert.equal(f.recovery.desired,true);
+});
 
 test('a canceled audio setup closes its context without changing the newer capture',async()=>{
   const f=fixture({waitResume:true}),pending=f.begin();await new Promise(resolve=>setImmediate(resolve));
