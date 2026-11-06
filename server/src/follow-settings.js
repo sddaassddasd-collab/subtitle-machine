@@ -14,6 +14,7 @@ const TEXT_SETTINGS = Object.freeze({
   recoveryConfidence: 0.9, recoveryPenalty: 0.04, recoveryLengths: Object.freeze([24, 16, 10, 6]),
   contextBonus: 0.04, contextConfidence: 0.85, expectationBonus: 0.025,
   openingMinEvidence: 2, sequenceOpeningMinEvidence: 3, nearOpeningMaxEvidence: 12,
+  triggerOpeningCharacters: 2,
   pathWidth: 4, pathTtlMs: 12000, pathMinimumEvidence: 3, pathMinimumSteps: 2,
   pathMaximumStep: 2, pathSkipPenalty: 0.025, pathRetention: 0.7,
   weakPathConfidence: .70, weakPathEvidence: 5, weakPathMatches: 4, weakPathMinimumSteps: 3, weakPathAhead: 6,
@@ -64,7 +65,7 @@ const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, 
   jointProgress: .8, jointMaximumStep: 4, jointAnchorTtlMs: 30000, wordTimestampToleranceMs: 750,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 8, onset: 2, acoustic: 4, diagnostics: 10, semantic: 6, performance: 4, captionCorrection: 1, captionPresentation: 3}),
+  versions: Object.freeze({text: 9, onset: 3, acoustic: 4, diagnostics: 11, semantic: 6, performance: 4, captionCorrection: 1, captionPresentation: 3}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,

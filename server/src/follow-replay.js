@@ -30,9 +30,10 @@ function replayFollow(report, implementation = engine) {
     const reason = result.reason || result.status;
     reasons[reason] = (reasons[reason] || 0) + 1;
     if (Number.isInteger(result.index)) {
-      verified.add(result.index);
+      if (!result.shortOpening) verified.add(result.index);
       if (result.index !== currentIndex) decisions.push({at: event.at, audioEndMs: result.evidence?.endMs ?? event.audioEndMs,
-        fromIndex: currentIndex, index: result.index, reason, wordWitnesses: result.candidate?.wordWitnesses});
+        fromIndex: currentIndex, index: result.index, reason, shortOpening: result.shortOpening || null,
+        wordWitnesses: result.candidate?.wordWitnesses});
       currentIndex = result.index;
     }
   }

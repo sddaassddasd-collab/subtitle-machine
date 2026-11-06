@@ -98,17 +98,20 @@ test('noisy interim catches up nearby and publishes edited script to displays', 
   }
 });
 
-test('an overdue onset remains unconfirmed, cannot predict again, and is reviewed when actual text arrives', () => {
+test('an overdue short opening remains unconfirmed until normal text verification arrives', () => {
   const {session, context} = fixture(), reviews = [];
-  context.autoFollowHistory.event = (id, type, data) => {if (type === 'onset_review') reviews.push(data)};
+  context.autoFollowHistory.event = (id, type, data) => {if (type === 'opening_review') reviews.push(data)};
   const stream = {ready: true, autoFollowAudioMs: 1000}; context.transcriptionStreams.set('test', stream);
   context.handleAutoFollowTranscript('test', session.lines[0].text,
     {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
   const packet = (level, ms) => {stream.autoFollowAudioMs = ms; context.handleAutoFollowAudioLevel('test', level, 20, ms)};
   for (let ms = 1020; ms <= 1120; ms += 20) packet(0, ms);
   packet(.1, 1140); packet(.1, 1160);
+  assert.equal(session.currentIndex, 0, 'sound alone does not advance');
+  stream.autoFollowAudioMs = 1260;
+  context.handleAutoFollowTranscript('test', '可', {streamId: 's', itemId: 'opening', startMs: 1200, endMs: 1260});
   assert.equal(session.currentIndex, 1);
-  packet(0, 6160); packet(.1, 6180); packet(.1, 6200);
+  packet(0, 6260); packet(.1, 6280); packet(.1, 6300);
   assert.equal(context.getPublicAutoFollowState(session).predictionReview.status, 'overdue');
   assert.equal(session.currentIndex, 1);
   stream.autoFollowAudioMs = 7000;
@@ -182,7 +185,7 @@ test('interim verification emits a small diagnostic update, not a full script', 
     streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: false,
   });
   assert.deepEqual(emissions, ['diagnostics']);
-  assert.equal(context.getPublicAutoFollowState(session).armedIndex, 1);
+  assert.equal(context.getPublicAutoFollowState(session).preparedIndex, 1);
 });
 
 test('both provider adapters preserve audio timing and segment identity', () => {
@@ -210,7 +213,7 @@ test('an alignment exception is contained and the next transcript can recover', 
   context.handleAutoFollowTranscript('test', session.lines[0].text, {
     streamId: 's', itemId: 'after-error', startMs: 1000, endMs: 2000,
   });
-  assert.equal(context.getPublicAutoFollowState(session).armedIndex, 1);
+  assert.equal(context.getPublicAutoFollowState(session).preparedIndex, 1);
 });
 
 test('capture worklet emits 20 ms mono PCM frames with no missing samples', () => {
@@ -237,9 +240,9 @@ test('changing a performance cell clears the previous tracking anchor', () => {
   context.handleAutoFollowTranscript('test', session.lines[0].text, {
     streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true,
   });
-  assert.equal(context.getPublicAutoFollowState(session).armedIndex, 1);
+  assert.equal(context.getPublicAutoFollowState(session).preparedIndex, 1);
   session.selectedCellId = 'different-cell';
-  assert.equal(context.getPublicAutoFollowState(session).armedIndex, null);
+  assert.equal(context.getPublicAutoFollowState(session).preparedIndex, null);
 });
 
 test('display acknowledgements are scoped to the current decision, role and cell', () => {
@@ -275,7 +278,7 @@ test('recognition timing exposes audio lag separately from alignment processing 
   assert.ok(Number.isFinite(state.lastAlignmentMs));
 });
 
-test('server advances after weak recognition while publishing both tracking lanes', () => {
+test('weak recognition holds the estimate until normal verification prepares another short opening', () => {
   const { context, session, emissions } = fixture();
   session.lines = [{ text: '大家今天終於重新聚在一起了' },
     { text: '可是我答應過你永遠不會離開' }, { text: '請你先坐下來喝杯茶' },
@@ -285,6 +288,7 @@ test('server advances after weak recognition while publishing both tracking lane
   });
   for (let time = 1020; time <= 1200; time += 20) context.handleAutoFollowAudioLevel('test', 0.001, 20, time);
   for (let time = 1220; time <= 1240; time += 20) context.handleAutoFollowAudioLevel('test', 0.08, 20, time);
+  context.handleAutoFollowTranscript('test', '可', {streamId: 's', itemId: 'opening', startMs: 1200, endMs: 1250});
   assert.equal(session.currentIndex, 1);
   context.handleAutoFollowTranscript('test', '科是他打應過你', {
     streamId: 's', itemId: 'b', startMs: 1200, endMs: 1800,
@@ -297,11 +301,15 @@ test('server advances after weak recognition while publishing both tracking lane
   context.handleAutoFollowTranscript('test', '請你先', {
     streamId: 's', itemId: 'c', startMs: 2000, endMs: 2300,
   });
+  assert.equal(session.currentIndex, 1, 'unverified estimates do not prepare another short trigger');
+  context.handleAutoFollowTranscript('test', session.lines[1].text, {streamId: 's', itemId: 'verified', startMs: 2400, endMs: 3500});
+  assert.equal(context.getPublicAutoFollowState(session).preparedIndex, 2);
+  context.handleAutoFollowTranscript('test', '請你', {streamId: 's', itemId: 'next', startMs: 3600, endMs: 3700});
   assert.equal(session.currentIndex, 2);
   assert.ok(emissions.includes('viewer'));
   assert.equal(context.getViewerPayload(session).text, session.lines[2].text);
   assert.equal(context.getProjectorPayload(session).text, session.lines[2].text);
-  context.transcriptionStreams.set('test', { autoFollowAudioMs: 2400 });
+  context.transcriptionStreams.set('test', { autoFollowAudioMs: 3800 });
   context.applyCurrentIndexChange(session, 0, { manualOverride: true });
   const reset = context.getPublicAutoFollowState(session);
   assert.equal(reset.sequenceIndex, null);
@@ -324,6 +332,7 @@ test('cross-cue transcript confirms the displayed prediction before moving, whil
   context.handleAutoFollowTranscript('test', session.lines[0].text, {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
   for (let endMs = 1020; endMs <= 1200; endMs += 20) context.handleAutoFollowAudioLevel('test', 0.001, 20, endMs);
   for (let endMs = 1220; endMs <= 1240; endMs += 20) context.handleAutoFollowAudioLevel('test', 0.08, 20, endMs);
+  context.handleAutoFollowTranscript('test', '你', {streamId: 's', itemId: 'b', startMs: 1200, endMs: 1250});
   assert.equal(session.currentIndex, 1);
   assert.equal(positions.at(-1).continuous, true);
   history.length = 0;

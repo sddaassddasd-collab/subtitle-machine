@@ -1,4 +1,4 @@
-const SOURCE_LABELS = Object.freeze({audio: '參考錄音比對', transcript: '文字辨識', onset: '起音預推', semantic: '語意恢復（待文字確認）',
+const SOURCE_LABELS = Object.freeze({audio: '參考錄音比對', transcript: '文字辨識', onset: '起音預推', opening: '短開頭觸發（待核對）', semantic: '語意恢復（待文字確認）',
   correction: '跳詞校正', silence: '靜默切換', manual: '人工操作', initial: '起始位置',
   context: '場次／版本切換', resume: '恢復位置', system: '系統定位',
   paced_estimate: '交疊段節奏估計', script_return: '即時字幕接回劇本'});
@@ -19,7 +19,7 @@ function historyReport({run, events, scope}) {
     if (event.type === 'capture_summary') diagnosticTotals.captureSummaries++;
     if (event.type === 'problem_mark') diagnosticTotals.problemMarks++;
     if (event.type === 'stream_configuration') streams.push(event);
-    if (event.type === 'onset_review') {
+    if (event.type === 'onset_review' || event.type === 'opening_review') {
       if (!onsetReviews.has(event.decisionId)) onsetReviews.set(event.decisionId, []);
       onsetReviews.get(event.decisionId).push(event);
     }
@@ -66,7 +66,7 @@ function historyReport({run, events, scope}) {
     else if (row.type !== 'direction' && row.skips.length)
       row.status = row.skips.every(skip => skip.source === 'manual') ? 'skipped_manual' : 'skipped_auto';
     row.entryCount = row.visits.length;
-    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'correction', 'silence', 'semantic', 'paced_estimate', 'script_return'].includes(visit.source)).length;
+    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'opening', 'correction', 'silence', 'semantic', 'paced_estimate', 'script_return'].includes(visit.source)).length;
     row.confirmedCount = row.visits.filter(visit => visit.confirmations.length).length;
   }
   let seenAudio = false, hasGaps = false, stoppedNormally = false;
@@ -116,7 +116,7 @@ function historyCsv(report) {
     '參考片段可用', '參考起點秒', '參考終點秒', '經過次序', '進入方式', '進入時間UTC', '收音串流ID', '現場音訊毫秒',
     '確認來源', '句尾確認', '結果', '跨過來源', '辨識文字', '錄音定位秒', '顯示回報', '紀錄含中斷', '文字涵蓋', '涵蓋辨識文字',
     '觸發時間UTC', '觸發時間台北UTC+08', '距紀錄開始秒', '觸發時間來源', '觸發證據音訊毫秒',
-    '預推核對結果', '預推核對原因', '預推核對時間UTC']];
+    '預推核對結果', '預推核對原因', '預推核對時間UTC', '觸發開頭', '觸發字數']];
   for (const row of report.rows) for (const [index, visit] of (row.visits.length ? row.visits : [null]).entries()) {
     const confirmations = visit?.confirmations || [];
     const review = visit?.predictionReviews?.at(-1);
@@ -134,7 +134,7 @@ function historyCsv(report) {
       visit ? visit.timestampSource === 'trigger' ? '觸發決策' : '舊版事件時間' : '',
       visit?.decisionTiming?.transcriptAudioEndMs ?? visit?.decisionTiming?.audioEndMs ?? visit?.decisionTiming?.onsetAudioMs ?? visit?.decisionTiming?.silenceAudioMs,
       review ? ({pending: '等待文字核對', overdue: '核對逾時', confirmed: '已核對', unconfirmed: '結束時仍未確認'}[review.status] || review.status) : '',
-      review?.reason, iso(review?.at)]);
+      review?.reason, iso(review?.at), visit?.decisionTiming?.openingText, visit?.decisionTiming?.openingCharacters]);
   }
   return '\uFEFF' + records.map(record => record.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

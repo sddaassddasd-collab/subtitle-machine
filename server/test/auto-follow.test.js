@@ -1,6 +1,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createTracker, prepareScript, normalizeText, align, followTranscript, followAudio } = require('../src/auto-follow');
+// Full-evidence locator regressions remain separate from the display trigger.
+// The production sequential wrapper is exercised in sequential-opening tests
+// and the real server integration suites.
+const { createTracker, prepareScript, normalizeText, align, locateTranscript: followTranscript, followAudio } = require('../src/auto-follow');
 
 function show(texts, index = 0) {
   const lines = texts.map(text => typeof text === 'string' ? { text } : text);

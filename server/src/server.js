@@ -9139,12 +9139,15 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
       firstWordId: decision.firstWordId, lastWordId: decision.lastWordId,
       supportingFirstWordId: decision.supportingFirstWordId, supportingLastWordId: decision.supportingLastWordId,
       wordWitnesses: decision.wordWitnesses,
+      openingAudioStartMs: decision.openingAudioStartMs, openingAudioEndMs: decision.openingAudioEndMs,
+      openingCharacters: decision.openingCharacters, openingText: decision.openingText,
+      preparedFromIndex: decision.preparedFromIndex, estimatedWordTiming: decision.estimatedWordTiming,
       estimated: decision.estimated === true, reason: decision.reason, groupId: decision.groupId,
       speed: decision.speed, nextAudioMs: decision.nextAudioMs, expiresAudioMs: decision.expiresAudioMs,
     } : null,
   });
   const continuous = !manualOverride && nextIndex === session.currentIndex + 1 &&
-    decision?.index === nextIndex && ['audio', 'transcript', 'correction', 'onset', 'silence'].includes(decision.source);
+    decision?.index === nextIndex && ['audio', 'transcript', 'correction', 'onset', 'opening', 'silence'].includes(decision.source);
   session.currentIndex = nextIndex;
   const presentation = autoFollowStates.get(session.id)?.captionDisplay;
   if (presentation?.held && !presentation.holding(nextIndex, session.selectedCellId)) {
@@ -9224,8 +9227,8 @@ function recordAutoFollowDecision(sessionId, index, source, timing = {}) {
     cellId: getSessionRecord(sessionId)?.selectedCellId,
     ...timing, displayAckMs: {},
   };
-  if (source === 'onset') recordOnsetReviewEvents(sessionId, state.onsetReview.start(index,
-    state.lastDecision.id, timing.onsetAudioMs, transcriptionStreams.get(sessionId)?.autoFollowAudioMs));
+  if (source === 'onset' || source === 'opening') recordOnsetReviewEvents(sessionId, state.onsetReview.start(index,
+    state.lastDecision.id, timing.openingAudioStartMs ?? timing.onsetAudioMs, transcriptionStreams.get(sessionId)?.autoFollowAudioMs, source));
   else if (state.onsetReview.active?.index !== index)
     recordOnsetReviewEvents(sessionId, state.onsetReview.close('position_changed_without_confirmation', index));
   autoFollowHistory.observe(sessionId, 'decision', source, {decisionId: state.lastDecision.id, targetIndex: index,
@@ -9233,7 +9236,8 @@ function recordAutoFollowDecision(sessionId, index, source, timing = {}) {
 }
 
 function recordOnsetReviewEvents(sessionId, events) {
-  for (const event of events) autoFollowHistory.event(sessionId, 'onset_review', {...event, ...followHistoryClock(sessionId)});
+  for (const event of events) autoFollowHistory.event(sessionId, event.source === 'opening' ? 'opening_review' : 'onset_review',
+    {...event, ...followHistoryClock(sessionId)});
 }
 
 function getAutoFollowDisplayTiming(session) {
@@ -9345,6 +9349,7 @@ function getPublicAutoFollowState(session) {
     correctionCandidates: state.tracker.correction.candidates,
     predictedIndex: state.tracker.prediction?.source === 'silence'
       ? null : state.tracker.prediction?.index ?? null,
+    predictionSource: state.tracker.prediction?.source || 'onset',
     predictionReview: state.onsetReview.last,
     lastDecision: state.lastDecision,
     history: autoFollowHistory.status(session.id),
@@ -9443,7 +9448,10 @@ function applyPerformanceAction(session, action) {
     session.projectorDisplayMode = session.automaticLive ? 'transcription' : 'script';
     session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
     // Clear pre-armed onset guesses while keeping independent text evidence.
-    state.tracker.prediction = null; state.tracker.armedIndex = null; state.tracker.preparedIndex = null;
+    state.tracker.prediction = null; state.tracker.armedIndex = null;
+    if (action.source === 'live') state.tracker.openingPlan = null;
+    state.tracker.preparedIndex = state.tracker.openingPlan && state.tracker.openingPlan.fromIndex === action.index
+      ? state.tracker.openingPlan.index : null;
     if (Number.isInteger(action.index)) {
       performance.prepared = null;
       recordAutoFollowDecision(session.id, action.index, 'script_return', {reason: action.reason, supportSource: action.matchSource,
@@ -9464,6 +9472,7 @@ function applyPerformanceAction(session, action) {
 }
 
 function performanceTextMatch(state, lines, result, transcript, options) {
+  if (result.shortOpening) return null;
   if (!Number.isInteger(result.index)) return null;
   if (state.performance.source === 'live' && result.candidate)
     return {...result.candidate, index: result.index, startMs: result.evidence.startMs, endMs: result.evidence.endMs};
@@ -9674,7 +9683,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   }
   state.lastAlignmentMs = Math.max(0, Date.now() - alignmentStartedAt);
   recordOnsetReviewEvents(sessionId, state.onsetReview.observe(session.currentIndex, audioMs, result, options));
-  if (!result.ignored && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
+  if (!result.ignored && !result.shortOpening && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
     referenceRuntime.hint?.(session, result.candidate, options.endMs);
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
     normalizedText: normalizeText(transcript).slice(-120), before, after: trackerSnapshot(state.tracker, session.currentIndex),
@@ -9689,6 +9698,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       weakPath: result.candidate.weakPath === true,
       wordEvidence: result.candidate.wordEvidence === true, shortRecovery: result.candidate.shortRecovery === true,
       locationOnly: result.candidate.locationOnly === true, wordWitnesses: result.candidate.wordWitnesses,
+      shortOpening: result.candidate.shortOpening === true,
       pathSteps: result.candidate.pathSteps || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
@@ -9736,8 +9746,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     status: result.status, lastHeardText: sanitizeLineText(transcript),
     lastCandidateIndex: result.candidate?.index ?? null,
     lastCandidateText: followingLines[result.candidate?.index]?.text || '',
-    confidence: result.candidate?.confidence ?? null, message: result.message,
-    ...(Number.isInteger(result.index) ? { lastVerifiedAt: now } : {}),
+    confidence: result.shortOpening ? null : result.candidate?.confidence ?? null, message: result.message,
+    ...(Number.isInteger(result.index) && !result.shortOpening ? { lastVerifiedAt: now } : {}),
   });
   const evidence = {...followHistoryClock(sessionId), text: sanitizeLineText(result.candidate?.wordEvidence ? result.candidate.speech.text : transcript).slice(0, 2000),
     itemId: options.itemId, providerStreamId: options.streamId,
@@ -9753,11 +9763,15 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       {...evidence, text: covered.heard, completed: covered.completed, matchedSpan: covered});
   }
   if (Number.isInteger(result.index) && result.index !== session.currentIndex) {
-    recordAutoFollowDecision(sessionId, result.index, result.status === 'corrected' ? 'correction' : 'transcript', {
+    recordAutoFollowDecision(sessionId, result.index, result.shortOpening ? 'opening' : result.status === 'corrected' ? 'correction' : 'transcript', {
       transcriptReceivedAt: receivedAt, transcriptAudioLagMs: result.evidence && Number.isFinite(audioMs)
         ? Math.max(0, audioMs - result.evidence.endMs) : state.lastTranscriptAudioLagMs,
       transcriptAudioEndMs: result.evidence?.endMs ?? options.endMs,
       wordWitnesses: result.candidate?.wordWitnesses,
+      ...(result.shortOpening ? {openingAudioStartMs: result.shortOpening.startMs, openingAudioEndMs: result.shortOpening.endMs,
+        openingCharacters: result.shortOpening.characters, openingText: result.shortOpening.text,
+        preparedFromIndex: result.shortOpening.fromIndex, firstWordId: result.shortOpening.firstWordId,
+        lastWordId: result.shortOpening.lastWordId, estimatedWordTiming: result.shortOpening.estimated} : {}),
     });
     updateAutoFollowState(sessionId, { lastAdvancedAt: now });
     applyCurrentIndexChange(session, result.index);
@@ -9765,7 +9779,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     // Do not resend the entire script for each interim hypothesis.
     broadcastAutoFollowState(sessionId);
   }
-  if (Number.isInteger(result.index)) autoFollowHistory.confirm(sessionId, result.index,
+  if (Number.isInteger(result.index) && !result.shortOpening) autoFollowHistory.confirm(sessionId, result.index,
     result.status === 'corrected' ? 'correction' : 'transcript',
     {...evidence, completed: result.completed === true});
   else autoFollowHistory.diagnostic(sessionId, 'text', result.status || 'searching', evidence);
@@ -9795,7 +9809,7 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
   const script = prepareScript(lines, tracker.script);
   tracker.script = script;
   void semanticFollower.observe(stream, {...options, client: stream.translationClient, text: transcript,
-    currentIndex: fromIndex, displayIndex, context, scope: tracker, scriptScope: script, candidates, textResolved: !live && Number.isInteger(result.index)}, {
+    currentIndex: fromIndex, displayIndex, context, scope: tracker, scriptScope: script, candidates, textResolved: !live && Number.isInteger(result.index) && !result.shortOpening}, {
     isCurrent: () => {
       if (getSessionRecord(sessionId) !== session) return 'session_changed';
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return 'stream_changed';

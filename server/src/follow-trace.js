@@ -51,6 +51,8 @@ function trackerSnapshot(tracker, currentIndex) {
   return {currentIndex, located: tracker.located, progressIndex: tracker.progressIndex, progress: tracker.progress,
     armedIndex: tracker.armedIndex, preparedIndex: tracker.preparedIndex,
     prediction: tracker.prediction ? {index: tracker.prediction.index, source: tracker.prediction.source || 'onset', onsetMs: tracker.prediction.onsetMs} : null,
+    openingPlan: tracker.openingPlan ? {fromIndex: tracker.openingPlan.fromIndex, index: tracker.openingPlan.index,
+      direction: tracker.openingPlan.direction, evidenceEndMs: tracker.openingPlan.observed.endMs} : null,
     sequence: tracker.sequence ? {index: tracker.sequence.index, atMs: tracker.sequence.atMs} : null,
     correction: {status: tracker.correction.status, candidates: tracker.correction.candidates.slice(0, 3)},
     referenceFence: tracker.referenceFence ? {index: tracker.referenceFence.index, audioMs: tracker.referenceFence.audioMs, decidedAudioMs: tracker.referenceFence.decidedAudioMs} : null,

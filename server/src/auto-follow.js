@@ -5,6 +5,7 @@ const {freshSpeech, wordWindows} = require('./word-evidence');
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
+const {prepareOpening, matchOpening, observeOpening} = require('./sequential-opening');
 const MAX_HEARD = T.maxHeard;
 const SEQUENCE_TTL_MS = T.sequenceTtlMs;
 const DIRECTION_SILENCE_MS = O.directionSilenceMs;
@@ -77,6 +78,7 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     path: {hypotheses: [], lastMs: -1},
     weakPath: {hypotheses: [], lastMs: -1},
     wordPath: {hypotheses: []},
+    shortOpenings: false, openingPlan: null, selectedStartIndex: null,
   };
 }
 
@@ -503,7 +505,7 @@ function correctionWindows(script, text) {
   return merged;
 }
 
-function followTranscript(tracker, lines, currentIndex, event) {
+function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   const text = normalizeText(event.text);
   if (!text || !event.itemId || !Number.isFinite(event.startMs) ||
     !Number.isFinite(event.endMs)) return {ignored: true, reason: 'invalid_transcript'};
@@ -524,7 +526,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   if (event.startMs < tracker.ignoreBeforeMs || event.endMs <= tracker.ignoreBeforeMs) {
     return {ignored: true, reason: 'before_manual_fence'};
   }
-  const script = prepareScript(lines, tracker.script);
+  const script = preparedScript || prepareScript(lines, tracker.script);
   if (tracker.script && script !== tracker.script) {
     // Edits invalidate old alignment history but preserve the audio ordering fence.
     clearPreparation(tracker);
@@ -569,8 +571,9 @@ function followTranscript(tracker, lines, currentIndex, event) {
   // Keep late finals as history, but they cannot undo an onset decision or arm
   // another cue. A new item with newer audio can still correct a genuine repeat.
   const prediction = tracker.prediction;
+  const completeExpectedOpening = prediction?.source === 'opening' && text === script.entries[prediction.index]?.text;
   if (prediction && (event.endMs <= prediction.onsetMs ||
-    (prediction.priorItems.has(event.itemId) && text === old?.text))) {
+    (prediction.priorItems.has(event.itemId) && text === old?.text && !completeExpectedOpening))) {
     return {ignored: true, reason: 'before_prediction_fence'};
   }
 
@@ -584,7 +587,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const variants = [{ text: text.slice(-MAX_HEARD), context: false }];
   if (history) variants.unshift({ text: (history + text).slice(-MAX_HEARD), context: true });
   const expectedIndex = tracker.armedIndex ?? currentIndex;
-  const opening = matchPredictedOpening(tracker, script, text, event) ||
+  const opening = event.prepareOnly ? null : matchPredictedOpening(tracker, script, text, event) ||
     matchPreparedOpening(tracker, script, currentIndex, text, event) ||
     matchSequenceOpening(tracker, script, currentIndex, text, event);
   const partialOpening = preparedOpeningText(tracker, currentIndex, text, event);
@@ -660,6 +663,11 @@ function followTranscript(tracker, lines, currentIndex, event) {
     best = weakPathCandidate;
     candidates = [best, ...candidates.filter(c => c.index !== best.index)];
   }
+  // The selected display is the starting occurrence. Repeated copies elsewhere
+  // do not override an equally good current-cue match on initial acquisition.
+  const selected = event.trustedCurrentIndex === currentIndex && candidates.find(c => c.index === currentIndex &&
+    c.confidence >= T.minimumConfidence && c.rank >= (best?.rank ?? 0) - T.minimumMargin);
+  if (selected) { best = selected; candidates = [selected, ...candidates.filter(c => c !== selected)]; }
   tracker.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
   const uncertain = (reason, message) => {
@@ -692,14 +700,14 @@ function followTranscript(tracker, lines, currentIndex, event) {
     return uncertain('low_text_score', '正在重新定位台詞，暫時維持目前字幕。');
   }
   const runner = candidates[1];
-  const ambiguous = !best.pathConfirmed && runner && best.rank - runner.rank < T.minimumMargin;
+  const ambiguous = !selected && !best.pathConfirmed && runner && best.rank - runner.rank < T.minimumMargin;
   const sequential = best.index === currentIndex || best.index === tracker.armedIndex;
   // Identical short lines are only resolvable through an already confirmed boundary.
   const expectedShort = sequential && text === script.entries[best.index].text &&
     (best.index === currentIndex || tracker.progress === 1);
   const exactUnique = best.confidence === 1 && text === script.entries[best.index].text &&
     !candidates.some(candidate => candidate.index !== best.index && candidate.confidence === 1);
-  if (prediction && best.index < prediction.index &&
+  if (prediction && prediction.source !== 'opening' && best.index < prediction.index &&
     (prediction.priorItems.has(event.itemId) || event.startMs < prediction.onsetMs)) {
     return {ignored: true, reason: 'prediction_rewind'};
   }
@@ -798,6 +806,71 @@ function followTranscript(tracker, lines, currentIndex, event) {
   };
 }
 
+function restoreOpeningPreparation(tracker) {
+  const plan = tracker.openingPlan;
+  tracker.preparedIndex = plan?.index ?? null;
+  tracker.armedIndex = null;
+  tracker.openingHint = plan ? tracker.script?.entries[plan.index]?.opening || '' : '';
+}
+
+// Display timing is separate from the full-evidence locator. A short opening
+// spends one preparation; only a normal accepted match prepares another cue.
+function followTranscript(tracker, lines, currentIndex, event) {
+  const script = prepareScript(lines, tracker.script);
+  const reset = !tracker.shortOpenings || tracker.streamId !== event.streamId || tracker.script !== script;
+  let plan = reset ? null : tracker.openingPlan;
+  const selectedStartIndex = reset ? currentIndex : tracker.selectedStartIndex;
+  if (plan?.fromIndex !== currentIndex) plan = null;
+  if (!plan && script.entries[currentIndex]?.source.type === 'direction')
+    plan = prepareOpening(script, currentIndex, {text: '', endMs: Math.max(0, tracker.ignoreBeforeMs)}, true);
+  const trigger = matchOpening(plan, script, event);
+  const result = locateTranscript(tracker, lines, currentIndex,
+    {...event, prepareOnly: true, trustedCurrentIndex: tracker.prediction?.source === 'opening' &&
+      normalizeText(event.text) === script.entries[currentIndex]?.text ? currentIndex : selectedStartIndex}, script);
+  tracker.shortOpenings = true;
+  tracker.selectedStartIndex = selectedStartIndex;
+  if (result.ignored) {
+    tracker.openingPlan = plan;
+    restoreOpeningPreparation(tracker);
+    return result;
+  }
+  const accepted = Number.isInteger(result.index);
+  const repeatedCurrent = accepted && result.index === currentIndex && result.completed &&
+    normalizeText(event.text) === script.entries[currentIndex].text &&
+    script.entries[currentIndex].length > T.triggerOpeningCharacters;
+  // A full accepted relocation still wins when the ASR batch already proves a
+  // different location. Otherwise the prepared short opening owns the change.
+  if (trigger && !repeatedCurrent && (!accepted || result.index === currentIndex)) {
+    const speech = {...event, text: trigger.text, startMs: trigger.startMs, endMs: trigger.endMs};
+    const item = tracker.items.get(event.itemId), maxIndex = item?.maxIndex ?? null;
+    applySemanticLocation(tracker, lines, trigger.index, speech, {prepare: false});
+    // Displaying an expectation is not a verified same-item forward fence:
+    // later revised/new words must still be able to correct the estimate.
+    if (item) item.maxIndex = maxIndex;
+    tracker.openingPlan = null;
+    tracker.prediction = {index: trigger.index, fromIndex: currentIndex, source: 'opening',
+      onsetMs: trigger.startMs, decidedAudioMs: event.endMs, anchor: {itemId: event.itemId, text: normalizeText(event.text), endMs: event.endMs},
+      priorItems: new Set([event.itemId, ...[...tracker.items.values()].filter(item => item.endMs <= trigger.startMs).map(item => item.itemId)])};
+    tracker.selectedStartIndex = null;
+    restoreOpeningPreparation(tracker);
+    return {index: trigger.index, status: 'advanced', reason: 'prepared_short_opening', shortOpening: trigger,
+      progress: 0, completed: false, spans: [], armedIndex: null,
+      evidence: {startMs: trigger.startMs, endMs: trigger.endMs},
+      candidate: {index: trigger.index, offset: trigger.characters, length: script.entries[trigger.index].length,
+        confidence: 1, evidence: trigger.characters, heard: trigger.text, locationOnly: true, shortOpening: true},
+      message: '已依下一格短開頭顯示字幕，等待現有配對標準核對後再準備下一格。'};
+  }
+  if (accepted) {
+    tracker.selectedStartIndex = null;
+    tracker.openingPlan = prepareOpening(script, result.index, event);
+  } else {
+    tracker.openingPlan = plan;
+    if (plan) observeOpening(plan, event);
+  }
+  restoreOpeningPreparation(tracker);
+  return result;
+}
+
 function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs }) {
   const duration = Math.max(0, Math.min(O.maxPacketMs, durationMs || 0));
   const threshold = Math.max(O.minimumThreshold, Math.min(O.maximumThreshold, tracker.noiseFloor * O.noiseMultiplier));
@@ -861,6 +934,7 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
   const onsetMs = endMs - tracker.loudMs;
   tracker.lastOnsetMs = onsetMs;
   result.onsetMs = onsetMs;
+  if (tracker.shortOpenings) return result;
   if (tracker.prediction || !tracker.located || tracker.progressIndex !== currentIndex ||
     tracker.progress !== 1 || tracker.armedIndex !== currentIndex + 1 ||
     !tracker.anchor?.completed || onsetMs < tracker.armedAtMs ||
@@ -977,7 +1051,7 @@ function localSupportCandidates(script, currentIndex, text, {ahead = T.nearbyAhe
   return [...byIndex.values()].filter(c => c.offset >= Math.min(2, c.length) && !script.entries[c.index].source.music);
 }
 
-function applySemanticLocation(tracker, lines, index, event) {
+function applySemanticLocation(tracker, lines, index, event, {prepare = true} = {}) {
   const script = prepareScript(lines, tracker.script);
   if (!script.entries[index]?.text || script.entries[index].source.music ||
     event.endMs <= tracker.ignoreBeforeMs) return false;
@@ -993,7 +1067,10 @@ function applySemanticLocation(tracker, lines, index, event) {
     text: normalizeText(event.text), endMs: event.endMs}};
   const item = tracker.items.get(event.itemId);
   if (item) item.maxIndex = Math.max(item.maxIndex ?? index, index);
+  tracker.shortOpenings = true;
+  tracker.openingPlan = prepare ? prepareOpening(script, index, event) : null;
+  restoreOpeningPreparation(tracker);
   return true;
 }
 
-module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates };
+module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, locateTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates };

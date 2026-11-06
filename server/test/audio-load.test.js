@@ -105,12 +105,12 @@ test('recognition diagnostics do not rebuild the script', t => {
   fixture.transcript(originalLines[0].text, {
     streamId: 'test', itemId: 'first', startMs: 0, endMs: 1000, isFinal: false,
   });
-  assert.equal(fixture.state().armedIndex, 1);
+  assert.equal(fixture.state().preparedIndex, 1);
   assert.deepEqual(fixture.counts(), { structures: 0, lines: 0 });
   assert.equal(fixture.session.lines, originalLines);
 });
 
-test('actual server predicts at onset, verifies a short opening, then corrects a skip', t => {
+test('actual server waits for a short opening after sound, then corrects a skip', t => {
   const fixture = createFixture({ allowCueChanges: true, texts: [
     '我一直以為你不會再回來', '可是我答應過你',
     '我們曾經一起走過這條街道', '請大家立刻離開這個危險的地方',
@@ -129,15 +129,17 @@ test('actual server predicts at onset, verifies a short opening, then corrects a
   assert.equal(fixture.session.currentIndex, 0);
   assert.deepEqual(fixture.counts(), { structures: 0, lines: 0 });
   fixture.send({ ...packet(fixture, 62), level: 0.1 });
-  assert.equal(fixture.session.currentIndex, 1);
-  assert.equal(fixture.state().lastDecision.source, 'onset');
-  assert.equal(fixture.state().lastDecision.onsetDetectionMs, 40);
+  assert.equal(fixture.session.currentIndex, 0);
   fixture.transcript('可', { streamId: 'replay', itemId: 'b', startMs: 1200, endMs: 1300 });
+  assert.equal(fixture.session.currentIndex, 1);
+  assert.equal(fixture.state().lastDecision.source, 'opening');
+  assert.equal(fixture.state().lastDecision.openingCharacters, 1);
   assert.equal(fixture.session.currentIndex, 1);
   fixture.transcript('可是', { streamId: 'replay', itemId: 'b', startMs: 1200, endMs: 1400 });
   assert.equal(fixture.session.currentIndex, 1);
   assert.equal(fixture.state().progressIndex, 1);
   assert.ok(fixture.state().progress > 0 && fixture.state().progress < 1);
+  assert.equal(fixture.state().preparedIndex, 2, 'normal context-assisted matching can prepare without a complete ending');
   fixture.transcript('請大家立刻離開', {
     streamId: 'replay', itemId: 'c', startMs: 2000, endMs: 2600,
   });

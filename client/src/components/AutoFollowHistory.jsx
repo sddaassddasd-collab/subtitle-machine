@@ -1,6 +1,6 @@
 import {useEffect, useState} from 'react'
 
-const sources = {audio: '參考錄音', transcript: '文字辨識', onset: '起音預推', correction: '跳詞校正', semantic: '語意恢復（待確認）',
+const sources = {audio: '參考錄音', transcript: '文字辨識', onset: '起音預推', opening: '短開頭觸發（待核對）', correction: '跳詞校正', semantic: '語意恢復（待確認）',
   silence: '靜默切換', manual: '人工操作', initial: '起始位置', context: '場次／版本切換', resume: '恢復位置', system: '系統定位',
   paced_estimate: '交疊段節奏估計', script_return: '即時字幕接回劇本'}
 const statuses = {confirmed: '已確認', pending: '已進入、未確認', manual: '人工進入、未確認',

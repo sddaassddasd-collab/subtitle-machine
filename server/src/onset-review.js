@@ -9,9 +9,9 @@ class OnsetReview {
     this.last = value;
     return value;
   }
-  start(index, decisionId, onsetMs, audioMs) {
+  start(index, decisionId, onsetMs, audioMs, source = 'onset') {
     const events = this.close('replaced');
-    this.active = {index, decisionId, onsetMs,
+    this.active = {index, decisionId, onsetMs, source,
       startedAudioMs: Number.isFinite(audioMs) ? audioMs : onsetMs, timedOut: false};
     events.push(this.event('pending'));
     return events;
@@ -27,8 +27,8 @@ class OnsetReview {
     if (!p) return [];
     if (result.reason) p.lastReason = result.reason;
     if (result.candidate) p.lastCandidate = {index: result.candidate.index, confidence: result.candidate.confidence};
-    const covered = !result.ignored && result.spans?.find(s => s.index === p.index);
-    if (!result.ignored && (result.index === p.index || covered)) {
+    const covered = !result.ignored && !result.shortOpening && result.spans?.find(s => s.index === p.index);
+    if (!result.ignored && !result.shortOpening && (result.index === p.index || covered)) {
       const event = this.event('confirmed', {reason: covered ? 'covered_before_advance' : result.reason || 'text_verified',
         itemId: speech.itemId, audioStartMs: result.evidence?.startMs ?? speech.startMs,
         audioEndMs: result.evidence?.endMs ?? speech.endMs, targetIndex: result.index,

@@ -86,6 +86,27 @@ test('onset reviews survive export even when pending precedes the visit, without
   await h.end(s.id);
 });
 
+test('short opening triggers retain their source, characters and later verification in JSON and CSV', async () => {
+  const {session: s, history: h} = fixture('opening-history');
+  const id = await h.start(s);
+  h.event(s.id, 'opening_review', {index: 1, decisionId: 'opening-1', status: 'pending', source: 'opening'});
+  h.enter(s, 1, {source: 'opening', decisionId: 'opening-1', decisionTiming: {
+    openingText: '第', openingCharacters: 1, openingAudioStartMs: 1000, openingAudioEndMs: 1200}});
+  s.currentIndex = 1;
+  let report = historyReport(await h.read(s.id, id));
+  assert.equal(report.rows[1].status, 'pending'); assert.equal(report.rows[1].confirmedCount, 0);
+  assert.equal(report.rows[1].autoEntryCount, 1);
+  h.confirm(s.id, 1, 'transcript', {text: s.lines[1].text, completed: false});
+  h.event(s.id, 'opening_review', {index: 1, decisionId: 'opening-1', status: 'confirmed', source: 'opening'});
+  report = historyReport(await h.read(s.id, id));
+  const visit = report.rows[1].visits[0];
+  assert.equal(visit.source, 'opening'); assert.equal(visit.confirmations[0].source, 'transcript');
+  assert.deepEqual(visit.predictionReviews.map(r => r.status), ['pending', 'confirmed']);
+  const csv = historyCsv(report);
+  assert.match(csv, /短開頭觸發（待核對）/); assert.match(csv, /觸發字數/); assert.match(csv, /"第","1"/);
+  await h.end(s.id);
+});
+
 test('durable recovery retains the run and visits, marks an interruption and preserves script versions', async () => {
   const {session: s, history: first} = fixture('restart');
   const id = await first.start(s);
