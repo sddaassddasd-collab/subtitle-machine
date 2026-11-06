@@ -2,7 +2,7 @@ const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 5, mismatchMs: 4500, mismatchAudioMs: 3000,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 6, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 8, minimumSpeechConfidence: .35,
   longItemMs: 6500, longItemCharacters: 18, stablePrefixCharacters: 3, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
@@ -103,6 +103,16 @@ class PerformanceFollower {
     m.startMs = Math.min(...[...m.items.values()].map(x => x.startMs));
     m.endMs = Math.max(...[...m.items.values()].map(x => x.endMs));
   }
+  semanticRequested(inputId, now) {
+    this.semanticRequest = {inputId, until: now + PERFORMANCE_SETTINGS.semanticGraceMs};
+    if (this.mismatch && !this.mismatch.semanticReserved) {
+      this.mismatch.semanticReserved = true;
+      this.mismatch.semanticUntil = this.semanticRequest.until;
+    }
+  }
+  semanticSettled(inputId) {
+    if (!inputId || this.semanticRequest?.inputId === inputId) this.semanticRequest = null;
+  }
   speech(event, now) {
     if (!event.itemId || !Number.isFinite(event.startMs) || !Number.isFinite(event.endMs) || event.endMs <= event.startMs) return null;
     if (event.audioMs - event.endMs > PERFORMANCE_SETTINGS.maximumLagMs || event.endMs > event.audioMs + 250) return null;
@@ -141,7 +151,7 @@ class PerformanceFollower {
     }
     const reject = !speech ? 'no_fresh_speech' : this.group ? 'overlap_active' : this.source === 'live' ? 'already_live'
       : this.lock !== 'auto' ? 'operator_script_lock' : !this.settings.automaticLive ? 'disabled'
-        : !this.lastReliable ? 'no_script_anchor' : null;
+        : !this.lastReliable && !Number.isInteger(this.originIndex) ? 'no_script_anchor' : null;
     if (reject) { this.fallbackDecision = {reason: reject}; return null; }
     if (Number.isFinite(event.confidence) && event.confidence < PERFORMANCE_SETTINGS.minimumSpeechConfidence) {
       this.forgetMismatch(event.itemId);
@@ -152,6 +162,9 @@ class PerformanceFollower {
     }
     if (this.mismatch && speech.startMs - this.mismatch.endMs > PERFORMANCE_SETTINGS.mismatchGapMs) this.mismatch = null;
     const m = this.mismatch ||= {at: now, startMs: speech.startMs, endMs: -1, items: new Map()};
+    if (!m.semanticReserved && this.semanticRequest) {
+      m.semanticReserved = true; m.semanticUntil = this.semanticRequest.until;
+    }
     if (speech.endMs <= m.endMs && !m.items.has(speech.itemId)) return null;
     m.items.set(speech.itemId, speech);
     // Revisions replace evidence, never count as an additional utterance.
@@ -179,7 +192,8 @@ class PerformanceFollower {
         : elapsedMs < PERFORMANCE_SETTINGS.mismatchMs ? 'mismatch_hold'
           : speechMs < PERFORMANCE_SETTINGS.mismatchAudioMs ? 'needs_more_audio'
             : now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs ? 'switch_hold'
-              : now - this.semanticAt < PERFORMANCE_SETTINGS.semanticGraceMs ? 'semantic_grace' : null;
+              : (m.semanticReserved ? this.semanticRequest && now < m.semanticUntil
+                : now - this.semanticAt < PERFORMANCE_SETTINGS.semanticGraceMs) ? 'semantic_grace' : null;
     this.fallbackDecision = {reason: reason || 'ready', items, characters, elapsedMs, speechMs, unclear};
     if (reason) return null;
     this.buffer = this.buffer.filter(x => x.endMs > audioMs - PERFORMANCE_SETTINGS.bufferMs);
@@ -250,7 +264,7 @@ class PerformanceFollower {
       }
       return null;
     }
-    const reliable = match.semantic || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
+    const reliable = match.semantic || match.scriptVerified || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
       (match.pathConfirmed && match.evidence >= 4);
     if (!reliable || endMs <= this.lastConfirmedEnd) return null;
     this.recognitionReliable = true;

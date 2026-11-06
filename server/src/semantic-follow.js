@@ -3,7 +3,7 @@ const {SemanticTranscript, freshSpeech} = require('./semantic-transcript');
 const {compactInput, selectMatches, requestSemanticCandidate} = require('./semantic-candidates');
 const {normalizeText} = require('./follow-text');
 const {alignedWords} = require('./word-evidence');
-const {corroborateLongMatch, corroborateCurrentMatch} = require('./semantic-corroboration');
+const {corroborateLongMatch, corroborateCurrentMatch, corroborateSequentialMatch} = require('./semantic-corroboration');
 
 // Short/uncertain proposals require independent forward support. A bounded,
 // stable long literal range may also corroborate semantics on the same audio.
@@ -47,10 +47,11 @@ class SemanticFollower {
   corroborate(state, match, data) {
     if (this.invalidReason(state.handlers)) return false;
     const current = corroborateCurrentMatch(state, match);
-    const proof = current || corroborateLongMatch(state, match);
+    const sequential = !current && corroborateSequentialMatch(state, match);
+    const proof = current || sequential || corroborateLongMatch(state, match);
     if (!proof) return false;
     const {speech, literal} = proof;
-    state.handlers.record('supported', {...data, reason: current ? 'current_opening_text_semantic' : 'stable_long_text_semantic',
+    state.handlers.record('supported', {...data, reason: current ? 'current_opening_text_semantic' : sequential ? 'prepared_short_text_semantic' : 'stable_long_text_semantic',
       supportSource: 'joint_text_semantic', independentAudio: false, candidateIndex: match.index,
       textConfidence: literal.confidence, margin: literal.supportMargin, evidence: literal.evidence,
       matchedCharacters: literal.matchedCharacters, firstWordId: speech.firstWordId,
@@ -192,7 +193,8 @@ class SemanticFollower {
     if (state.pending?.match && this.corroborate(state, state.pending.match,
       {...state.pending.data, supportingInputId: revision.inputId})) return;
     if (this.supportText(state, revision)) return;
-    const reason = this.invalidReason(handlers) || state.memory.requestReason(revision) ||
+    const reason = this.invalidReason(handlers) || state.memory.requestReason(revision,
+      observation.shortSequential ? S.sequentialMinimumCharacters : S.minimumTextLength) ||
       ((budget.itemRequests.get(revision.itemId) || 0) >= S.requestsPerItem ? 'item_request_limit' : null) ||
       (budget.busy ? 'request_in_flight' : now - budget.lastRequest < this.cooldownMs ? 'cooldown' : null);
     if (reason) { this.gate(state, reason, revision); return; }
@@ -205,7 +207,8 @@ class SemanticFollower {
     const requestObservation = {...observation, input: modelInput, inputId: revision.inputId, evidenceEndMs: input.evidenceEndMs};
     const meta = {inputId: revision.inputId, itemId: revision.itemId, currentIndex: observation.currentIndex,
       audioStartMs: revision.startMs, audioEndMs: revision.endMs, evidenceEndMs: input.evidenceEndMs,
-      isFinal: revision.isFinal, providerStreamId: observation.streamId ?? null, asrConfidence: revision.confidence};
+      isFinal: revision.isFinal, providerStreamId: observation.streamId ?? null, asrConfidence: revision.confidence,
+      shortSequential: observation.shortSequential === true};
     handlers.record('requested', {...meta, input: modelInput, candidates: observation.candidates});
     const controller = new AbortController(); state.controller = controller;
     let timer;

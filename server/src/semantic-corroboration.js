@@ -1,6 +1,7 @@
 const {SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {normalizeText} = require('./follow-text');
 const {preservedSpeech} = require('./return-evidence');
+const {align} = require('./auto-follow');
 
 // This is corroboration of ONE observation, never independent audio evidence.
 // Be conservative about explicit negation and subject changes on this shortcut;
@@ -74,4 +75,34 @@ function corroborateCurrentMatch(state, match) {
   return literal ? {speech, literal} : null;
 }
 
-module.exports = {corroborateLongMatch, corroborateCurrentMatch};
+// A short paraphrase can verify only the already prepared immediate next cue.
+// Require a stable real word span, strong semantic agreement and a literal
+// part of THIS cue (not characters borrowed from the preceding ASR sentence).
+function corroborateSequentialMatch(state, match) {
+  const h = state.handlers, context = h.corroborationContext?.(), original = match.speech;
+  const length = normalizeText(match.text).length, anchor = context?.anchor;
+  if (!original || match.tier !== 'high' || !Number.isFinite(match.matchConfidence) || match.matchConfidence < S.sequentialConfidence ||
+    !h.textCandidates || !context || context.predicted || match.index !== context.displayIndex + 1 ||
+    context.preparedIndex !== match.index || !context.allowed(match.index) ||
+    length < S.sequentialMinimumCharacters || length > S.sequentialMaximumCharacters ||
+    !anchor?.literal || anchor.index !== context.displayIndex || anchor.confidence < S.minimumConfidence ||
+    original.startMs < anchor.atMs || original.endMs - anchor.atMs > S.jointAnchorTtlMs) return null;
+  const item = state.memory.items.get(original.itemId), latest = item?.revisions.at(-1);
+  const record = {itemId: original.itemId, text: normalizeText(original.text), rawText: original.text,
+    startMs: original.startMs, endMs: original.endMs};
+  const speech = latest && preservedSpeech(latest, record, S.wordTimestampToleranceMs);
+  if (!speech || context.audioMs - speech.endMs > S.maximumResultAgeMs ||
+    normalizeText(speech.text).length < S.sequentialMinimumCharacters || normalizeText(speech.text).length > length + 2 ||
+    meaningMarkers(speech.text) !== meaningMarkers(match.text)) return null;
+  const stable = latest.isFinal || item.revisions.some(r => r.inputId !== latest.inputId &&
+    latest.receivedAt - r.receivedAt >= S.interimStableMs && preservedSpeech(r, record, S.wordTimestampToleranceMs));
+  if (!stable) return null;
+  const own = align(speech.text, [{text: match.text}], 0, 0, {local: true})[0];
+  const runner = h.textCandidates(speech).filter(c => c.index !== match.index).sort((a, b) => b.confidence - a.confidence)[0];
+  const margin = own?.confidence - (runner?.confidence || 0);
+  return own && own.matchedCharacters >= S.sequentialLiteralMatches && own.matchedCharacters / length >= S.sequentialCoverage &&
+    own.offset / length >= S.currentCoverage && margin >= S.textMargin
+    ? {speech, literal: {...own, supportMargin: margin}} : null;
+}
+
+module.exports = {corroborateLongMatch, corroborateCurrentMatch, corroborateSequentialMatch};

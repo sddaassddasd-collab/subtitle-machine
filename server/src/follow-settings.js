@@ -64,9 +64,11 @@ const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, 
   jointConfidence: .82, jointCharacters: 10, jointLiteralMatches: 8, jointCoverage: .75,
   jointProgress: .8, jointMaximumStep: 4, jointAnchorTtlMs: 30000, wordTimestampToleranceMs: 750,
   currentConfidence: .9, currentTextConfidence: .65, currentLiteralMatches: 4, currentCoverage: .8,
+  sequentialConfidence: .9, sequentialMinimumCharacters: 3, sequentialMaximumCharacters: 8,
+  sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 9, onset: 3, acoustic: 4, diagnostics: 13, semantic: 7, performance: 5, captionCorrection: 1, captionPresentation: 3}),
+  versions: Object.freeze({text: 10, onset: 3, acoustic: 4, diagnostics: 14, semantic: 8, performance: 6, captionCorrection: 1, captionPresentation: 4}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,

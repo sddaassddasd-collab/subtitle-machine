@@ -87,7 +87,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         storage: () => serializeSessionForStorage(session),
         follower: () => getPerformanceFollower(session),
         tick: (ms, now) => applyPerformanceAction(session, getPerformanceFollower(session).tick(ms, now)),
-        restartTracking: () => resetAutoFollowState(session.id),
+        restartTracking: () => resetAutoFollowState(session.id, {}, {preservePosition: true}),
         counts: () => ({ structures: structureCalls, lines: lineCalls }),
         transcript: (text, options) => handleAutoFollowTranscript(session.id, text, options),
         state: () => getPublicAutoFollowState(session),

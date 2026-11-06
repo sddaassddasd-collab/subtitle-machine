@@ -1,7 +1,7 @@
 // Script following is independent of ASR segment boundaries and display state.
 // Times are milliseconds on the provider's audio clock, never arrival wall time.
 const {normalizeText} = require('./follow-text');
-const {freshSpeech, wordWindows} = require('./word-evidence');
+const {freshSpeech, suffixSpeech, wordWindows} = require('./word-evidence');
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
@@ -861,6 +861,14 @@ function followTranscript(tracker, lines, currentIndex, event) {
       message: '已依下一格短開頭顯示字幕，等待現有配對標準核對後再準備下一格。'};
   }
   if (accepted) {
+    const span = result.spans?.find(s => s.index === result.index);
+    const fullText = script.entries[result.index].text;
+    const heard = result.completed && normalizeText(event.text).endsWith(fullText) ? fullText : span?.heard || result.candidate?.heard;
+    const speech = result.candidate?.speech || suffixSpeech(event, heard);
+    if (speech) {
+      result.candidate = {...result.candidate, speech};
+      result.evidence = {startMs: speech.startMs, endMs: speech.endMs};
+    }
     tracker.selectedStartIndex = null;
     tracker.openingPlan = prepareOpening(script, result.index, event);
   } else {

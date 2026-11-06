@@ -9336,7 +9336,8 @@ function getAutoFollowState(sessionId) {
   return state;
 }
 
-function resetAutoFollowState(sessionId, patch = {}) {
+function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} = {}) {
+  const previousState = autoFollowStates.get(sessionId);
   recordOnsetReviewEvents(sessionId, autoFollowStates.get(sessionId)?.onsetReview.close('tracker_reset') || []);
   const nextState = {
     ...createAutoFollowState(),
@@ -9344,6 +9345,21 @@ function resetAutoFollowState(sessionId, patch = {}) {
     updatedAt: Date.now(),
   };
   const session = getSessionRecord(sessionId);
+  if (session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+    nextState.cellId = session.selectedCellId;
+    const following = resolveFollowingLanguage(session);
+    nextState.followingKey = `${following.language}:${following.languageId}`;
+    nextState.performance.originIndex = session.currentIndex;
+    const lines = getFollowingLines(session);
+    const sameScript = previousState?.cellId === nextState.cellId && previousState.followingKey === nextState.followingKey &&
+      previousState.tracker.script && prepareScript(lines, previousState.tracker.script) === previousState.tracker.script;
+    if (preservePosition && sameScript) {
+      nextState.performance.lock = previousState.performance.lock;
+      nextState.performance.rates = [...previousState.performance.rates];
+      nextState.performance.usedGroups = new Set(previousState.performance.usedGroups);
+      nextState.captionDisplay.reconnect(previousState.captionDisplay, session.currentIndex, session.selectedCellId);
+    }
+  }
   if (session?.automaticLive) {
     // A provider reconnect starts a new audio clock; no old time fence survives.
     const previous = autoFollowStates.get(sessionId)?.performance;
@@ -9482,7 +9498,8 @@ function applyPerformanceAction(session, action) {
         heldEntryId: state.captionDisplay.held.entry.id, heldText: state.captionDisplay.held.entry.text,
         audioStartMs: state.captionDisplay.held.entry.startMs, audioEndMs: state.captionDisplay.held.entry.endMs,
         ...followHistoryClock(session.id)});
-    } else state.captionDisplay.clear();
+    } else if (action.source === 'live' && state.captionDisplay.held?.detached) state.captionDisplay.held = null;
+    else state.captionDisplay.clear();
     performance.returnBuffer = null;
     session.automaticLive = action.source === 'live';
     session.projectorDisplayMode = session.automaticLive ? 'transcription' : 'script';
@@ -9517,14 +9534,11 @@ function performanceTextMatch(state, lines, result, transcript, options) {
   if (state.performance.source === 'live' && result.candidate)
     return {...result.candidate, index: result.index, startMs: result.evidence.startMs, endMs: result.evidence.endMs};
   const speech = result.candidate?.speech || options;
-  const heard = result.candidate?.speech?.text || transcript;
-  const origin = state.performance.source === 'live'
-    ? state.performance.lastReliable?.index ?? state.performance.originIndex ?? result.index : result.index;
-  const candidates = localSupportCandidates(prepareScript(lines, state.tracker.script), origin, heard)
-    .sort((a, b) => b.confidence - a.confidence);
-  const candidate = candidates.find(c => c.index === result.index) || result.candidate || {};
-  const runner = candidates.find(c => c.index !== result.index);
-  return {...result.candidate, ...candidate, index: result.index, margin: candidate.confidence - (runner?.confidence || 0),
+  const candidate = result.candidate || {};
+  // The production locator already arbitrates competing cues. Rescoring the
+  // whole ASR item here penalizes a correctly located suffix with prior words.
+  const scriptVerified = !candidate.context && !candidate.locationOnly && !candidate.weakPath && !candidate.phonetic;
+  return {...candidate, index: result.index, scriptVerified, speech,
     startMs: result.evidence?.startMs ?? speech.startMs, endMs: result.evidence?.endMs ?? speech.endMs};
 }
 
@@ -9770,6 +9784,12 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       const speech = performanceAction.speech || result.candidate?.speech || {...options, text: transcript};
       applySemanticLocation(state.tracker, followingLines, performanceAction.index,
         {...speech, startMs: performanceAction.audioStartMs, endMs: performance.lastReliable.endMs});
+      const proof = performanceAction.returnEvidence;
+      if (performanceAction.matchSource === 'transcript' && !result.candidate?.phonetic &&
+        proof?.confidence >= SEMANTIC_SETTINGS.minimumConfidence && proof.evidence >= SEMANTIC_SETTINGS.currentLiteralMatches &&
+        proof.margin >= SEMANTIC_SETTINGS.textMargin)
+        state.tracker.textAnchor = {index: performanceAction.index, atMs: performance.lastReliable.endMs,
+          confidence: proof.confidence, literal: true};
       if (performanceAction.matchSource === 'transcript') autoFollowHistory.confirm(sessionId, performanceAction.index, 'transcript',
         {...followHistoryClock(sessionId), text: speech.text, audioMs: performanceAction.audioEndMs,
           audioStartMs: performanceAction.audioStartMs, itemId: speech.itemId, completed: false, reason: 'script_reacquired'});
@@ -9859,8 +9879,15 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
   const context = JSON.stringify([cellId, session.transcriptionLanguage, options.streamId]);
   const script = prepareScript(lines, tracker.script);
   tracker.script = script;
+  const preparedIndex = tracker.openingPlan?.fromIndex === displayIndex ? tracker.openingPlan.index : null;
+  const nextLength = normalizeText(lines[preparedIndex]?.text).length;
+  const shortSequential = !live && !tracker.prediction && preparedIndex === displayIndex + 1 &&
+    tracker.textAnchor?.literal && tracker.textAnchor.index === displayIndex &&
+    tracker.textAnchor.confidence >= SEMANTIC_SETTINGS.minimumConfidence &&
+    nextLength >= SEMANTIC_SETTINGS.sequentialMinimumCharacters && nextLength <= SEMANTIC_SETTINGS.sequentialMaximumCharacters;
   void semanticFollower.observe(stream, {...options, client: stream.translationClient, text: transcript,
-    currentIndex: fromIndex, displayIndex, context, scope: tracker, scriptScope: script, candidates, textResolved: !live && Number.isInteger(result.index) && !result.shortOpening}, {
+    currentIndex: fromIndex, displayIndex, context, scope: tracker, scriptScope: script, candidates, shortSequential,
+    textResolved: !live && Number.isInteger(result.index) && !result.shortOpening && !result.candidate?.locationOnly && !result.candidate?.weakPath}, {
     isCurrent: () => {
       if (getSessionRecord(sessionId) !== session) return 'session_changed';
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return 'stream_changed';
@@ -9880,11 +9907,17 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
       : localSupportCandidates(tracker.script, fromIndex, part.text)),
     corroborationContext: () => ({displayIndex: session.currentIndex, audioMs: stream.autoFollowAudioMs,
       predicted: tracker.prediction?.index === session.currentIndex, predictionSource: tracker.prediction?.source,
+      preparedIndex: tracker.openingPlan?.fromIndex === session.currentIndex ? tracker.openingPlan.index : null,
       anchor: tracker.textAnchor,
       allowed: index => !lines.slice(Math.min(session.currentIndex, index), Math.max(session.currentIndex, index) + 1)
         .some(line => line.music || line.type === 'direction')}),
     record: (status, data) => {
       const performance = getPerformanceFollower(session);
+      if (status === 'requested' && (tracker.prediction?.source === 'opening' ||
+        (shortSequential && result.candidate?.index === preparedIndex && result.candidate.confidence >= .5)))
+        performance.semanticRequested(data.inputId, Date.now());
+      if (['pending', 'current_support', 'supported', 'uncertain', 'timeout', 'stale', 'reset'].includes(status))
+        performance.semanticSettled(data.inputId);
       if (['pending', 'current_support'].includes(status)) performance.semanticAt = Date.now();
       if (status === 'pending') performance.prepared = {index: data.candidateIndex, at: Date.now()};
       if (['supported', 'reset', 'stale'].includes(status)) performance.prepared = null;
@@ -12569,7 +12602,7 @@ function startDeepgramTranscription({
   seedTranscriptionHistoryFromState(stream, sessionId);
   transcriptionStreams.set(sessionId, stream);
   if (getSessionRecord(sessionId)?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
-    resetAutoFollowState(sessionId, { status: AUTO_FOLLOW_STATUS.LISTENING });
+    resetAutoFollowState(sessionId, { status: AUTO_FOLLOW_STATUS.LISTENING }, {preservePosition: true});
     void autoFollowHistory.start(getSessionRecord(sessionId));
     autoFollowHistory.transport(sessionId, 'connecting', {streamId: stream.historyStreamId, provider: stream.provider});
     autoFollowHistory.event(sessionId, 'stream_configuration', {streamId: stream.historyStreamId,
@@ -12976,7 +13009,7 @@ function startRealtimeTranscription({
   seedTranscriptionHistoryFromState(stream, sessionId);
   transcriptionStreams.set(sessionId, stream);
   if (getSessionRecord(sessionId)?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
-    resetAutoFollowState(sessionId, { status: AUTO_FOLLOW_STATUS.LISTENING });
+    resetAutoFollowState(sessionId, { status: AUTO_FOLLOW_STATUS.LISTENING }, {preservePosition: true});
     void autoFollowHistory.start(getSessionRecord(sessionId));
     autoFollowHistory.transport(sessionId, 'connecting', {streamId: stream.historyStreamId, provider: stream.provider});
     autoFollowHistory.event(sessionId, 'stream_configuration', {streamId: stream.historyStreamId,
@@ -13644,7 +13677,7 @@ io.on('connection', (socket) => {
         resetAutoFollowState(sessionId, {
           status: AUTO_FOLLOW_STATUS.LISTENING,
           message: '正在啟動收音並定位劇本。',
-        });
+        }, {preservePosition: preserveTextOnRestart === true});
       } else if (getCaptionMode(session) !== 'live') {
         switchCaptionMode(session, 'live', language, {stopStream: false});
       }

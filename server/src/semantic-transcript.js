@@ -43,13 +43,13 @@ class SemanticTranscript {
       // shortened final cannot make that earlier audio count a second time.
       evidenceEndMs: item.endMs};
   }
-  requestReason(revision) {
+  requestReason(revision, minimumCharacters = S.minimumTextLength) {
     const item = this.items.get(revision.itemId), revisions = item.revisions;
-    if (Math.max(...revisions.map(r => normalizeText(r.text).length)) < S.minimumTextLength) return 'insufficient_text';
+    if (Math.max(...revisions.map(r => normalizeText(r.text).length)) < minimumCharacters) return 'insufficient_text';
     if (item.requests >= S.requestsPerItem) return 'item_request_limit';
     if (!revision.isFinal) {
       const earlier = revisions.find(r => revision.receivedAt - r.receivedAt >= S.interimStableMs &&
-        commonPrefix(normalizeText(r.text), normalizeText(revision.text)) >= S.minimumTextLength);
+        commonPrefix(normalizeText(r.text), normalizeText(revision.text)) >= minimumCharacters);
       if (!earlier) return 'unstable_interim';
     }
     if (item.requested && (revision.endMs <= item.requested.endMs ||

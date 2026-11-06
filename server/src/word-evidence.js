@@ -43,6 +43,19 @@ function freshSpeech(event, afterMs) {
   const words = alignedWords(event).filter(w => w.startMs >= afterMs);
   return words.length ? wordSpeech(event, words[0].id, words.at(-1).id) : null;
 }
+// A locator may accept only the suffix of a growing multi-cue ASR item.
+// Keep its actual containing words; never estimate a clock inside a word.
+function suffixSpeech(event, text) {
+  const target = normalizeText(text), words = alignedWords(event);
+  if (!target || !normalizeText(event.text).endsWith(target)) return null;
+  let tail = '';
+  for (let i = words.length - 1; i >= 0; i--) {
+    tail = normalizeText(words[i].text) + tail;
+    if (tail.endsWith(target)) return wordSpeech(event, words[i].id, words.at(-1).id);
+    if (tail.length >= target.length) break;
+  }
+  return target === normalizeText(event.text) ? event : null;
+}
 function wordWindows(event, {maximumWords = 24, windowWords = 12, minimumCharacters = 4, maximumCharacters = 60} = {}) {
   const words = alignedWords(event).slice(-maximumWords), windows = [];
   for (let end = 0; end < words.length; end++) {
@@ -59,4 +72,4 @@ function wordWindows(event, {maximumWords = 24, windowWords = 12, minimumCharact
   }
   return windows;
 }
-module.exports = {timedWords, alignedWords, wordSpeech, freshSpeech, wordWindows};
+module.exports = {timedWords, alignedWords, wordSpeech, freshSpeech, suffixSpeech, wordWindows};

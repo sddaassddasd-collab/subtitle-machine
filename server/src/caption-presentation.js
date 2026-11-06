@@ -2,13 +2,23 @@
 // on screen is located, keep its spoken wording until an actual cue change.
 const {normalizeText} = require('./follow-text');
 const {alignedWords, freshSpeech, wordSpeech} = require('./word-evidence');
-const CAPTION_PRESENTATION_SETTINGS = Object.freeze({version: 3, transitionMs: 120,
+const CAPTION_PRESENTATION_SETTINGS = Object.freeze({version: 4, transitionMs: 120,
   automaticLiveEntries: 1, waitForCueChange: true, preserveManualOverride: true,
   minimumCharacters: 4, immediateCharacters: 8, stableMs: 250, revisionToleranceMs: 200,
   continuationConfidence: .78, continuationCoverage: .75, continuationMatches: 8});
 class CaptionPresentation {
   constructor() { this.clear(); }
   clear() { this.published = null; this.held = null; this.draft = null; }
+  reconnect(previous, index, cellId) {
+    const old = previous?.held?.entry || previous?.published;
+    if (!old) return;
+    // ASR item IDs and audio clocks can both restart at zero. Retain only the
+    // visible wording, never let a new stream revise or corroborate old audio.
+    const entry = {...old, id: `reconnected:${old.id}`, startMs: null, endMs: null,
+      translations: {...old.translations}};
+    this.published = entry;
+    if (previous.holding(index, cellId)) this.held = {index, cellId, entry, detached: true};
+  }
   publish(entries, now = Date.now()) {
     const latest = entries.at(-1);
     if (latest?.text) {
@@ -33,7 +43,7 @@ class CaptionPresentation {
   }
   revise(event, continuation = {}) {
     const entry = this.held?.entry;
-    if (!entry || event.itemId !== entry.id) return false;
+    if (!entry || this.held.detached || event.itemId !== entry.id) return false;
     const c = continuation.candidate, normalized = normalizeText(event.text);
     // Earlier reacquisition may happen mid-sentence. Grow only a literally
     // located continuation of THIS cue; an ASR item can also contain the next
