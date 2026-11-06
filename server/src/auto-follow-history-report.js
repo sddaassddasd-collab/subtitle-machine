@@ -1,9 +1,10 @@
 const SOURCE_LABELS = Object.freeze({audio: '參考錄音比對', transcript: '文字辨識', onset: '起音預推', semantic: '語意恢復（待文字確認）',
   correction: '跳詞校正', silence: '靜默切換', manual: '人工操作', initial: '起始位置',
-  context: '場次／版本切換', resume: '恢復位置', system: '系統定位'});
+  context: '場次／版本切換', resume: '恢復位置', system: '系統定位',
+  paced_estimate: '交疊段節奏估計', script_return: '即時字幕接回劇本'});
 const STATUS_LABELS = Object.freeze({confirmed: '已確認', pending: '已進入、未確認',
   manual: '人工進入、未確認', initial: '起始／恢復位置，未確認', direction: '舞台指示',
-  unentered: '未進入，原因待查', skipped_auto: '自動跨過，未進入', skipped_manual: '人工跨過，未進入'});
+  estimated: '依節奏估計、未確認', unentered: '未進入，原因待查', skipped_auto: '自動跨過，未進入', skipped_manual: '人工跨過，未進入'});
 const sourceLabel = source => SOURCE_LABELS[source] || source || '';
 
 function historyReport({run, events, scope}) {
@@ -32,7 +33,7 @@ function historyReport({run, events, scope}) {
         audioMs: event.audioMs ?? null, streamId: event.streamId || null,
         decisionId: event.decisionId || null, confirmations: [], displayAcks: [],
         decisionTiming: event.decisionTiming || null,
-        status: row.type === 'direction' ? 'direction' : event.source === 'manual' ? 'manual'
+        status: row.type === 'direction' ? 'direction' : event.source === 'paced_estimate' ? 'estimated' : event.source === 'manual' ? 'manual'
           : ['initial', 'context', 'resume', 'system'].includes(event.source) ? 'initial' : 'pending'};
       row.visits.push(visit); visits.set(event.visitId, visit);
       if (visit.decisionId) decisions.set(visit.decisionId, visit);
@@ -59,7 +60,7 @@ function historyReport({run, events, scope}) {
     else if (row.type !== 'direction' && row.skips.length)
       row.status = row.skips.every(skip => skip.source === 'manual') ? 'skipped_manual' : 'skipped_auto';
     row.entryCount = row.visits.length;
-    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'correction', 'silence', 'semantic'].includes(visit.source)).length;
+    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'correction', 'silence', 'semantic', 'paced_estimate', 'script_return'].includes(visit.source)).length;
     row.confirmedCount = row.visits.filter(visit => visit.confirmations.length).length;
   }
   let seenAudio = false, hasGaps = false, stoppedNormally = false;

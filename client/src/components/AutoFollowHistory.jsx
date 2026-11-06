@@ -1,12 +1,14 @@
 import {useEffect, useState} from 'react'
 
 const sources = {audio: '參考錄音', transcript: '文字辨識', onset: '起音預推', correction: '跳詞校正', semantic: '語意恢復（待確認）',
-  silence: '靜默切換', manual: '人工操作', initial: '起始位置', context: '場次／版本切換', resume: '恢復位置', system: '系統定位'}
+  silence: '靜默切換', manual: '人工操作', initial: '起始位置', context: '場次／版本切換', resume: '恢復位置', system: '系統定位',
+  paced_estimate: '交疊段節奏估計', script_return: '即時字幕接回劇本'}
 const statuses = {confirmed: '已確認', pending: '已進入、未確認', manual: '人工進入、未確認',
-  initial: '起始／恢復位置', direction: '舞台指示', unentered: '未進入，待查',
+  initial: '起始／恢復位置', direction: '舞台指示', estimated: '依節奏估計、未確認', unentered: '未進入，待查',
   skipped_auto: '自動跨過，未進入', skipped_manual: '人工跨過，未進入'}
 const eventNames = {run_start: '開始紀錄', run_end: '結束紀錄', interruption: '紀錄中斷', logging_gap: '紀錄不完整',
   cue_enter: '進入字幕格', cue_confirm: '字幕確認', display_ack: '顯示回報', diagnostic: '定位診斷',
+  performance_follow: '演出輔助決策', performance_operator: '演出輔助人工操作', performance_settings: '演出輔助設定',
   cue_heard: '文字涵蓋字幕', audio_reset: '重設聲音累積', audio_position: '更新聲音搜尋位置',
   decision_trace: '決策前後紀錄', transcript_revision: '辨識修訂', acoustic_summary: '聲音比對摘要',
   capture_summary: '收音品質摘要', stream_configuration: '辨識與程式設定', problem_mark: '問題標記',

@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import ProjectorLanguageSettings from '../components/ProjectorLanguageSettings'
 import RecordingsPanel from '../components/RecordingsPanel'
 import ScriptRecognitionSettings from '../components/ScriptRecognitionSettings'
+import PerformanceFollowPanel from '../components/PerformanceFollowPanel'
 import WorkspaceDialog from '../components/WorkspaceDialog'
 import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
 import { io } from 'socket.io-client'
@@ -2897,7 +2898,9 @@ const ControlPage = () => {
     setCaptionSwitching(true)
     try {
       setEditingModeEnabled(false); setEditingCell(null)
-      if (sessionMeta?.captionMode !== 'live') {
+      if (sessionMeta?.automaticLive) {
+        await handleStartLiveTranscription({autoFollow: true, forceRestart: true, preserveTextOnRestart: true})
+      } else if (sessionMeta?.captionMode !== 'live') {
         const state = await changeCaptionMode('live', liveLanguage || sessionMeta?.discussionLanguage || transcription.language || 'zh-TW')
         releaseMicrophoneCapture()
         await handleStartLiveTranscription({forceRestart: true, languageOverride: state.transcriptionLanguage})
@@ -2913,6 +2916,14 @@ const ControlPage = () => {
     if (!await pendingLineSaveRef.current) return
     setCaptionSwitching(true)
     try {
+      if (sessionMeta?.automaticLive) {
+        const response = await new Promise((resolve, reject) => socketRef.current.timeout(5000).emit('performance:action', {
+          sessionId, action: 'lock-script',
+        }, (error, result) => error ? reject(new Error('切換逾時，請確認連線')) : resolve(result)))
+        if (!response?.ok) throw new Error(response?.reason || '無法返回劇本')
+        setStatus({kind: 'success', message: '已鎖定劇本輸出，收音與背景定位持續運作'})
+        return
+      }
       const state = await changeCaptionMode('script')
       releaseMicrophoneCapture()
       autoStartedTranscriptionRef.current = false; projectorStartedTranscriptionRef.current = false
@@ -5947,8 +5958,13 @@ const ControlPage = () => {
 
 
 
+        {sessionMeta && (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || activePanel === 'follow') &&
+          <PerformanceFollowPanel key={`${sessionId}:${sessionMeta.selectedCellId}`} session={sessionMeta} lines={lines} socketRef={socketRef}
+            runtime={autoFollow.performance} currentIndex={liveCurrentIndex}
+            onManual={() => handleSetSubtitleControlMode(SUBTITLE_CONTROL_MODES.MANUAL)}
+            active={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && transcription.active}/>}
         {isLiveOutput && !editingModeEnabled && <div className="workspace-live-captions" aria-live="polite">
-          <div className="workspace-live-heading"><h2>座談內容</h2><span>劇本位置保留在 CUE {(sessionMeta?.resumeCue ?? liveCurrentIndex) + 1}</span></div>
+          <div className="workspace-live-heading"><h2>{sessionMeta?.automaticLive ? '演出即時字幕' : '座談內容'}</h2><span>劇本位置保留在 CUE {(sessionMeta?.resumeCue ?? liveCurrentIndex) + 1}</span></div>
           {(transcription.liveEntries?.length ? transcription.liveEntries : transcription.text?.trim()
             ? transcription.text.split('\n').filter(Boolean).map((text, index) => ({id: index, text, isFinal: transcription.isFinal})) : [])
             .map((entry, index) => <article key={entry.id || index} className={`workspace-live-caption ${entry.isFinal ? 'final' : 'partial'}`}>

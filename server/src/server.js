@@ -24,6 +24,8 @@ const { registerAutoFollowHistoryRoutes } = require('./auto-follow-history-route
 const { SOURCE_LANGUAGES, normalizePerformanceLanguage, supportedLanguage, resolveFollowingLanguage,
   getFollowingLines, describeFollowingScript, isRecordingCompatible } = require('./performance-language');
 const {getCaptionMode, enterLiveCaptions, resumeScriptCaptions} = require('./caption-mode');
+const {PerformanceFollower, PERFORMANCE_SETTINGS, normalizePerformanceSettings, resolveGroups} = require('./performance-follow');
+const {freshSpeech} = require('./word-evidence');
 const { reviewScriptSegmentation, mergeConsecutiveDirections } = require('./script-segmentation-review');
 const { alignFullScript, normalizeAlignmentReviews, hash: alignmentHash,
   alignmentError } = require('./full-script-alignment');
@@ -4017,8 +4019,9 @@ function ensureSessionStructure(session) {
   session.subtitleControlMode = normalizeSubtitleControlMode(
     session.subtitleControlMode,
   );
-  session.captionMode = getCaptionMode(session);
-  if (session.captionMode === 'live') {
+  session.performanceFollowing = normalizePerformanceSettings(session.performanceFollowing);
+  if (!session.automaticLive) session.captionMode = getCaptionMode(session);
+  if (session.captionMode === 'live' && !session.automaticLive) {
     session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
     session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.TRANSCRIPTION;
     session.activeRecordingId = null;
@@ -4144,7 +4147,7 @@ function serializeSessionForStorage(session) {
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
     projectorSecondaryLanguageId: normalized.projectorSecondaryLanguageId,
     projectorLayout: normalized.projectorLayout,
-    projectorDisplayMode: normalized.projectorDisplayMode,
+    projectorDisplayMode: normalized.automaticLive ? 'script' : normalized.projectorDisplayMode,
     projectorLanguageMode: normalized.projectorLanguageMode,
     projectorRevision: normalized.projectorRevision,
     projectorStatus: normalized.projectorStatus,
@@ -4154,6 +4157,7 @@ function serializeSessionForStorage(session) {
     captionMode: normalized.captionMode,
     discussionLanguage: normalized.discussionLanguage,
     scriptResume: normalized.scriptResume,
+    performanceFollowing: normalized.performanceFollowing,
     recordings: normalized.recordings,
     activeRecordingId: normalized.activeRecordingId,
     languages: normalized.languages.map((language) => ({
@@ -5716,6 +5720,23 @@ function buildTranscriptionDisplayEntries(stream) {
   return mergedEntries;
 }
 
+function getOutputTranscriptionEntries(session, stream) {
+  if (!session.automaticLive) return buildTranscriptionDisplayEntries(stream);
+  return (getAutoFollowState(session.id).performance.buffer || []).map(entry => {
+    const fragment = stream?.fragmentByItemId?.get(entry.itemId);
+    const fullText = fragment?.text === entry.text || stream?.draftByItemId?.get(entry.itemId) === entry.text;
+    return {id: entry.id, text: entry.text, isFinal: entry.isFinal, speakerId: fragment?.speakerId ?? null,
+      // A translation of a whole ASR item must not accompany a trimmed suffix.
+      translations: fullText ? {...fragment?.provisionalTranslations, ...fragment?.translations,
+        ...stream?.draftTranslationsByItemId?.get(entry.itemId)?.translations} : {}};
+  });
+}
+
+function getOutputTranscriptionText(session, stream) {
+  return session.automaticLive ? getOutputTranscriptionEntries(session, stream).map(e => e.text).join('\n')
+    : sanitizeTranscriptionMultilineText(ensureTranscriptionState(session).text);
+}
+
 function getTranscriptionDisplayParts(stream) {
   const entries = buildTranscriptionDisplayEntries(stream);
   if (entries.length === 0) {
@@ -7230,11 +7251,11 @@ function getPublicTranscriptionState(session) {
   const stream = transcriptionStreams.get(session.id);
   return {
     active: Boolean(state.active),
-    liveEntries: getCaptionMode(session) === 'live' && stream ? buildTranscriptionDisplayEntries(stream)
+    liveEntries: getCaptionMode(session) === 'live' && stream ? getOutputTranscriptionEntries(session, stream)
       .map(entry => ({id: entry.id, text: entry.text, speakerId: entry.speakerId, isFinal: entry.isFinal !== false})) : [],
     followingScript: describeFollowingScript(session),
     status: state.status || 'idle',
-    text: typeof state.text === 'string' ? state.text : '',
+    text: session.automaticLive ? getOutputTranscriptionText(session, stream) : typeof state.text === 'string' ? state.text : '',
     isFinal: state.isFinal !== false,
     language:
       typeof state.language === 'string' && state.language.trim().length > 0
@@ -7300,6 +7321,12 @@ function applyTranscriptionError(sessionId, message) {
 }
 
 function stopTranscriptionStream(sessionId, options = {}) {
+  const performance = autoFollowStates.get(sessionId)?.performance;
+  if (performance) {
+    if (performance.group) autoFollowHistory.event(sessionId, 'performance_follow', {action: 'overlap_stop', reason: 'capture_stopped', ...followHistoryClock(sessionId)});
+    performance.group = null; performance.prepared = null; performance.mismatch = null;
+    performance.reason = 'capture_stopped';
+  }
   autoFollowHistory.transport(sessionId, options.errorMessage ? 'error' : 'paused', {
     ...followHistoryClock(sessionId), reason: options.reason || 'transcription_stopped', message: options.errorMessage || '',
   });
@@ -7866,7 +7893,7 @@ function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
     const session = getSessionRecord(stream.sessionId);
     stream.scriptVocabularyActive = session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
     if (session)
-      refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? getFollowingLines(session) : [], session.currentIndex,
+      refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && !session.automaticLive ? getFollowingLines(session) : [], session.currentIndex,
         (status, data) => autoFollowHistory.event(session.id, 'keyterms_update', {status, ...data, ...followHistoryClock(session.id)}));
     sendDeepgramAudioChunk(stream, audio, durationMs, level);
     return;
@@ -7991,6 +8018,8 @@ function getSessionSummary(session) {
     selectedCellId: normalized.selectedCellId,
     subtitleControlMode: normalized.subtitleControlMode,
     captionMode: getCaptionMode(normalized),
+    automaticLive: normalized.automaticLive === true,
+    performanceFollowing: normalized.performanceFollowing,
     discussionLanguage: normalized.discussionLanguage || normalized.transcriptionLanguage,
     resumeCue: normalized.scriptResume?.index ?? null,
     transcriptionLanguage: normalized.transcriptionLanguage,
@@ -8108,11 +8137,11 @@ function getSessionDisplayState(session) {
   }
 
   const transcription = ensureTranscriptionState(normalized);
-  const liveText = sanitizeTranscriptionMultilineText(transcription.text);
+  const liveText = getOutputTranscriptionText(normalized, transcriptionStreams.get(normalized.id));
   const hasLiveText = (transcription.active || getCaptionMode(normalized) === 'live') && liveText.length > 0;
   const activeStream = transcriptionStreams.get(normalized.id);
   const liveEntries = hasLiveText
-    ? buildTranscriptionDisplayEntries(activeStream)
+    ? getOutputTranscriptionEntries(normalized, activeStream)
         .map((entry) => ({
           id: typeof entry?.id === 'string' ? entry.id : '',
           text: sanitizeTranscriptionText(entry?.text || ''),
@@ -8739,9 +8768,9 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
   if (!session || transcriptionStreams.get(sessionId) !== stream) return null;
 
   const state = ensureTranscriptionState(session);
-  const liveText = sanitizeTranscriptionMultilineText(state.text);
+  const liveText = getOutputTranscriptionText(session, stream);
   const liveEntries = liveText
-    ? buildTranscriptionDisplayEntries(stream)
+    ? getOutputTranscriptionEntries(session, stream)
         .map((entry) => ({
           id: typeof entry?.id === 'string' ? entry.id : '',
           text: sanitizeTranscriptionText(entry?.text || ''),
@@ -8827,7 +8856,7 @@ function getLiveTranslationPatchPayload(sessionId, stream, languageCode) {
   const session = getSessionRecord(sessionId);
   if (!session || transcriptionStreams.get(sessionId) !== stream) return null;
 
-  const liveEntries = buildTranscriptionDisplayEntries(stream)
+  const liveEntries = getOutputTranscriptionEntries(session, stream)
     .map((entry) => ({
       id: typeof entry?.id === 'string' ? entry.id : '',
       text: sanitizeTranscriptionText(entry?.text || ''),
@@ -8946,6 +8975,10 @@ function broadcastViewerState(sessionId) {
 
 function applyCurrentIndexChange(session, nextIndex, options = {}) {
   if (!session) return false;
+  if (options.manualOverride && session.automaticLive) {
+    const performance = getPerformanceFollower(session);
+    applyPerformanceAction(session, performance.command('lock-script', nextIndex, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0));
+  }
   if (getCaptionMode(session) === 'live') return false;
   const manualOverride = options.manualOverride === true;
   if (
@@ -8953,6 +8986,12 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
     session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.MANUAL
   ) {
     resetAutoFollowPosition(session, '已手動定位，繼續自動跟戲。');
+  }
+  if (manualOverride && session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+    const performance = getPerformanceFollower(session);
+    performance.command('lock-script', nextIndex, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0);
+    autoFollowHistory.event(session.id, 'performance_follow', {action: 'manual_position', reason: 'operator_script_lock', index: nextIndex,
+      ...followHistoryClock(session.id)});
   }
 
   if (
@@ -8985,6 +9024,8 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
       firstWordId: decision.firstWordId, lastWordId: decision.lastWordId,
       supportingFirstWordId: decision.supportingFirstWordId, supportingLastWordId: decision.supportingLastWordId,
       wordWitnesses: decision.wordWitnesses,
+      estimated: decision.estimated === true, reason: decision.reason, groupId: decision.groupId,
+      speed: decision.speed, nextAudioMs: decision.nextAudioMs, expiresAudioMs: decision.expiresAudioMs,
     } : null,
   });
   const continuous = !manualOverride && nextIndex === session.currentIndex + 1 &&
@@ -9043,6 +9084,7 @@ function createAutoFollowState() {
     message: '',
     updatedAt: null,
     referenceAudio: null,
+    performance: new PerformanceFollower(),
   };
 }
 
@@ -9098,6 +9140,8 @@ function getAutoFollowState(sessionId) {
   if ((state.cellId !== undefined && state.cellId !== cellId) ||
     (state.followingKey !== undefined && state.followingKey !== followingKey)) {
     referenceRuntime.invalidate(key);
+    session.automaticLive = false;
+    if (session.captionMode === 'script') session.projectorDisplayMode = 'script';
     autoFollowHistory.sync(session);
     Object.assign(state, createAutoFollowState(), {
       tracker: createTracker({ ignoreBeforeMs: transcriptionStreams.get(key)?.autoFollowAudioMs ?? -1 }),
@@ -9117,6 +9161,16 @@ function resetAutoFollowState(sessionId, patch = {}) {
     updatedAt: Date.now(),
   };
   const session = getSessionRecord(sessionId);
+  if (session?.automaticLive) {
+    // A provider reconnect starts a new audio clock; no old time fence survives.
+    const previous = autoFollowStates.get(sessionId)?.performance;
+    nextState.performance.source = 'live';
+    nextState.performance.lock = previous?.lock || 'auto';
+    nextState.performance.originIndex = previous?.lastReliable?.index ?? previous?.originIndex ?? session.currentIndex;
+    nextState.performance.backgroundIndex = nextState.performance.originIndex;
+    nextState.performance.reason = 'provider_reconnecting';
+    nextState.performance.switchedAt = Date.now();
+  }
   if (session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
     nextState.tracker.script = prepareScript(getFollowingLines(session), autoFollowStates.get(sessionId)?.tracker.script);
   }
@@ -9126,6 +9180,7 @@ function resetAutoFollowState(sessionId, patch = {}) {
 
 function getPublicAutoFollowState(session) {
   const state = getAutoFollowState(session.id);
+  getPerformanceFollower(session);
   const autoEnabled =
     session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
   return {
@@ -9152,6 +9207,7 @@ function getPublicAutoFollowState(session) {
       ? null : state.tracker.prediction?.index ?? null,
     lastDecision: state.lastDecision,
     history: autoFollowHistory.status(session.id),
+    performance: state.performance.publicState(),
     referenceAudio: autoEnabled ? state.referenceAudio : null,
     lastTranscriptReceivedAt: state.lastTranscriptReceivedAt,
     lastTranscriptAudioLagMs: state.lastTranscriptAudioLagMs,
@@ -9192,6 +9248,8 @@ function maybeBroadcastAutoFollowDiagnostics(sessionId, now = Date.now()) {
 }
 
 function resetAutoFollowPosition(session, message = '') {
+  session.automaticLive = false;
+  if (session.captionMode === 'script') session.projectorDisplayMode = 'script';
   const stream = transcriptionStreams.get(session.id);
   if (stream) semanticFollower.reset(stream, 'position_reset');
   resetAutoFollowState(session.id, {
@@ -9210,7 +9268,80 @@ function syncPerformanceFollowing(session) {
   resetAutoFollowPosition(session, describeFollowingScript(session).message || '演出語言與劇本欄已更新，正在重新定位。');
 }
 
+function getPerformanceFollower(session) {
+  const state = getAutoFollowState(session.id), lines = getFollowingLines(session);
+  const settings = normalizePerformanceSettings(session.performanceFollowing);
+  if (state.performance.lines && (state.performance.lines !== lines || state.performance.cellId !== session.selectedCellId)) {
+    state.performance = new PerformanceFollower();
+    session.automaticLive = false;
+    if (session.captionMode === 'script') session.projectorDisplayMode = 'script';
+  }
+  state.performance.bind(settings, session.selectedCellId, lines);
+  const recording = session.recordings?.find(r => r.id === session.activeRecordingId && r.status === 'ready' && isRecordingCompatible(session, r));
+  state.performance.segments = recording?.segments;
+  return state.performance;
+}
+
+function applyPerformanceAction(session, action) {
+  if (!action) return;
+  const state = getAutoFollowState(session.id), performance = state.performance;
+  autoFollowHistory.event(session.id, 'performance_follow', {...action, action: action.type, ...followHistoryClock(session.id),
+    fromIndex: session.currentIndex, at: Date.now(), state: performance.publicState()});
+  if (action.type === 'source') {
+    session.automaticLive = action.source === 'live';
+    session.projectorDisplayMode = session.automaticLive ? 'transcription' : 'script';
+    session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
+    // Clear pre-armed onset guesses while keeping independent text evidence.
+    state.tracker.prediction = null; state.tracker.armedIndex = null; state.tracker.preparedIndex = null;
+    if (Number.isInteger(action.index)) {
+      performance.prepared = null;
+      recordAutoFollowDecision(session.id, action.index, 'script_return', {reason: action.reason, supportSource: action.matchSource,
+        transcriptAudioEndMs: performance.lastReliable?.endMs});
+      applyCurrentIndexChange(session, action.index);
+    }
+    broadcastControlState(session.id); broadcastViewerState(session.id); broadcastTranscriptionState(session.id);
+  } else if (action.type === 'paced_estimate') {
+    recordAutoFollowDecision(session.id, action.index, 'paced_estimate', {...action, estimated: true,
+      audioEndMs: transcriptionStreams.get(session.id)?.autoFollowAudioMs});
+    updateAutoFollowState(session.id, {message: '交疊段依節奏估計換格，持續等待台詞重新定位。', confidence: null});
+    state.tracker.prediction = null; state.tracker.armedIndex = null; state.tracker.preparedIndex = null;
+    applyCurrentIndexChange(session, action.index);
+  } else {
+    state.tracker.prediction = null; state.tracker.armedIndex = null; state.tracker.preparedIndex = null;
+    broadcastAutoFollowState(session.id);
+  }
+}
+
+function performanceTextMatch(state, lines, result, transcript, options) {
+  if (!Number.isInteger(result.index)) return null;
+  const speech = result.candidate?.speech || options;
+  const heard = result.candidate?.speech?.text || transcript;
+  const origin = state.performance.source === 'live'
+    ? state.performance.lastReliable?.index ?? state.performance.originIndex ?? result.index : result.index;
+  const candidates = localSupportCandidates(prepareScript(lines, state.tracker.script), origin, heard)
+    .sort((a, b) => b.confidence - a.confidence);
+  const candidate = candidates.find(c => c.index === result.index) || result.candidate || {};
+  const runner = candidates.find(c => c.index !== result.index);
+  return {...result.candidate, ...candidate, index: result.index, margin: candidate.confidence - (runner?.confidence || 0),
+    startMs: result.evidence?.startMs ?? speech.startMs, endMs: result.evidence?.endMs ?? speech.endMs};
+}
+
+function locateLiveScript(state, lines, transcript, options) {
+  const performance = state.performance;
+  const speech = freshSpeech({...options, text: transcript}, performance.lastConfirmedEnd);
+  if (!speech) return {status: 'searching', reason: 'no_fresh_script_evidence'};
+  const origin = performance.lastReliable?.index ?? performance.originIndex ?? 0;
+  const candidates = localSupportCandidates(prepareScript(lines, state.tracker.script), origin, speech.text)
+    .sort((a, b) => b.confidence - a.confidence);
+  const best = candidates[0], margin = best ? best.confidence - (candidates[1]?.confidence || 0) : 0;
+  const accepted = best && best.evidence >= 4 && best.confidence >= .8 && margin >= .07;
+  return {status: 'searching', reason: accepted ? 'background_script_candidate' : 'background_script_uncertain',
+    ...(accepted ? {index: best.index} : {}), candidate: best ? {...best, speech} : null,
+    evidence: {startMs: speech.startMs, endMs: speech.endMs}, completed: false};
+}
+
 function switchCaptionMode(session, mode, language, {stopStream = true} = {}) {
+  session.automaticLive = false;
   if (stopStream) stopTranscriptionStream(session.id, {keepText: false, reason: 'caption source changed'});
   referenceRuntime.invalidate(session.id);
   if (mode === 'live') enterLiveCaptions(session, language);
@@ -9315,6 +9446,13 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const state = getAutoFollowState(sessionId);
   const now = Date.now();
+  const performance = getPerformanceFollower(session);
+  applyPerformanceAction(session, performance.tick(endMs, now, level));
+  if (session.automaticLive || performance.group) {
+    updateAutoFollowState(sessionId, {listening: true, lastAudioLevel: level, lastAudioAt: now});
+    maybeBroadcastAutoFollowDiagnostics(sessionId, now);
+    return;
+  }
   const followingLines = getFollowingLines(session);
   const result = followAudio(state.tracker, followingLines, session.currentIndex, {
     level, durationMs, endMs,
@@ -9357,6 +9495,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const stream = transcriptionStreams.get(sessionId);
   const followingLines = getFollowingLines(session);
   const state = getAutoFollowState(sessionId);
+  const performance = getPerformanceFollower(session);
   const before = trackerSnapshot(state.tracker, session.currentIndex);
   const receivedAt = Number.isFinite(options.receivedAt) ? options.receivedAt : Date.now();
   options = {...options, receivedAt, revisionId: crypto.randomUUID()};
@@ -9375,8 +9514,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   });
   let result;
   try {
-    result = followTranscript(state.tracker, followingLines,
-      session.currentIndex, { ...options, text: transcript });
+    result = session.automaticLive ? locateLiveScript(state, followingLines, transcript, options)
+      : followTranscript(state.tracker, followingLines, session.currentIndex, { ...options, text: transcript });
   } catch (error) {
     autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before,
       after: trackerSnapshot(state.tracker, session.currentIndex), reason: 'alignment_error', error: String(error?.message || '').slice(0, 300)});
@@ -9395,7 +9534,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
     normalizedText: normalizeText(transcript).slice(-120), before, after: trackerSnapshot(state.tracker, session.currentIndex),
     reason: result.reason || result.status || 'ignored_result', ignored: result.ignored === true,
-    accepted: Number.isInteger(result.index), targetIndex: result.index ?? null,
+    accepted: !session.automaticLive && Number.isInteger(result.index), targetIndex: result.index ?? null,
+    backgroundOnly: session.automaticLive === true,
     candidate: result.candidate ? {index: result.candidate.index, confidence: result.candidate.confidence,
       offset: result.candidate.offset, length: result.candidate.length, evidence: result.candidate.evidence,
       contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true,
@@ -9407,6 +9547,34 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       pathSteps: result.candidate.pathSteps || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
+    return;
+  }
+  const wasLive = session.automaticLive === true;
+  const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs},
+    performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
+  applyPerformanceAction(session, performanceAction);
+  if (wasLive || session.automaticLive) {
+    if (wasLive && !session.automaticLive && Number.isInteger(performanceAction?.index)) {
+      applySemanticLocation(state.tracker, followingLines, performanceAction.index,
+        {...options, text: transcript, endMs: performance.lastReliable.endMs});
+      if (performanceAction.matchSource === 'transcript') autoFollowHistory.confirm(sessionId, performanceAction.index, 'transcript',
+        {...followHistoryClock(sessionId), text: transcript, audioMs: performanceAction.audioEndMs,
+          audioStartMs: performanceAction.audioStartMs, itemId: options.itemId, completed: false, reason: 'script_reacquired'});
+    }
+    updateAutoFollowState(sessionId, {listening: true, lastHeardText: sanitizeLineText(transcript),
+      lastCandidateIndex: result.candidate?.index ?? null, lastCandidateText: followingLines[result.candidate?.index]?.text || '',
+      message: session.automaticLive ? '即時字幕輸出中，背景持續尋找可接回的劇本台詞。' : '已確認台詞，接回目前劇本位置。'});
+    broadcastAutoFollowState(sessionId);
+    if (session.automaticLive) {
+      broadcastLiveTranscriptionState(sessionId, stream);
+      handleSemanticFollow(session, stream, followingLines, state, transcript, options, result, receivedAt);
+    }
+    return;
+  }
+  // Estimates never run backwards to replay an already displayed overlap cue.
+  if (performance.group && Number.isInteger(result.index) && result.index < session.currentIndex) {
+    autoFollowHistory.event(sessionId, 'performance_follow', {action: 'held', reason: 'overlap_earlier_cue',
+      index: result.index, ...followHistoryClock(sessionId)});
     return;
   }
   const now = Date.now();
@@ -9480,9 +9648,21 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
       return true;
     },
     textCandidates: speech => localSupportCandidates(tracker.script, fromIndex, speech.text),
-    record: (status, data) => autoFollowHistory.event(sessionId, 'semantic_candidate', {status, ...data, ...followHistoryClock(sessionId)}),
+    record: (status, data) => {
+      const performance = getPerformanceFollower(session);
+      if (['pending', 'current_support'].includes(status)) performance.semanticAt = Date.now();
+      if (status === 'pending') performance.prepared = {index: data.candidateIndex, at: Date.now()};
+      if (['supported', 'reset', 'stale'].includes(status)) performance.prepared = null;
+      autoFollowHistory.event(sessionId, 'semantic_candidate', {status, ...data, ...followHistoryClock(sessionId)});
+      if (['pending', 'supported', 'reset'].includes(status)) broadcastAutoFollowState(sessionId);
+    },
     accept: (candidate, speech) => {
       if (!applySemanticLocation(tracker, lines, candidate.index, speech)) return;
+      const performance = getPerformanceFollower(session), wasLive = session.automaticLive;
+      const action = performance.recognize({...candidate, semantic: true, ...speech},
+        {...speech, semanticSupported: true, audioMs: stream.autoFollowAudioMs}, Date.now());
+      applyPerformanceAction(session, action);
+      if (wasLive) { broadcastAutoFollowState(sessionId); return; }
       recordAutoFollowDecision(sessionId, candidate.index, 'semantic', {transcriptReceivedAt: receivedAt,
         transcriptAudioEndMs: speech.endMs, semanticSupported: true, supportSource: speech.supportSource,
         proposalInputId: speech.proposalInputId, supportingInputId: speech.inputId,
@@ -13189,10 +13369,10 @@ io.on('connection', (socket) => {
 
       if (autoFollow === true) {
         void autoFollowHistory.start(session);
-        if (getCaptionMode(session) === 'live') switchCaptionMode(session, 'script', null, {stopStream: false});
+        if (getCaptionMode(session) === 'live' && !session.automaticLive) switchCaptionMode(session, 'script', null, {stopStream: false});
         session.captionMode = 'script';
         session.subtitleControlMode = SUBTITLE_CONTROL_MODES.AUTO;
-        session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.SCRIPT;
+        session.projectorDisplayMode = session.automaticLive ? PROJECTOR_DISPLAY_MODES.TRANSCRIPTION : PROJECTOR_DISPLAY_MODES.SCRIPT;
         resetAutoFollowState(sessionId, {
           status: AUTO_FOLLOW_STATUS.LISTENING,
           message: '正在啟動收音並定位劇本。',
@@ -13419,11 +13599,60 @@ io.on('connection', (socket) => {
     const stream = transcriptionStreams.get(sessionId);
     if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理，請先停止該端收音'});
     if (mode === 'live' && language && !supportedLanguage(language)) return reply({ok: false, reason: '不支援此辨識語言'});
-    if (getCaptionMode(session) !== mode || (mode === 'live' && language &&
+    if (session.automaticLive || getCaptionMode(session) !== mode || (mode === 'live' && language &&
       normalizePerformanceLanguage(language) !== session.transcriptionLanguage)) switchCaptionMode(session, mode, language);
     else if (mode === 'live' && language) session.discussionLanguage = normalizeTranscriptionSourceLanguage(language);
     persistSession(session); broadcastControlState(sessionId); broadcastViewerState(sessionId); broadcastTranscriptionState(sessionId);
     reply({ok: true, session: getSessionSummary(session)});
+  });
+
+  socket.on('performance:set-settings', ({sessionId, settings} = {}, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return reply({ok: false, reason: '找不到節目'});
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理'});
+    if (!settings || typeof settings !== 'object' || !Array.isArray(settings.overlapGroups) ||
+      settings.overlapGroups.length > PERFORMANCE_SETTINGS.maximumGroups)
+      return reply({ok: false, reason: '交疊段設定格式不正確'});
+    const value = normalizePerformanceSettings(settings);
+    const ids = new Set();
+    for (const group of value.overlapGroups) {
+      if (ids.has(group.id)) return reply({ok: false, reason: '交疊段編號重複'});
+      ids.add(group.id);
+      const cell = session.cells.find(c => c.id === group.cellId);
+      if (!cell) return reply({ok: false, reason: '交疊段的場次不存在'});
+      const lines = cell.id === session.selectedCellId ? getFollowingLines(session) : cell.lines;
+      if (!resolveGroups(value, cell.id, lines || []).find(g => g.id === group.id)?.valid)
+        return reply({ok: false, reason: '交疊段需為 2～12 格連續台詞，不能包含音樂或舞台指示、與其他段重疊，並需保留下一格作為出口台詞'});
+    }
+    if (value.overlapGroups.length !== settings.overlapGroups.length)
+      return reply({ok: false, reason: '交疊段設定有缺漏'});
+    session.performanceFollowing = value;
+    const performance = getPerformanceFollower(session);
+    performance.group = null; performance.mismatch = null;
+    if (!value.automaticLive && session.automaticLive)
+      applyPerformanceAction(session, performance.command('lock-script', session.currentIndex, stream?.autoFollowAudioMs || 0));
+    autoFollowHistory.event(sessionId, 'performance_settings', {settings: value, rules: PERFORMANCE_SETTINGS, ...followHistoryClock(sessionId)});
+    persistSession(session); broadcastControlState(sessionId); broadcastAutoFollowState(sessionId);
+    reply({ok: true, settings: value});
+  });
+
+  socket.on('performance:action', ({sessionId, action} = {}, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const session = getOwnedSocketSession(sessionId), stream = transcriptionStreams.get(sessionId);
+    if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO ||
+      (action !== 'lock-script' && (!stream?.ready || stream.closing)))
+      return reply({ok: false, reason: '請先啟用自動跟戲並開始收音'});
+    if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理'});
+    if (!['lock-live', 'lock-script', 'auto', 'start-overlap', 'cancel-overlap', 'pause', 'resume', 'faster', 'slower'].includes(action))
+      return reply({ok: false, reason: '不支援的操作'});
+    const performance = getPerformanceFollower(session);
+    try { applyPerformanceAction(session, performance.command(action, session.currentIndex, stream?.autoFollowAudioMs || 0)); }
+    catch (error) { return reply({ok: false, reason: error.message}); }
+    autoFollowHistory.event(sessionId, 'performance_operator', {action, ...followHistoryClock(sessionId), state: performance.publicState()});
+    broadcastAutoFollowState(sessionId);
+    reply({ok: true});
   });
 
   socket.on('transcription:set-language', ({ sessionId, language }) => {
@@ -13602,7 +13831,9 @@ io.on('connection', (socket) => {
     const sourceChanged = getCaptionMode(session) === 'live';
     const stream = transcriptionStreams.get(sessionId);
     if (sourceChanged && stream && stream.socketId !== socket.id) return;
-    if (sourceChanged) switchCaptionMode(session, 'script');
+    if (sourceChanged && session.automaticLive) {
+      applyPerformanceAction(session, getPerformanceFollower(session).command('lock-script', session.currentIndex, stream?.autoFollowAudioMs || 0));
+    } else if (sourceChanged) switchCaptionMode(session, 'script');
     if (session.subtitleControlMode === nextMode && !sourceChanged) return;
 
     session.subtitleControlMode = nextMode;

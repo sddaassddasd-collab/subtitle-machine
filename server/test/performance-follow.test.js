@@ -1,0 +1,171 @@
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const {PerformanceFollower, normalizePerformanceSettings, resolveGroups} = require('../src/performance-follow');
+const texts = ['現在開始我們的演出', '這一段多人一起說話', '大家都有不同的意見', '最後終於安靜下來了', '這就是本段出口台詞', '接著我們繼續說下去'];
+function fixture({group = false, automaticLive = true} = {}) {
+  const p = new PerformanceFollower(), lines = texts.map((text, i) => ({id: `l${i}`, text}));
+  const settings = normalizePerformanceSettings({automaticLive, overlapGroups: group ? [
+    {id: 'g', cellId: 'c', startLineId: 'l1', endLineId: 'l3', minimumSeconds: 1.8, maximumSeconds: 15}] : []});
+  p.bind(settings, 'c', lines); return {p, lines, settings};
+}
+const event = (id, startMs, endMs, text = '這是即興發言完全不在劇本之內') =>
+  ({itemId: id, startMs, endMs, audioMs: endMs, text, isFinal: true});
+const match = (index, extra = {}) => ({index, confidence: 1, evidence: 9, margin: .5, ...extra});
+const establish = p => p.observe(event('anchor', 0, 1000, texts[0]), match(0), 1000);
+function enterLive(p) {
+  establish(p);
+  p.observe(event('x', 1100, 3000), null, 3000);
+  return p.observe(event('y', 4000, 8000), null, 8000);
+}
+
+test('sustained distinct unmatched speech enters live; revisions and silence do not', () => {
+  const {p} = fixture(); establish(p);
+  for (let i = 0; i < 20; i++) assert.equal(p.observe(event('x', 1100, 3000), null, 3000 + i * 1000), null);
+  assert.equal(p.source, 'script');
+  const action = p.observe(event('y', 4000, 25000), null, 25000);
+  assert.equal(action.source, 'live'); assert.equal(p.buffer.length, 1, 'no old transcript backlog');
+});
+test('fallback is opt-in and requires a previously reliable script position', () => {
+  for (const automaticLive of [false, true]) {
+    const {p} = fixture({automaticLive});
+    if (!automaticLive) establish(p);
+    p.observe(event('a', 1000, 3000), null, 3000);
+    assert.equal(p.observe(event('b', 4000, 9000), null, 9000), null);
+    assert.equal(p.source, 'script');
+  }
+});
+test('low confidence, stale audio, invalid timing and overlapping ASR hypotheses are not improvisation evidence', () => {
+  for (const invalid of [e => ({...e, confidence: .2}), e => ({...e, audioMs: e.endMs + 9000}),
+    e => ({...e, endMs: NaN}), e => ({...e, endMs: e.audioMs + 1000})]) {
+    const {p} = fixture(); establish(p);
+    p.observe(invalid(event('a', 1100, 3000)), null, 3000);
+    assert.equal(p.observe(invalid(event('b', 4000, 9000)), null, 9000), null);
+  }
+  const {p} = fixture(); establish(p);
+  p.observe(event('a', 1100, 7000), null, 7000);
+  assert.equal(p.observe(event('b', 4000, 13000), null, 13000), null);
+});
+test('a short paraphrase candidate gets grace time, without displaying that candidate', () => {
+  const {p} = fixture(); establish(p);
+  p.observe(event('a', 1100, 3000), null, 3000); p.semanticAt = 7900;
+  assert.equal(p.observe(event('b', 4000, 8000), null, 8000), null);
+  assert.equal(p.source, 'script');
+  p.observe(event('c', 8100, 12000, texts[1]), match(1), 12000);
+  assert.equal(p.source, 'script'); assert.equal(p.mismatch, null);
+});
+test('reacquisition returns to freshly recognized cue, never the saved cue, and clears live buffer', () => {
+  const {p} = fixture(); assert.equal(enterLive(p).source, 'live');
+  assert.equal(p.observe({...event('return', 8500, 10000, texts[3]), isFinal: false}, match(3), 10000), null);
+  const action = p.observe(event('return', 8500, 10000, texts[3]), match(3), 12500);
+  assert.equal(action.source, 'script'); assert.equal(action.index, 3);
+  assert.equal(p.lastReliable.index, 3); assert.equal(p.buffer.length, 0);
+});
+test('weak or generic single match, repeated ASR revision, music and directions cannot return', () => {
+  const {p, lines} = fixture(); enterLive(p);
+  for (let i = 0; i < 5; i++) assert.equal(p.observe(event('a', 8500, 10000), match(1, {confidence: .82, evidence: 4}), 13000 + i * 1000), null);
+  assert.equal(p.source, 'live');
+  lines[2].music = true;
+  assert.equal(p.observe(event('b', 11000, 12000), match(3), 20000), null);
+  assert.equal(p.source, 'live');
+});
+test('two time-disjoint local matches can return without waiting for two full sentences', () => {
+  const {p} = fixture(); enterLive(p);
+  assert.equal(p.observe(event('a', 8500, 10000), match(2, {confidence: .83, evidence: 4}), 13000), null);
+  assert.equal(p.observe(event('b', 11000, 12000), match(3, {confidence: .83, evidence: 4}), 14000).index, 3);
+});
+test('live and script locks override source automation; manual live can still reacquire after unlock', () => {
+  const {p} = fixture(); p.command('lock-live', 0, 0, 0);
+  assert.equal(p.observe(event('a', 1000, 2000), match(3), 6000), null);
+  p.command('auto', 0, 2000, 6000);
+  assert.equal(p.observe(event('b', 2100, 3000), match(3), 7000).index, 3);
+  p.command('lock-script', 3, 3000, 7000);
+  p.observe(event('x', 3100, 7000), null, 8000);
+  assert.equal(p.observe(event('y', 7100, 15000), null, 17000), null);
+});
+test('only actual fresh suffix words survive a script-to-live boundary', () => {
+  const {p} = fixture(); establish(p);
+  const e = event('mixed', 0, 3000, texts[0] + '即興內容');
+  e.words = [{word: texts[0], start: 0, end: 1}, {word: '即興內容', start: 1.1, end: 3}];
+  p.observe(e, null, 3000);
+  assert.equal(p.buffer[0].text, '即興內容');
+  p.observe({...e, words: undefined}, null, 3100);
+  assert.equal(p.buffer.length, 0, 'no fabricated split when provider word times are absent');
+});
+test('overlap starts only at a configured recognized entry and respects reading time and its last cue', () => {
+  const {p} = fixture({group: true});
+  assert.equal(p.observe(event('entry', 0, 1000), match(1), 1000).type, 'overlap_start');
+  assert.equal(p.tick(1500, 1500), null);
+  const next = p.group.nextAudioMs;
+  p.lastPacketAt = next - 100; p.lastPacketAudioMs = next - 100;
+  assert.equal(p.tick(next, next).index, 2);
+  assert.equal(p.tick(next, next), null, 'never catch up by flashing multiple cues');
+  p.lastPacketAt = p.group.nextAudioMs - 100; p.lastPacketAudioMs = p.group.nextAudioMs - 100;
+  assert.equal(p.tick(p.group.nextAudioMs, p.group.nextAudioMs).index, 3);
+  p.lastPacketAt = p.group.nextAudioMs - 100; p.lastPacketAudioMs = p.group.nextAudioMs - 100;
+  assert.equal(p.tick(p.group.nextAudioMs, p.group.nextAudioMs), null);
+  assert.equal(p.group.index, 3);
+});
+test('overlap pause, speed adjustment, capture gaps and hard time limit cancel predictable progression', () => {
+  const {p} = fixture({group: true});
+  p.command('start-overlap', 1, 0, 0);
+  p.command('pause', 1, 0, 0); assert.equal(p.tick(5000, 5000), null);
+  p.command('resume', 1, 5000, 5000); const old = p.group.nextAudioMs;
+  p.command('faster', 1, 5000, 5000); assert.ok(p.group.nextAudioMs < old);
+  p.lastPacketAt = 5000;
+  assert.equal(p.tick(5100, 7000).reason, 'capture_gap'); assert.equal(p.group, null);
+  p.command('start-overlap', 1, 0, 0);
+  assert.equal(p.tick(16000, 16000).reason, 'overlap_limit');
+  assert.equal(p.group, null);
+});
+test('exit speech ends overlap; revisions of the entry cannot restart consumed group', () => {
+  const {p} = fixture({group: true});
+  p.observe(event('entry', 0, 1000), match(1), 1000);
+  assert.equal(p.observe(event('exit', 10000, 11000), match(4), 11000).reason, 'overlap_exit_recognized');
+  assert.equal(p.observe(event('late-entry', 12000, 13000), match(1), 13000), null);
+  assert.equal(p.group, null);
+});
+test('invalidated, overlapping, cross-scene and boundary-containing overlap ranges are inert', () => {
+  const {settings, lines} = fixture({group: true});
+  assert.equal(resolveGroups(settings, 'other', lines).length, 0);
+  assert.equal(resolveGroups(settings, 'c', lines.filter(l => l.id !== 'l1'))[0].valid, false);
+  assert.equal(resolveGroups(settings, 'c', lines.map((l, i) => i === 2 ? {...l, type: 'direction'} : l))[0].valid, false);
+  const duplicated = normalizePerformanceSettings({...settings, overlapGroups: [...settings.overlapGroups, {...settings.overlapGroups[0], id: 'other'}]});
+  assert.ok(resolveGroups(duplicated, 'c', lines).every(g => !g.valid));
+});
+
+test('audio ticks allow already established mismatch evidence to mature, but silence alone is never evidence', () => {
+  const {p} = fixture(); establish(p);
+  assert.equal(p.tick(5000, 5000), null);
+  p.observe(event('x', 5100, 7000), null, 7000);
+  p.observe(event('y', 7100, 10000), null, 10000);
+  assert.equal(p.source, 'script');
+  assert.equal(p.tick(12000, 12000).source, 'live');
+  const {p: stale} = fixture(); establish(stale);
+  stale.observe(event('x', 1100, 3000), null, 3000);
+  stale.observe(event('y', 3100, 6000), null, 6000);
+  assert.equal(stale.tick(16000, 16000), null);
+});
+
+test('silence inside overlap pauses estimates and a recognized line or operator can resume', () => {
+  const {p} = fixture({group: true}); p.command('start-overlap', 1, 0, 0);
+  let action;
+  for (let ms = 20; ms <= 2000; ms += 20) action = p.tick(ms, ms, .0001) || action;
+  assert.equal(action.reason, 'overlap_quiet'); assert.equal(p.group.paused, true);
+  assert.equal(p.group.index, 1);
+  p.observe(event('clear', 2100, 3000), match(2), 3000);
+  assert.equal(p.group.paused, false); assert.equal(p.group.index, 2);
+});
+
+test('audio packet bursts cannot shorten the audience reading interval', () => {
+  const {p} = fixture({group: true}); p.command('start-overlap', 1, 0, 0);
+  for (let ms = 20; ms <= 10000; ms += 20) p.tick(ms, 100, .05);
+  assert.equal(p.group.index, 1, 'audio time alone never flashes several cues');
+});
+
+test('distinctive final script evidence returns immediately; the hold prevents the next automatic fallback', () => {
+  const {p} = fixture(); enterLive(p);
+  const action = p.observe(event('return', 8100, 9000, texts[3]), match(3), 9000);
+  assert.equal(action.source, 'script'); assert.equal(action.index, 3);
+  p.observe(event('x', 9100, 11000), null, 11000);
+  assert.equal(p.observe(event('y', 11100, 12000), null, 12000), null);
+});

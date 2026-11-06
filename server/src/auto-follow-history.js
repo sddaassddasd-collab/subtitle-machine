@@ -15,6 +15,7 @@ function historyContext(session) {
   const following = resolveFollowingLanguage(session);
   const context = {
     environment: {server: build, settings: FOLLOW_SETTINGS},
+    performanceFollowing: session.performanceFollowing || null,
     cellId: session.selectedCellId, cellName: session.cells?.find(cell => cell.id === session.selectedCellId)?.name || '',
     language: following.language, languageId: following.languageId,
     recording: recording ? {id: recording.id, name: recording.name, revision: recording.revision,

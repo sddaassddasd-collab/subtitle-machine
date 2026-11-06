@@ -1,11 +1,13 @@
 const {normalizePerformanceLanguage, isRecordingCompatible} = require('./performance-language');
 
 function getCaptionMode(session) {
+  if (session.automaticLive === true) return 'live';
   if (session.captionMode === 'live' || session.captionMode === 'script') return session.captionMode;
   return session.projectorDisplayMode === 'transcription' && session.subtitleControlMode !== 'auto' ? 'live' : 'script';
 }
 
 function enterLiveCaptions(session, language) {
+  session.automaticLive = false;
   if (getCaptionMode(session) !== 'live' || !session.scriptResume) {
     session.scriptResume = {cellId: session.selectedCellId, lineId: session.lines[session.currentIndex]?.id,
       index: session.currentIndex, controlMode: session.subtitleControlMode,
@@ -20,6 +22,7 @@ function enterLiveCaptions(session, language) {
 }
 
 function resumeScriptCaptions(session) {
+  session.automaticLive = false;
   session.captionMode = 'script';
   const saved = session.scriptResume && typeof session.scriptResume === 'object' ? session.scriptResume : null;
   if (saved) {

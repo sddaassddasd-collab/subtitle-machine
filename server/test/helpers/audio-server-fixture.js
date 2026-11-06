@@ -69,14 +69,24 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           on: (event, handler) => handlers.set(event, handler), emit() {},
         };
         io.listeners('connection')[0](socket);
-        return (payload) => {
+        const send = (payload) => {
           let result;
           handlers.get('transcription:audio')(payload, value => { result = value; });
           return result;
         };
+        send.event = (name, payload) => {
+          let result; handlers.get(name)({sessionId: session.id, ...payload}, value => {result = value}); return result;
+        };
+        return send;
       }
+      const send = connect();
       return {
-        server, session, stream, user, sent, connect, send: connect(), cueChanges, history: autoFollowHistory,
+        server, session, stream, user, sent, connect, send, event: send.event, cueChanges, history: autoFollowHistory,
+        allowSettings: () => { persistSession = () => {}; },
+        storage: () => serializeSessionForStorage(session),
+        follower: () => getPerformanceFollower(session),
+        tick: (ms, now) => applyPerformanceAction(session, getPerformanceFollower(session).tick(ms, now)),
+        restartTracking: () => resetAutoFollowState(session.id),
         counts: () => ({ structures: structureCalls, lines: lineCalls }),
         transcript: (text, options) => handleAutoFollowTranscript(session.id, text, options),
         state: () => getPublicAutoFollowState(session),
@@ -90,6 +100,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           stream.translationClient = {chat: {completions: {create: request}}};
         },
         dispose() {
+          referenceRuntime.dispose();
           for (const timer of currentIndexPersistTimers.values()) clearTimeout(timer);
           for (const timer of latestRoomStateKeyframes.values()) clearTimeout(timer);
         },

@@ -1,0 +1,9 @@
+.performance-follow-panel { padding: .8rem 1rem; margin: .6rem 0; border: 1px solid #475569; border-radius: .6rem; background: #111c30; color: #e2e8f0; }
+.performance-follow-status { display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin-bottom: .5rem; }
+.performance-follow-panel summary { cursor: pointer; padding: .5rem 0; color: #f8fafc; }
+.performance-follow-panel .input-note { color: #cbd5e1; }
+.performance-follow-panel li { margin: .5rem 0; }
+.performance-follow-panel li button { margin-left: .6rem; }
+.performance-range-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .7rem; }
+.performance-range-inputs label { display: flex; flex-direction: column; gap: .3rem; }
+.performance-range-inputs input { width: 100%; min-width: 0; box-sizing: border-box; }

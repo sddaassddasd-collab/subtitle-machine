@@ -2,10 +2,12 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { createTracker, prepareScript, normalizeText, followTranscript, followAudio } = require('../src/auto-follow');
+const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates } = require('../src/auto-follow');
+const {freshSpeech} = require('../src/word-evidence');
 const {trackerSnapshot} = require('../src/follow-trace');
 const {ACOUSTIC_SETTINGS} = require('../src/follow-settings');
 const {SemanticFollower} = require('../src/semantic-follow');
+const performanceFollow = require('../src/performance-follow');
 const performanceLanguage = require('../src/performance-language');
 const captionMode = require('../src/caption-mode');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
@@ -25,8 +27,8 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, trackerSnapshot, ACOUSTIC_SETTINGS,
-    ...performanceLanguage, ...captionMode, console: { error() {} },
+    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS,
+    ...performanceLanguage, ...captionMode, ...performanceFollow, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
     AUTO_FOLLOW_DIAGNOSTIC_BROADCAST_MS: 250, DEFAULT_SESSION_ID: 'test',
