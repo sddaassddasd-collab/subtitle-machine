@@ -3,9 +3,10 @@ const {SemanticTranscript, freshSpeech} = require('./semantic-transcript');
 const {compactInput, selectMatches, requestSemanticCandidate} = require('./semantic-candidates');
 const {normalizeText} = require('./follow-text');
 const {alignedWords} = require('./word-evidence');
+const {corroborateLongMatch} = require('./semantic-corroboration');
 
-// Model proposals require independent forward support. Text and phonetic
-// evidence can support a proposal without waiting for another model call.
+// Short/uncertain proposals require independent forward support. A bounded,
+// stable long literal range may also corroborate semantics on the same audio.
 class SemanticFollower {
   constructor({request, now = Date.now, timeoutMs = S.timeoutMs, cooldownMs = S.cooldownMs} = {}) {
     this.request = request; this.now = now; this.timeoutMs = timeoutMs; this.cooldownMs = cooldownMs;
@@ -43,13 +44,31 @@ class SemanticFollower {
     state.handlers.record('skipped', {reason, inputId: revision.inputId, itemId: revision.itemId,
       currentIndex: state.currentIndex, pendingIndex: state.pending?.index ?? null});
   }
+  corroborate(state, match, data) {
+    if (this.invalidReason(state.handlers)) return false;
+    const proof = corroborateLongMatch(state, match);
+    if (!proof) return false;
+    const {speech, literal} = proof;
+    state.handlers.record('supported', {...data, reason: 'stable_long_text_semantic',
+      supportSource: 'joint_text_semantic', independentAudio: false, candidateIndex: match.index,
+      textConfidence: literal.confidence, margin: literal.supportMargin, evidence: literal.evidence,
+      matchedCharacters: literal.matchedCharacters, firstWordId: speech.firstWordId,
+      lastWordId: speech.lastWordId, audioStartMs: speech.startMs, audioEndMs: speech.endMs});
+    state.pending = null; state.resolved = true;
+    state.handlers.accept(match, {...speech, supportSource: 'joint_text_semantic',
+      independentAudio: false, proposalInputId: data.inputId});
+    state.controller?.abort();
+    return true;
+  }
   supportMappedWords(state, matches, data) {
     if (matches.length < 2 || !state.handlers.textCandidates) return false;
     const target = matches.at(-1), preceding = matches.at(-2), h = state.handlers;
     if (!target.speech || !preceding.speech || this.invalidReason(h)) return false;
-    const [best, runner] = h.textCandidates(preceding.speech).sort((a, b) => b.confidence - a.confidence);
-    if (best?.index !== preceding.index || best.confidence < S.textConfidence || best.evidence < S.textEvidence ||
-      best.matchedCharacters < S.literalMatches || (best.supportMargin ?? best.confidence - (runner?.confidence ?? 0)) < S.textMargin) return false;
+    const candidates = h.textCandidates(preceding.speech).sort((a, b) => b.confidence - a.confidence);
+    const best = candidates.find(c => c.index === preceding.index && c.confidence >= S.textConfidence &&
+      c.evidence >= S.textEvidence && c.matchedCharacters >= S.literalMatches &&
+      (c.supportMargin ?? c.confidence - (candidates.find(other => other.index !== c.index)?.confidence ?? 0)) >= S.textMargin);
+    if (!best) return false;
     h.record('supported', {...data, reason: 'word_span_text', supportSource: 'text',
       textConfidence: best.confidence, supportingIndex: preceding.index,
       firstWordId: target.speech.firstWordId, lastWordId: target.speech.lastWordId,
@@ -93,21 +112,31 @@ class SemanticFollower {
     }
     const candidates = h.textCandidates(speech).sort((a, b) => b.confidence - a.confidence ||
       (b.speech?.endMs || 0) - (a.speech?.endMs || 0));
-    const best = candidates[0], runner = candidates[1];
-    const support = best?.speech || speech;
-    const margin = best ? best.supportMargin ?? best.confidence - (runner?.confidence ?? 0) : 0;
     const fromIndex = p.weak?.index ?? p.index;
-    const matches = best?.matchedCharacters ?? 0;
-    const strong = best && best.confidence >= (best.phonetic ? S.phoneticConfidence : S.textConfidence) &&
-      best.evidence >= S.textEvidence && matches >= S.literalMatches;
-    const weak = best && !best.phonetic && best.confidence >= S.weakConfidence &&
-      best.evidence >= S.weakEvidence && matches >= S.weakLiteralMatches;
-    const maximumStep = strong && best.confidence >= S.skipConfidence && matches >= S.skipLiteralMatches
-      ? S.strongMaximumStep : S.maximumStep;
-    const near = best && best.index >= fromIndex && best.index <= fromIndex + maximumStep &&
-      (strong || best.index > fromIndex);
-    const reason = !best ? 'no_text_candidate' : margin < S.textMargin ? 'ambiguous_text_support'
-      : !near ? 'text_outside_proposed_path' : !(strong || weak) ? 'insufficient_text_support' : null;
+    const evaluate = (best, runner) => {
+      const margin = best ? best.supportMargin ?? best.confidence - (runner?.confidence ?? 0) : 0;
+      const matches = best?.matchedCharacters ?? 0;
+      const strong = best && best.confidence >= (best.phonetic ? S.phoneticConfidence : S.textConfidence) &&
+        best.evidence >= S.textEvidence && matches >= S.literalMatches;
+      const weak = best && !best.phonetic && best.confidence >= S.weakConfidence &&
+        best.evidence >= S.weakEvidence && matches >= S.weakLiteralMatches;
+      const maximumStep = strong && best.confidence >= S.skipConfidence && matches >= S.skipLiteralMatches
+        ? S.strongMaximumStep : S.maximumStep;
+      const near = best && best.index >= fromIndex && best.index <= fromIndex + maximumStep &&
+        (strong || best.index > fromIndex);
+      const reason = !best ? 'no_text_candidate' : margin < S.textMargin ? 'ambiguous_text_support'
+        : !near ? 'text_outside_proposed_path' : !(strong || weak) ? 'insufficient_text_support' : null;
+      return {best, margin, matches, strong, maximumStep, reason};
+    };
+    const evaluated = candidates.map(best => evaluate(best, candidates.find(other => other.index !== best.index)));
+    // A perfect one-character/ambiguous subwindow cannot hide a usable longer
+    // observation. Each window keeps its own competing-cue margin.
+    const qualified = evaluated.filter(c => !c.reason).sort((a, b) => Number(b.strong) - Number(a.strong))[0];
+    const conflict = qualified && evaluated.find(c => c.reason === 'text_outside_proposed_path' && c.strong &&
+      c.margin >= S.textMargin && c.best.confidence >= qualified.best.confidence &&
+      (c.best.speech?.endMs ?? speech.endMs) >= (qualified.best.speech?.endMs ?? speech.endMs));
+    const {best, margin, matches, strong, maximumStep, reason} = conflict || qualified || evaluated[0] || evaluate(null);
+    const support = best?.speech || speech;
     const data = {inputId: revision.inputId, proposalInputId: p.inputId, candidateIndex: best?.index ?? null,
       confidence: best?.confidence ?? null, margin, matchedCharacters: matches, evidence: best?.evidence ?? 0,
       textConfidence: best?.confidence ?? null, semanticMatchConfidence: p.matchConfidence,
@@ -159,6 +188,8 @@ class SemanticFollower {
     if (!revision) return;
     if (state.pending && (now - state.pending.at > S.supportTtlMs || revision.endMs - state.pending.endMs > S.supportTtlMs))
       this.clearPending(state, 'support_expired');
+    if (state.pending?.match && this.corroborate(state, state.pending.match,
+      {...state.pending.data, supportingInputId: revision.inputId})) return;
     if (this.supportText(state, revision)) return;
     const reason = this.invalidReason(handlers) || state.memory.requestReason(revision) ||
       ((budget.itemRequests.get(revision.itemId) || 0) >= S.requestsPerItem ? 'item_request_limit' : null) ||
@@ -206,6 +237,7 @@ class SemanticFollower {
       if (selected.reason) {
         handlers.record('uncertain', {...proposalData, reason: selected.reason, pendingIndex: state.pending?.index ?? null}); return;
       }
+      if (this.corroborate(state, match, proposalData)) return;
       if (match.index <= observation.currentIndex) {
         handlers.record(match.index === observation.currentIndex ? 'current_support' : 'uncertain',
           {...proposalData, reason: match.index === observation.currentIndex ? 'semantic_supports_current' : 'previous_cue'});
@@ -229,6 +261,7 @@ class SemanticFollower {
       } else {
         if (prior && match.index !== prior.index) this.clearPending(state, 'proposal_replaced');
         state.pending ||= {index: match.index, itemId: revision.itemId,
+          match, data: proposalData,
           endMs: match.speech?.endMs ?? input.evidenceEndMs, hasSpan: Boolean(match.speech), tier: match.tier,
           matchConfidence: match.matchConfidence,
           prefixText: match.speech ? normalizeText(revision.text).slice(0, normalizeText(revision.text).length -

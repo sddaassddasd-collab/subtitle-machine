@@ -216,3 +216,77 @@ test('weak text cannot use the larger strong-evidence skip allowance', async () 
   assert.equal(h.accepted.length, 0);
   assert.ok(h.records.some(e => e.reason === 'text_outside_proposed_path'));
 });
+
+test('a perfect but ambiguous tiny window cannot hide a usable longer independent word range', async () => {
+  const h = harness(); await h.observe(event('a', '演員改寫的第一句話'));
+  h.candidates([match(1, 1, {evidence: 1, matchedCharacters: 1, supportMargin: 0}),
+    match(2, .9, {evidence: 8, matchedCharacters: 7, supportMargin: .3})]);
+  await h.observe(event('b', '後續實際說出的完整台詞', 1000, 2000));
+  assert.deepEqual(h.accepted.map(c => c.index), [2]);
+  assert.ok(h.records.some(r => r.reason === 'independent_text'));
+});
+
+test('a stronger later contradictory span cannot be bypassed by choosing an older near-path window', async () => {
+  const h = harness(); await h.observe(event('a', '演員改寫的第一句話'));
+  h.candidates([match(0, 1, {supportMargin: .4, speech: event('b', '不同位置的清楚台詞', 1800, 2000)}),
+    match(2, .9, {supportMargin: .3, speech: event('b', '較早的附近台詞', 1000, 1500)})]);
+  await h.observe(event('b', '後續實際說出的完整台詞', 1000, 2000));
+  assert.equal(h.accepted.length, 0);
+  assert.ok(h.records.some(r => r.reason === 'contradictory_text'));
+});
+
+function jointHarness({heard = '你們又沒有找到問題的核心了', target = '你們又沒找到問題核心了', score = .9,
+  duplicate = false, anchorAt = 1000, allowed = true, request} = {}) {
+  const h = harness(request || (async () => ({ambiguous: false,
+    matches: [{index: 4, matchConfidence: score, firstWordId: 0, lastWordId: 0}]})));
+  const texts = ['你又來了這樣根本沒有用', '你的方法才沒有用', '兩位先冷靜', duplicate ? target : '我說過', target];
+  const lines = texts.map(text => ({text})), script = prepareScript(lines);
+  h.handlers.textCandidates = speech => textSupportCandidates(speech, part => localSupportCandidates(script, 0, part.text));
+  h.handlers.corroborationContext = () => ({displayIndex: 0, audioMs: 4500, predicted: false,
+    anchor: {index: 0, atMs: anchorAt, literal: true, confidence: 1}, allowed: () => allowed});
+  const observe = extra => h.follower.observe(h.stream, {...proposal(event('joint', heard, 2000, 4000,
+    {words: [{word: heard, start: 2, end: 4}], ...extra})), candidates: texts.map((text, index) => ({index, text}))}, h.handlers);
+  return {...h, observe};
+}
+
+test('a nearby stable long paraphrase uses literal and semantic corroboration without claiming independent audio or completion', async () => {
+  const h = jointHarness(); await h.observe();
+  assert.deepEqual(h.accepted.map(c => c.index), [4]);
+  assert.equal(h.accepted[0].speech.independentAudio, false);
+  assert.equal(h.accepted[0].speech.supportSource, 'joint_text_semantic');
+  assert.ok(h.records.some(r => r.reason === 'stable_long_text_semantic' && r.matchedCharacters >= 8));
+});
+
+test('same-audio corroboration rejects repeated lines, stale anchors, boundaries, low model scores and changed subjects or negation', async () => {
+  for (const options of [{duplicate: true}, {anchorAt: -40000}, {allowed: false}, {score: .8},
+    {target: '我們又沒找到問題核心了'}, {target: '你們已經找到問題核心了'}]) {
+    const h = jointHarness(options); await h.observe();
+    assert.equal(h.accepted.length, 0, JSON.stringify(options));
+  }
+});
+
+test('growing interims preserve a real long word range but a model response alone cannot establish ASR stability', async () => {
+  const h = jointHarness();
+  await h.observe({isFinal: false}); assert.equal(h.accepted.length, 0);
+  h.clock(1000);
+  await h.observe({isFinal: false, text: '你們又沒有找到問題的核心了呢', endMs: 4500,
+    words: [{word: '你們又沒有找到問題的核心了', start: 2, end: 4}, {word: '呢', start: 4.1, end: 4.5}]});
+  assert.deepEqual(h.accepted.map(c => c.index), [4]);
+  assert.equal(h.accepted[0].speech.text, '你們又沒有找到問題的核心了');
+  assert.equal(h.accepted[0].speech.endMs, 4000);
+});
+
+test('a withdrawn mapped phrase cannot use a late semantic response for same-audio corroboration', async () => {
+  let resolve;
+  const h = jointHarness({request: () => new Promise(done => {resolve = done})});
+  await h.observe({isFinal: false});
+  h.clock(1000);
+  const running = h.observe({isFinal: false, text: '你們又沒有找到問題的核心了呢', endMs: 4500,
+    words: [{word: '你們又沒有找到問題的核心了', start: 2, end: 4}, {word: '呢', start: 4.1, end: 4.5}]});
+  await h.observe({text: '你們已經找到正確問題的核心了呢', endMs: 4500,
+    words: [{word: '你們已經找到正確問題的核心了呢', start: 2, end: 4.5}]});
+  resolve({ambiguous: false, matches: [{index: 4, matchConfidence: .95, firstWordId: 0, lastWordId: 0}]});
+  await running;
+  assert.equal(h.accepted.length, 0);
+  assert.ok(!h.records.some(r => r.reason === 'stable_long_text_semantic'));
+});

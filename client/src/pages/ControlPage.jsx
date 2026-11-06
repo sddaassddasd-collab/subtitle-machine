@@ -6385,7 +6385,7 @@ const ControlPage = () => {
             hint={autoFollow.history?.error || (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
               ? transcription.error || (
                 Number.isInteger(autoFollow.predictedIndex)
-                  ? `已預推第 ${autoFollow.predictedIndex + 1} 格，等待核對`
+                  ? `已預推第 ${autoFollow.predictedIndex + 1} 格，${autoFollow.predictionReview?.index === autoFollow.predictedIndex && autoFollow.predictionReview.status === 'overdue' ? '尚未核對成功，維持目前位置' : '等待核對'}`
                   : Number.isInteger(autoFollow.preparedIndex)
                     ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
                     : autoFollow.message
@@ -6428,7 +6428,7 @@ const ControlPage = () => {
                   </p>}
                   {Number.isInteger(autoFollow.sequenceIndex) && <p>順序跟隨：保留第 {autoFollow.sequenceIndex + 1} 格位置，持續核對後續台詞。</p>}
                   <p>全文校正：{autoFollow.correctionStatus === 'verified' ? '已核對位置' : autoFollow.correctionStatus === 'pending' ? '候選位置待確認' : '等待明確文字'}{autoFollow.correctionCandidates?.length > 0 && `（${autoFollow.correctionCandidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}）`}</p>
-                  {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，等待核對</p>}
+                  {Number.isInteger(autoFollow.predictedIndex) && <p>已預推第 {autoFollow.predictedIndex + 1} 格，{autoFollow.predictionReview?.index === autoFollow.predictedIndex && autoFollow.predictionReview.status === 'overdue' ? '超過 5 秒仍未確認；保留位置，等待可靠文字定位，不再連續預推。' : '等待核對'}</p>}
                   {autoFollow.located && Number.isInteger(autoFollow.progressIndex) && <p>第 {autoFollow.progressIndex + 1} 格進度約 {Math.round(autoFollow.progress * 100)}%</p>}
                   {Number.isInteger(autoFollow.preparedIndex) && <p>準備第 {autoFollow.preparedIndex + 1} 格：{autoFollow.openingHint}</p>}
                   {autoFollow.status === 'searching' && autoFollow.candidates?.length > 1 && <p>核對位置：{autoFollow.candidates.map(candidate => `第 ${candidate.index + 1} 格`).join('、')}</p>}

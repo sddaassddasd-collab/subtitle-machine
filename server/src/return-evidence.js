@@ -37,7 +37,7 @@ function returnMatch(records, event, match, now, settings) {
   if (match) {
     const speech = match.speech || {...event, startMs: match.startMs ?? event.startMs, endMs: match.endMs ?? event.endMs};
     current = [...records.values()].find(r => r.index === match.index && r.itemId === event.itemId &&
-      Math.abs(r.startMs - speech.startMs) <= settings.wordTimestampToleranceMs && normalizeText(speech.text).startsWith(r.text));
+      Math.abs(r.startMs - speech.startMs) <= settings.wordTimestampToleranceMs && normalizeText(speech.text) === r.text);
     const at = current?.at ?? now;
     const unchanged = current?.text === normalizeText(speech.text);
     const anchorStartMs = unchanged ? current.anchorStartMs : speech.startMs;
@@ -46,7 +46,7 @@ function returnMatch(records, event, match, now, settings) {
     current = {itemId: event.itemId, index: match.index, text: normalizeText(speech.text), rawText: speech.text,
       startMs: speech.startMs, endMs: speech.endMs, at, seenAt: now, match: {...match, stableAt: at}};
     current.anchorStartMs = anchorStartMs; current.anchorEndMs = anchorEndMs;
-    records.set(JSON.stringify([event.itemId, match.index, speech.startMs]), current);
+    records.set(JSON.stringify([event.itemId, match.index, speech.startMs, current.text]), current);
   }
   while (records.size > settings.maximumStableMatches) records.delete(records.keys().next().value);
   const settled = [...records.values()].filter(r => r.itemId === event.itemId && preservedSpeech(event, r) &&
@@ -58,6 +58,25 @@ function returnMatch(records, event, match, now, settings) {
   // phrase. A changed/withdrawn prefix was already removed above.
   if (best && (!current || !event.isFinal)) return {...best.match, speech: preservedSpeech(event, best),
     startMs: best.startMs, endMs: best.endMs, retained: best !== current};
+  // A preserved prefix is stability, not a second observation or a completed
+  // sentence. Only the independent ordered-path gate may use it for return.
+  const prefix = !event.isFinal && current && alignedWords(event).length && [...records.values()].filter(r =>
+    r.index === current.index && r.itemId === event.itemId && preservedSpeech(event, r) &&
+    now - r.at >= settings.stableMs && event.audioMs - r.endMs <= settings.maximumLagMs &&
+    !r.match.phonetic && r.match.confidence >= settings.weakReturnConfidence &&
+    r.match.evidence >= 4 && r.match.matchedCharacters >= settings.weakReturnMatches && r.match.margin >= .1)
+    .sort((a, b) => b.endMs - a.endMs)[0];
+  if (prefix) {
+    const strong = m => m.confidence >= settings.returnConfidence && m.evidence >= settings.returnCharacters &&
+      m.margin >= settings.returnMargin;
+    // A complete strong candidate may keep its earlier stable prefix's clock.
+    // Do not replace that completed range with the shorter opening itself.
+    if (strong(current.match) && strong(prefix.match) && current.match.length === prefix.match.length &&
+      current.match.offset >= current.match.length - 1)
+      return {...current.match, stableAt: prefix.at};
+    return {...prefix.match, speech: preservedSpeech(event, prefix), startMs: prefix.startMs,
+      endMs: prefix.endMs, retained: prefix !== current, stablePrefix: true};
+  }
   return current?.match || match;
 }
 

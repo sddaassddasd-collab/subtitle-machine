@@ -179,6 +179,18 @@ test('short distinctive interim speech can settle without waiting for an ASR fin
   assert.equal(p.observe(e, m, 11000).index, 3);
 });
 
+test('a strong completed sentence keeps its preserved opening stability instead of being replaced by that opening', () => {
+  const {p} = fixture(); enterLive(p);
+  const e = {...event('strong', 8500, 10000, '但我的內心'), isFinal: false,
+    words: [{word: '但我的內心', start: 8.5, end: 10}]};
+  p.observe(e, match(3, {evidence: 5, matchedCharacters: 5, offset: 5, length: 11, speech: e}), 10000);
+  const grown = {...e, text: '但我的內心是相當快樂的', endMs: 11000, audioMs: 11000,
+    words: [...e.words, {word: '是相當快樂的', start: 10, end: 11}]};
+  const action = p.observe(grown, match(3, {evidence: 11, matchedCharacters: 11, offset: 11, length: 11, speech: grown}), 11000);
+  assert.equal(action.index, 3); assert.equal(action.speech.text, grown.text);
+  assert.equal(action.audioEndMs, 11000);
+});
+
 test('a later interim and its final cannot overwrite a separate preceding cue witness', () => {
   const {p} = fixture(); enterLive(p);
   const weak = i => match(i, {confidence: .82, evidence: 5});
@@ -265,4 +277,43 @@ test('successive small timestamp shifts cannot make old words count as a newly s
   assert.equal(p.observe({...e, endMs: 11200, audioMs: 11200,
     words: [{word: '你們的論點', start: 9.7, end: 11.2}]}, m, 11200), null);
   assert.equal(p.source, 'live');
+});
+
+test('an independently supported path returns on a preserved prefix while the current sentence keeps growing', () => {
+  const {p} = fixture(); enterLive(p);
+  const weak = i => match(i, {confidence: .74, evidence: 5, matchedCharacters: 4, margin: .2});
+  p.observe(event('a', 8500, 10000), weak(1), 10000);
+  p.observe(event('b', 11000, 12000), weak(2), 12000);
+  const first = {...event('c', 13000, 14000, '因為你們'), isFinal: false,
+    words: [{word: '因為你們', start: 13, end: 14}]};
+  const m = match(3, {confidence: .8, evidence: 4, matchedCharacters: 4, offset: 4, length: 18, speech: first});
+  assert.equal(p.observe(first, m, 14000), null);
+  const grown = {...first, text: '因為你們根本就沒有根據', endMs: 15000, audioMs: 15000,
+    words: [...first.words, {word: '根本就沒有根據', start: 14.1, end: 15}]};
+  const action = p.observe(grown, {...m, confidence: .73, evidence: 11, offset: 9, speech: grown}, 15000);
+  assert.equal(action.index, 3);
+  assert.equal(action.returnEvidence.pathSteps, 3);
+  assert.equal(action.returnEvidence.stablePrefix, true);
+  assert.equal(action.speech.text, '因為你們');
+  assert.equal(action.audioEndMs, 14000);
+});
+
+test('stable prefixes alone cannot return, and rewriting the prefix withdraws its stability', () => {
+  for (const supported of [false, true]) {
+    const {p} = fixture(); enterLive(p);
+    if (supported) {
+      const weak = i => match(i, {confidence: .74, evidence: 5, matchedCharacters: 4, margin: .2});
+      p.observe(event('a', 8500, 10000), weak(1), 10000);
+      p.observe(event('b', 11000, 12000), weak(2), 12000);
+    }
+    const e = {...event('c', 13000, 14000, '因為你們'), isFinal: false,
+      words: [{word: '因為你們', start: 13, end: 14}]};
+    const m = match(3, {confidence: .8, evidence: 4, matchedCharacters: 4, offset: 4, length: 18, speech: e});
+    p.observe(e, m, 14000);
+    const text = supported ? '另外一段根本就沒有根據' : '因為你們根本就沒有根據';
+    const revision = {...e, text, endMs: 15000, audioMs: 15000,
+      words: [{word: text.slice(0, 4), start: 13, end: 14}, {word: text.slice(4), start: 14.1, end: 15}]};
+    assert.equal(p.observe(revision, {...m, speech: revision}, 15000), null);
+    assert.equal(p.source, 'live');
+  }
 });

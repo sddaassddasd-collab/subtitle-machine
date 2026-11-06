@@ -2,6 +2,29 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const createFixture = require('./helpers/audio-server-fixture');
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('the real server recovers a nearby long paraphrase using stable literal-semantic corroboration without arming an onset', async t => {
+  const f = createFixture({allowCueChanges: true, texts: ['你又來了這樣根本沒有用', '你的方法才沒有用', '兩位先冷靜', '我說過', '你們又沒找到問題核心了']});
+  t.after(() => f.dispose());
+  const events = [], confirmations = [];
+  f.history.event = (sessionId, type, data) => events.push({type, ...data});
+  f.history.confirm = (...args) => confirmations.push(args);
+  f.enableSemantic(async () => ({choices: [{message: {content: JSON.stringify({ambiguous: false,
+    matches: [{index: 4, matchConfidence: .9, firstWordId: 0, lastWordId: 0}]})}}]}));
+  f.stream.autoFollowAudioMs = 1000;
+  f.transcript('你又來了這樣根本沒有用', {streamId: 's', itemId: 'anchor', startMs: 0, endMs: 1000, isFinal: true});
+  f.stream.autoFollowAudioMs = 4000;
+  f.transcript('你們又沒有找到問題的核心了', {streamId: 's', itemId: 'paraphrase', startMs: 2000, endMs: 4000,
+    isFinal: true, words: [{word: '你們又沒有找到問題的核心', start: 2, end: 3.7}, {word: '了', start: 3.7, end: 4}]});
+  await flush();
+  assert.equal(f.session.currentIndex, 4);
+  assert.equal(f.state().lastDecision.supportSource, 'joint_text_semantic');
+  assert.equal(f.state().lastDecision.independentAudio, false);
+  assert.equal(f.state().lastDecision.transcriptAudioEndMs, 3700);
+  assert.equal(f.state().armedIndex, null);
+  assert.equal(f.state().progress, 0);
+  assert.ok(confirmations.some(args => args[1] === 4 && args[3].completed === false));
+  assert.ok(events.some(e => e.reason === 'stable_long_text_semantic'));
+});
 test('server semantic fallback changes location only after two independent proposals and records no completion', async t => {
   const f = createFixture({allowCueChanges: true, texts: ['現在原本停留的地方', '專家提出一種新的治療方法', '另一位專家反對這個說法']});
   t.after(() => f.dispose());

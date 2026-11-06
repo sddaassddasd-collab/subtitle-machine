@@ -69,6 +69,23 @@ test('manual skips, automatic skips, unperformed cues and repeated visits remain
   await h.end(s.id);
 });
 
+test('onset reviews survive export even when pending precedes the visit, without changing confirmation totals', async () => {
+  const {session: s, history: h, advance} = fixture('onset-review');
+  const id = await h.start(s);
+  h.event(s.id, 'onset_review', {index: 1, decisionId: 'onset-1', status: 'pending'});
+  h.enter(s, 1, {source: 'onset', decisionId: 'onset-1'}); s.currentIndex = 1;
+  advance(5000);
+  h.event(s.id, 'onset_review', {index: 1, decisionId: 'onset-1', status: 'overdue', reason: 'no_text_confirmation'});
+  h.event(s.id, 'onset_review', {index: 1, decisionId: 'onset-1', status: 'unconfirmed', reason: 'capture_stopped'});
+  const report = historyReport(await h.read(s.id, id)), visit = report.rows[1].visits[0];
+  assert.deepEqual(visit.predictionReviews.map(r => r.status), ['pending', 'overdue', 'unconfirmed']);
+  assert.equal(visit.confirmations.length, 0);
+  assert.equal(visit.status, 'pending');
+  const csv = historyCsv(report);
+  assert.match(csv, /預推核對結果/); assert.match(csv, /結束時仍未確認/); assert.match(csv, /capture_stopped/);
+  await h.end(s.id);
+});
+
 test('durable recovery retains the run and visits, marks an interruption and preserves script versions', async () => {
   const {session: s, history: first} = fixture('restart');
   const id = await first.start(s);

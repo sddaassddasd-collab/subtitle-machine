@@ -19,6 +19,7 @@ const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms
 const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
 const {CaptionPresentation} = require('./caption-presentation');
+const {OnsetReview} = require('./onset-review');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
@@ -7380,6 +7381,7 @@ function applyTranscriptionError(sessionId, message) {
 }
 
 function stopTranscriptionStream(sessionId, options = {}) {
+  recordOnsetReviewEvents(sessionId, autoFollowStates.get(sessionId)?.onsetReview.close('capture_stopped') || []);
   const performance = autoFollowStates.get(sessionId)?.performance;
   if (performance) {
     if (performance.group) autoFollowHistory.event(sessionId, 'performance_follow', {action: 'overlap_stop', reason: 'capture_stopped', ...followHistoryClock(sessionId)});
@@ -9211,6 +9213,7 @@ function createAutoFollowState() {
     referenceAudio: null,
     performance: new PerformanceFollower(),
     captionDisplay: new CaptionPresentation(),
+    onsetReview: new OnsetReview(),
   };
 }
 
@@ -9221,8 +9224,16 @@ function recordAutoFollowDecision(sessionId, index, source, timing = {}) {
     cellId: getSessionRecord(sessionId)?.selectedCellId,
     ...timing, displayAckMs: {},
   };
+  if (source === 'onset') recordOnsetReviewEvents(sessionId, state.onsetReview.start(index,
+    state.lastDecision.id, timing.onsetAudioMs, transcriptionStreams.get(sessionId)?.autoFollowAudioMs));
+  else if (state.onsetReview.active?.index !== index)
+    recordOnsetReviewEvents(sessionId, state.onsetReview.close('position_changed_without_confirmation', index));
   autoFollowHistory.observe(sessionId, 'decision', source, {decisionId: state.lastDecision.id, targetIndex: index,
     state: trackerSnapshot(state.tracker, getSessionRecord(sessionId)?.currentIndex), ...followHistoryClock(sessionId), ...timing});
+}
+
+function recordOnsetReviewEvents(sessionId, events) {
+  for (const event of events) autoFollowHistory.event(sessionId, 'onset_review', {...event, ...followHistoryClock(sessionId)});
 }
 
 function getAutoFollowDisplayTiming(session) {
@@ -9269,6 +9280,7 @@ function getAutoFollowState(sessionId) {
     session.automaticLive = false;
     if (session.captionMode === 'script') session.projectorDisplayMode = 'script';
     autoFollowHistory.sync(session);
+    recordOnsetReviewEvents(key, state.onsetReview.close('context_changed'));
     Object.assign(state, createAutoFollowState(), {
       tracker: createTracker({ ignoreBeforeMs: transcriptionStreams.get(key)?.autoFollowAudioMs ?? -1 }),
       status: AUTO_FOLLOW_STATUS.LISTENING,
@@ -9281,6 +9293,7 @@ function getAutoFollowState(sessionId) {
 }
 
 function resetAutoFollowState(sessionId, patch = {}) {
+  recordOnsetReviewEvents(sessionId, autoFollowStates.get(sessionId)?.onsetReview.close('tracker_reset') || []);
   const nextState = {
     ...createAutoFollowState(),
     ...patch,
@@ -9332,6 +9345,7 @@ function getPublicAutoFollowState(session) {
     correctionCandidates: state.tracker.correction.candidates,
     predictedIndex: state.tracker.prediction?.source === 'silence'
       ? null : state.tracker.prediction?.index ?? null,
+    predictionReview: state.onsetReview.last,
     lastDecision: state.lastDecision,
     history: autoFollowHistory.status(session.id),
     performance: {...state.performance.publicState(), pendingReturnIndex: holdingCaption(session) ? session.currentIndex : null},
@@ -9415,6 +9429,7 @@ function applyPerformanceAction(session, action) {
   autoFollowHistory.event(session.id, 'performance_follow', {...action, action: action.type, ...followHistoryClock(session.id),
     fromIndex: session.currentIndex, at: Date.now(), state: performance.publicState()});
   if (action.type === 'source') {
+    recordOnsetReviewEvents(session.id, state.onsetReview.close('source_changed'));
     if (action.source === 'script' && action.reason === 'script_reacquired') {
       const entries = performanceCaptionEntries(performance.returnBuffer || [], transcriptionStreams.get(session.id));
       const held = state.captionDisplay.reacquired(action.index, entries, action.audioStartMs, action.audioEndMs, session.selectedCellId);
@@ -9576,6 +9591,7 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
   const now = Date.now();
   const performance = getPerformanceFollower(session);
   applyPerformanceAction(session, performance.tick(endMs, now, level));
+  recordOnsetReviewEvents(sessionId, state.onsetReview.observe(session.currentIndex, endMs));
   if (session.automaticLive || performance.group) {
     updateAutoFollowState(sessionId, {listening: true, lastAudioLevel: level, lastAudioAt: now});
     maybeBroadcastAutoFollowDiagnostics(sessionId, now);
@@ -9657,6 +9673,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     return;
   }
   state.lastAlignmentMs = Math.max(0, Date.now() - alignmentStartedAt);
+  recordOnsetReviewEvents(sessionId, state.onsetReview.observe(session.currentIndex, audioMs, result, options));
   if (!result.ignored && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
     referenceRuntime.hint?.(session, result.candidate, options.endMs);
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
@@ -9678,7 +9695,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     return;
   }
   const held = state.captionDisplay;
-  if (held.holding(session.currentIndex, session.selectedCellId)) held.revise({...options, text: transcript});
+  if (held.holding(session.currentIndex, session.selectedCellId)) held.revise({...options, text: transcript},
+    {index: result.index, candidate: result.candidate});
   const wasLive = session.automaticLive === true;
   const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs},
     performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
@@ -9688,12 +9706,12 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       {...followHistoryClock(sessionId), searchWindow: result.searchWindow, decision: performanceAction?.returnEvidence || performance.returnDecision,
         itemId: options.itemId, isFinal: options.isFinal, backgroundIndex: performance.backgroundIndex});
     if (wasLive && !session.automaticLive && Number.isInteger(performanceAction?.index)) {
-      const speech = result.candidate?.speech || {...options, text: transcript};
+      const speech = performanceAction.speech || result.candidate?.speech || {...options, text: transcript};
       applySemanticLocation(state.tracker, followingLines, performanceAction.index,
         {...speech, startMs: performanceAction.audioStartMs, endMs: performance.lastReliable.endMs});
       if (performanceAction.matchSource === 'transcript') autoFollowHistory.confirm(sessionId, performanceAction.index, 'transcript',
         {...followHistoryClock(sessionId), text: speech.text, audioMs: performanceAction.audioEndMs,
-          audioStartMs: performanceAction.audioStartMs, itemId: options.itemId, completed: false, reason: 'script_reacquired'});
+          audioStartMs: performanceAction.audioStartMs, itemId: speech.itemId, completed: false, reason: 'script_reacquired'});
     }
     updateAutoFollowState(sessionId, {listening: true, lastHeardText: sanitizeLineText(transcript),
       lastCandidateIndex: result.candidate?.index ?? null, lastCandidateText: followingLines[result.candidate?.index]?.text || '',
@@ -9795,6 +9813,10 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
     textCandidates: speech => textSupportCandidates(speech, part => live
       ? liveCandidates(prepareScript(lines, tracker.script), window, part)
       : localSupportCandidates(tracker.script, fromIndex, part.text)),
+    corroborationContext: () => ({displayIndex: session.currentIndex, audioMs: stream.autoFollowAudioMs,
+      predicted: tracker.prediction?.index === session.currentIndex, anchor: tracker.textAnchor,
+      allowed: index => !lines.slice(Math.min(session.currentIndex, index), Math.max(session.currentIndex, index) + 1)
+        .some(line => line.music || line.type === 'direction')}),
     record: (status, data) => {
       const performance = getPerformanceFollower(session);
       if (['pending', 'current_support'].includes(status)) performance.semanticAt = Date.now();
@@ -9805,6 +9827,21 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
     },
     accept: (candidate, speech) => {
       if (!applySemanticLocation(tracker, lines, candidate.index, speech)) return;
+      const joint = speech.supportSource === 'joint_text_semantic';
+      if (joint) {
+        recordOnsetReviewEvents(sessionId, state.onsetReview.observe(session.currentIndex, stream.autoFollowAudioMs,
+          {index: candidate.index, reason: 'stable_long_text_semantic'}, speech));
+        if (candidate.index === session.currentIndex) {
+          getPerformanceFollower(session).recognize({...candidate, semantic: true, ...speech},
+            {...speech, semanticSupported: true, audioMs: stream.autoFollowAudioMs}, Date.now());
+          autoFollowHistory.confirm(sessionId, candidate.index, 'semantic', {...followHistoryClock(sessionId),
+            text: speech.text, itemId: speech.itemId, audioStartMs: speech.startMs, audioMs: speech.endMs,
+            completed: false, supportSource: speech.supportSource, independentAudio: false});
+          updateAutoFollowState(sessionId, {message: '起音預推已由穩定長句與語意共同核對；持續等待句尾。'});
+          broadcastAutoFollowState(sessionId);
+          return;
+        }
+      }
       const performance = getPerformanceFollower(session), wasLive = session.automaticLive;
       const action = performance.recognize({...candidate, semantic: true, ...speech},
         {...speech, semanticSupported: true, audioMs: stream.autoFollowAudioMs}, Date.now());
@@ -9814,12 +9851,17 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
         transcriptAudioEndMs: speech.endMs, semanticSupported: true, supportSource: speech.supportSource,
         proposalInputId: speech.proposalInputId, supportingInputId: speech.inputId,
         firstWordId: speech.firstWordId, lastWordId: speech.lastWordId,
+        independentAudio: speech.independentAudio !== false,
         supportingFirstWordId: speech.supportingFirstWordId, supportingLastWordId: speech.supportingLastWordId});
       updateAutoFollowState(sessionId, {lastAdvancedAt: Date.now(), started: true, listening: true,
         lastCandidateIndex: candidate.index, lastCandidateText: lines[candidate.index]?.text || '', confidence: null,
         status: AUTO_FOLLOW_STATUS.ADVANCED,
-        message: '已由語意候選及後續獨立證據恢復位置，等待文字核對。'});
+        message: joint ? '已由穩定長句與語意共同恢復附近位置，持續核對句尾。'
+          : '已由語意候選及後續獨立證據恢復位置，等待文字核對。'});
       applyCurrentIndexChange(session, candidate.index);
+      if (joint) autoFollowHistory.confirm(sessionId, candidate.index, 'semantic', {...followHistoryClock(sessionId),
+        text: speech.text, itemId: speech.itemId, audioStartMs: speech.startMs, audioMs: speech.endMs,
+        completed: false, supportSource: speech.supportSource, independentAudio: false});
     },
   });
 }

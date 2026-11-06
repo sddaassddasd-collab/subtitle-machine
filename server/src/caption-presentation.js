@@ -2,9 +2,10 @@
 // on screen is located, keep its spoken wording until an actual cue change.
 const {normalizeText} = require('./follow-text');
 const {alignedWords, freshSpeech, wordSpeech} = require('./word-evidence');
-const CAPTION_PRESENTATION_SETTINGS = Object.freeze({version: 2, transitionMs: 120,
+const CAPTION_PRESENTATION_SETTINGS = Object.freeze({version: 3, transitionMs: 120,
   automaticLiveEntries: 1, waitForCueChange: true, preserveManualOverride: true,
-  minimumCharacters: 4, immediateCharacters: 8, stableMs: 250, revisionToleranceMs: 200});
+  minimumCharacters: 4, immediateCharacters: 8, stableMs: 250, revisionToleranceMs: 200,
+  continuationConfidence: .78, continuationCoverage: .75, continuationMatches: 8});
 class CaptionPresentation {
   constructor() { this.clear(); }
   clear() { this.published = null; this.held = null; this.draft = null; }
@@ -30,9 +31,27 @@ class CaptionPresentation {
     this.held = {index, cellId, entry: {...latest, translations: {...latest.translations}}};
     return true;
   }
-  revise(event) {
+  revise(event, continuation = {}) {
     const entry = this.held?.entry;
     if (!entry || event.itemId !== entry.id) return false;
+    const c = continuation.candidate, normalized = normalizeText(event.text);
+    // Earlier reacquisition may happen mid-sentence. Grow only a literally
+    // located continuation of THIS cue; an ASR item can also contain the next
+    // cue, so its identity alone never authorizes extending the held fence.
+    if (continuation.index === this.held.index && c?.index === this.held.index && !c.phonetic && !c.weakPath && !c.locationOnly &&
+      c.confidence >= CAPTION_PRESENTATION_SETTINGS.continuationConfidence && !c.trailingCharacters &&
+      c.matchedCharacters >= CAPTION_PRESENTATION_SETTINGS.continuationMatches &&
+      c.matchedCharacters / c.evidence >= CAPTION_PRESENTATION_SETTINGS.continuationCoverage &&
+      normalized === c.heard && normalized.startsWith(normalizeText(entry.text)) &&
+      normalized.length <= c.length / CAPTION_PRESENTATION_SETTINGS.continuationConfidence &&
+      event.endMs > entry.endMs && alignedWords(event).length) {
+      const speech = freshSpeech(event, entry.startMs);
+      if (speech) {
+        this.held.entry = {...entry, text: speech.text, endMs: speech.endMs,
+          isFinal: event.isFinal === true, translations: {}};
+        return true;
+      }
+    }
     let speech;
     if (event.endMs <= entry.endMs + CAPTION_PRESENTATION_SETTINGS.revisionToleranceMs) speech = freshSpeech(event, entry.startMs);
     else {

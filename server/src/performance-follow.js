@@ -2,7 +2,7 @@ const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 3, mismatchMs: 4500, mismatchAudioMs: 3000,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 4, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 12, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
   switchHoldMs: 4000, maximumLagMs: 5000, bufferMs: 6000, bufferItems: 3,
@@ -173,7 +173,7 @@ class PerformanceFollower {
         match.evidence >= PERFORMANCE_SETTINGS.returnCharacters && match.margin >= PERFORMANCE_SETTINGS.returnMargin);
       const text = normalizeText(match.speech?.text || event.text), stableAt = match.stableAt ?? now;
       const nearEnding = Number.isFinite(match.offset) && Number.isFinite(match.length) && match.offset >= match.length - 1;
-      const settled = Boolean(event.isFinal || event.speechFinal || event.semanticSupported ||
+      const boundarySettled = Boolean(event.isFinal || event.speechFinal || event.semanticSupported ||
         (nearEnding && now - stableAt >= PERFORMANCE_SETTINGS.stableMs));
       this.returnWitnesses = this.returnWitnesses.filter(w => endMs - w.endMs <=
         (w.settled ? PERFORMANCE_SETTINGS.retainedSupportMs : PERFORMANCE_SETTINGS.returnSupportMs));
@@ -187,18 +187,21 @@ class PerformanceFollower {
       const steps = previous ? (previous.steps || 1) + 1 : 1;
       const supported = previous && ((match.confidence >= .8 && previous.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) ||
         (literal && steps >= PERFORMANCE_SETTINGS.weakReturnSteps));
+      const settled = boundarySettled || Boolean(supported && match.stablePrefix);
       if (settled && (strong || supported)) this.backgroundConfirmed = {index, startMs, endMs, at: now};
       this.returnDecision = {reason: this.lock === 'live' ? 'operator_live_lock' : !settled ? 'waiting_for_stable_speech'
         : !strong && !supported ? 'needs_independent_support'
           : !strong && now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs ? 'switch_hold' : 'script_reacquired', index, strong, supported: Boolean(supported),
         confidence: match.confidence, evidence: match.evidence, margin: match.margin, startMs, endMs,
-        supportingIndex: previous?.index ?? null, pathSteps: steps, retainedPhrase: match.retained === true};
+        supportingIndex: previous?.index ?? null, pathSteps: steps, retainedPhrase: match.retained === true,
+        stablePrefix: match.stablePrefix === true};
       if (this.lock !== 'live' && settled && (strong || (supported && now - this.switchedAt >= PERFORMANCE_SETTINGS.switchHoldMs))) {
         const returnEvidence = this.returnDecision;
         const action = this.transition('script', 'script_reacquired', now);
         this.confirm(index, startMs, endMs, now);
         return {...action, index, matchSource: match.semantic ? 'semantic' : 'transcript',
-          audioStartMs: startMs, audioEndMs: endMs, confidence: match.confidence ?? null, returnEvidence};
+          audioStartMs: startMs, audioEndMs: endMs, confidence: match.confidence ?? null, returnEvidence,
+          speech: match.speech};
       }
       if ((match.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) || literal) {
         // Revisions update their own range, never erase a different cue's

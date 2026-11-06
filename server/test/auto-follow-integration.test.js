@@ -11,6 +11,7 @@ const performanceFollow = require('../src/performance-follow');
 const performanceLanguage = require('../src/performance-language');
 const captionMode = require('../src/caption-mode');
 const {CaptionPresentation} = require('../src/caption-presentation');
+const {OnsetReview} = require('../src/onset-review');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
 
 // Execute the real server functions, replacing only IO/persistence dependencies.
@@ -29,7 +30,7 @@ function fixture(mode = 'auto') {
   const emissions = [];
   const context = vm.createContext({
     Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS,
-    ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation,
+    ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview,
     TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
@@ -95,6 +96,26 @@ test('noisy interim catches up nearby and publishes edited script to displays', 
     assert.equal(payload.source, 'script');
     assert.equal(payload.text, '我的車子壞了');
   }
+});
+
+test('an overdue onset remains unconfirmed, cannot predict again, and is reviewed when actual text arrives', () => {
+  const {session, context} = fixture(), reviews = [];
+  context.autoFollowHistory.event = (id, type, data) => {if (type === 'onset_review') reviews.push(data)};
+  const stream = {ready: true, autoFollowAudioMs: 1000}; context.transcriptionStreams.set('test', stream);
+  context.handleAutoFollowTranscript('test', session.lines[0].text,
+    {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
+  const packet = (level, ms) => {stream.autoFollowAudioMs = ms; context.handleAutoFollowAudioLevel('test', level, 20, ms)};
+  for (let ms = 1020; ms <= 1120; ms += 20) packet(0, ms);
+  packet(.1, 1140); packet(.1, 1160);
+  assert.equal(session.currentIndex, 1);
+  packet(0, 6160); packet(.1, 6180); packet(.1, 6200);
+  assert.equal(context.getPublicAutoFollowState(session).predictionReview.status, 'overdue');
+  assert.equal(session.currentIndex, 1);
+  stream.autoFollowAudioMs = 7000;
+  context.handleAutoFollowTranscript('test', session.lines[1].text,
+    {streamId: 's', itemId: 'b', startMs: 6300, endMs: 7000, isFinal: true});
+  assert.deepEqual(reviews.map(r => r.status), ['pending', 'overdue', 'confirmed']);
+  assert.equal(context.getPublicAutoFollowState(session).predictedIndex, null);
 });
 
 test('automatic viewers and projectors both show the edited script while ASR runs', () => {

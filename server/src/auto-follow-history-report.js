@@ -9,6 +9,7 @@ const sourceLabel = source => SOURCE_LABELS[source] || source || '';
 
 function historyReport({run, events, scope}) {
   const contexts = new Map(), visits = new Map(), decisions = new Map(), rows = [];
+  const onsetReviews = new Map();
   const diagnosticTotals = {transcriptRevisions: 0, traceSamples: 0, acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
   const windows = new Set(), streams = [];
   for (const event of events) {
@@ -18,6 +19,10 @@ function historyReport({run, events, scope}) {
     if (event.type === 'capture_summary') diagnosticTotals.captureSummaries++;
     if (event.type === 'problem_mark') diagnosticTotals.problemMarks++;
     if (event.type === 'stream_configuration') streams.push(event);
+    if (event.type === 'onset_review') {
+      if (!onsetReviews.has(event.decisionId)) onsetReviews.set(event.decisionId, []);
+      onsetReviews.get(event.decisionId).push(event);
+    }
     if (event.type === 'context') {
       const context = {...event, rows: event.lines.map(line => ({contextId: event.contextId,
         cellId: event.cellId, cellName: event.cellName, language: event.language, ...line,
@@ -56,6 +61,7 @@ function historyReport({run, events, scope}) {
     }
   }
   for (const row of rows) {
+    for (const visit of row.visits) visit.predictionReviews = onsetReviews.get(visit.decisionId) || [];
     if (row.visits.length) row.status = row.visits.at(-1).status;
     else if (row.type !== 'direction' && row.skips.length)
       row.status = row.skips.every(skip => skip.source === 'manual') ? 'skipped_manual' : 'skipped_auto';
@@ -89,7 +95,9 @@ function historyReport({run, events, scope}) {
       '辨識修訂逐次保存；決策暫存保留觸發前 5 秒及後 3 秒，重疊樣本不重複保存，單窗最長 10 秒、暫存最多 160 個分析結果。',
       '聲音及收音摘要每五秒彙整，匯出與暫停時保存尚未滿五秒的摘要；不包含現場原始音訊。超長文字與詞陣列有上限並標示截短。',
       '音訊時間以收音串流為單位，串流重啟會歸零；請連同串流 ID、事件序號及伺服器時間核對。',
-      '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。'],
+      '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。',
+      '起音預推另存核對過程；逾時或離開前未確認仍維持未確認，不自動視為辨識成功。',
+      'joint_text_semantic 是同一段穩定長句與語意共同佐證，不代表兩份獨立音訊證據，且不代表句尾確認。'],
     events};
 }
 
@@ -107,9 +115,11 @@ function historyCsv(report) {
   const records = [['排練ID', '節目', '開始時間UTC', '劇本版本ID', '場次', '演出語言', '字幕格ID', '字幕格', '台詞',
     '參考片段可用', '參考起點秒', '參考終點秒', '經過次序', '進入方式', '進入時間UTC', '收音串流ID', '現場音訊毫秒',
     '確認來源', '句尾確認', '結果', '跨過來源', '辨識文字', '錄音定位秒', '顯示回報', '紀錄含中斷', '文字涵蓋', '涵蓋辨識文字',
-    '觸發時間UTC', '觸發時間台北UTC+08', '距紀錄開始秒', '觸發時間來源', '觸發證據音訊毫秒']];
+    '觸發時間UTC', '觸發時間台北UTC+08', '距紀錄開始秒', '觸發時間來源', '觸發證據音訊毫秒',
+    '預推核對結果', '預推核對原因', '預推核對時間UTC']];
   for (const row of report.rows) for (const [index, visit] of (row.visits.length ? row.visits : [null]).entries()) {
     const confirmations = visit?.confirmations || [];
+    const review = visit?.predictionReviews?.at(-1);
     records.push([report.run.id, report.run.name, iso(report.run.startedAt), row.contextId, row.cellName || row.cellId,
       row.language, row.id, row.index + 1, row.text, row.reference.usable ? '是' : '否', row.reference.start, row.reference.end,
       visit ? index + 1 : '', sourceLabel(visit?.source), iso(visit?.enteredAt), visit?.streamId, visit?.audioMs,
@@ -122,7 +132,9 @@ function historyCsv(report) {
       row.heard?.length ? '是（不代表已顯示）' : '', [...new Set((row.heard || []).map(item => item.heard))].join(' / '),
       iso(visit?.triggeredAt), taipei(visit?.triggeredAt), visit ? (visit.elapsedMs / 1000).toFixed(3) : '',
       visit ? visit.timestampSource === 'trigger' ? '觸發決策' : '舊版事件時間' : '',
-      visit?.decisionTiming?.transcriptAudioEndMs ?? visit?.decisionTiming?.audioEndMs ?? visit?.decisionTiming?.onsetAudioMs ?? visit?.decisionTiming?.silenceAudioMs]);
+      visit?.decisionTiming?.transcriptAudioEndMs ?? visit?.decisionTiming?.audioEndMs ?? visit?.decisionTiming?.onsetAudioMs ?? visit?.decisionTiming?.silenceAudioMs,
+      review ? ({pending: '等待文字核對', overdue: '核對逾時', confirmed: '已核對', unconfirmed: '結束時仍未確認'}[review.status] || review.status) : '',
+      review?.reason, iso(review?.at)]);
   }
   return '\uFEFF' + records.map(record => record.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
