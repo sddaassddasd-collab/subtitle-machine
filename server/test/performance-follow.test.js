@@ -220,3 +220,49 @@ test('withdrawn interims and an unfinished opening do not qualify as continuousl
   assert.equal(p.observe(e, {...m, length: 20}, 12000), null);
   assert.equal(p.source, 'live');
 });
+
+test('a stable complete word range survives ASR growth into a later paraphrased cue', () => {
+  const {p} = fixture(); enterLive(p);
+  const first = {...event('growing', 8500, 10000, '你們的論點'), isFinal: false,
+    words: [{word: '你們的論點', start: 8.5, end: 10}]};
+  p.observe(first, match(3, {evidence: 5, offset: 5, length: 5, speech: first}), 10000);
+  const next = {...first, text: '你們的論點哎其實對的', endMs: 11500, audioMs: 11500,
+    words: [{word: '你們的論點', start: 8.5, end: 10.4}, {word: '哎其實對的', start: 10.4, end: 11.5}]};
+  const action = p.observe(next, match(4, {confidence: .7, evidence: 5, matchedCharacters: 3}), 11500);
+  assert.equal(action.index, 3); assert.equal(action.returnEvidence.retainedPhrase, true);
+  assert.equal(action.audioEndMs, 10400);
+});
+
+test('a withdrawn word range cannot remain stable merely because the ASR item ID stayed the same', () => {
+  const {p} = fixture(); enterLive(p);
+  const first = {...event('growing', 8500, 10000, '你們的論點'), isFinal: false,
+    words: [{word: '你們的論點', start: 8.5, end: 10}]};
+  p.observe(first, match(3, {evidence: 5, offset: 5, length: 5, speech: first}), 10000);
+  assert.equal(p.observe({...first, text: '另外一段話哎其實對的', endMs: 11500, audioMs: 11500,
+    words: [{word: '另外一段話', start: 8.5, end: 10}, {word: '哎其實對的', start: 10.1, end: 11.5}]}, null, 11500), null);
+  assert.equal(p.source, 'live');
+});
+
+test('three distinct ordered weaker phrases can reacquire while repeated hypotheses cannot build a path', () => {
+  const {p} = fixture(); enterLive(p);
+  const weak = i => match(i, {confidence: .74, evidence: 5, matchedCharacters: 4, margin: .2});
+  p.observe(event('a', 8500, 10000), weak(1), 10000);
+  p.observe(event('a', 8500, 10500), weak(2), 10500);
+  assert.equal(p.source, 'live');
+  p.observe(event('b', 11000, 12000), weak(2), 12000);
+  const action = p.observe(event('c', 13000, 14000), weak(3), 14000);
+  assert.equal(action.index, 3); assert.equal(action.returnEvidence.pathSteps, 3);
+});
+
+test('successive small timestamp shifts cannot make old words count as a newly stable phrase', () => {
+  const {p} = fixture(); enterLive(p);
+  const e = {...event('drifting', 8500, 10000, '你們的論點'), isFinal: false,
+    words: [{word: '你們的論點', start: 8.5, end: 10}]};
+  const m = match(3, {evidence: 5, offset: 5, length: 5});
+  assert.equal(p.observe(e, m, 10000), null);
+  assert.equal(p.observe({...e, endMs: 10600, audioMs: 10600,
+    words: [{word: '你們的論點', start: 9.1, end: 10.6}]}, m, 10600), null);
+  assert.equal(p.observe({...e, endMs: 11200, audioMs: 11200,
+    words: [{word: '你們的論點', start: 9.7, end: 11.2}]}, m, 11200), null);
+  assert.equal(p.source, 'live');
+});

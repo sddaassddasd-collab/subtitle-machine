@@ -92,6 +92,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         state: () => getPublicAutoFollowState(session),
         viewer: () => getViewerPayload(session),
         projector: () => getProjectorPayload(session),
+        control: () => getControlPayload(session),
         resetPosition: () => resetAutoFollowPosition(session),
         speechStarted: startMs => handleAutoFollowSpeechStarted(session.id, startMs),
         correctLive: (client, itemId) => queueScriptCaptionCorrection(session, stream, client, itemId,

@@ -1,13 +1,16 @@
 const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
+const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 2, mismatchMs: 4500, mismatchAudioMs: 3000,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 3, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 12, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
   switchHoldMs: 4000, maximumLagMs: 5000, bufferMs: 6000, bufferItems: 3,
   returnConfidence: .94, returnCharacters: 5, returnMargin: .12, returnAhead: 18,
   searchExpandMs: 8000, maximumSearchAhead: 72, returnMaximumStep: 4, returnWitnesses: 16,
   scriptContextTtlMs: 15000, maximumStableMatches: 32,
+  retainedSupportMs: 15000, weakReturnConfidence: .70, weakReturnMatches: 3, weakReturnSteps: 3,
+  wordTimestampToleranceMs: 750, weakReturnMaximumStep: 2,
   returnBehind: 3, returnSupportMs: 8000, audioGapMs: 1200, quietLevel: .0015, quietMs: 1800,
   maximumGroups: 30, maximumGroupCues: 12});
 const normalized = new WeakMap();
@@ -110,10 +113,13 @@ class PerformanceFollower {
   }
   observe(event, match, now = Date.now()) {
     const speech = this.speech(event, now);
+    if (this.source === 'live') {
+      match = returnMatch(this.stableMatches, event, match, now, PERFORMANCE_SETTINGS);
+      this.returnWitnesses = this.returnWitnesses.filter(w => w.itemId !== event.itemId || preservedSpeech(event, w));
+    }
     if (match && Number.isInteger(match.index)) return this.recognize(match, event, now);
     if (this.source === 'live') {
       this.returnDecision = {reason: 'no_reliable_candidate'};
-      for (const [key, value] of this.stableMatches) if (value.itemId === event.itemId) this.stableMatches.delete(key);
     }
     if (!speech || this.group || this.source === 'live' || this.lock !== 'auto' || !this.settings.automaticLive || !this.lastReliable) return null;
     if (Number.isFinite(event.confidence) && event.confidence < .6) {
@@ -165,26 +171,28 @@ class PerformanceFollower {
       this.backgroundIndex = index;
       const strong = match.semantic === true || (!match.phonetic && match.confidence >= PERFORMANCE_SETTINGS.returnConfidence &&
         match.evidence >= PERFORMANCE_SETTINGS.returnCharacters && match.margin >= PERFORMANCE_SETTINGS.returnMargin);
-      const text = normalizeText(match.speech?.text || event.text), key = JSON.stringify([index, event.itemId, text]);
-      for (const [k, value] of this.stableMatches) if (now - value.at > PERFORMANCE_SETTINGS.scriptContextTtlMs || (value.itemId === event.itemId && k !== key)) this.stableMatches.delete(k);
-      const stableAt = this.stableMatches.get(key)?.at ?? now;
-      this.stableMatches.set(key, {at: stableAt, itemId: event.itemId});
-      while (this.stableMatches.size > PERFORMANCE_SETTINGS.maximumStableMatches) this.stableMatches.delete(this.stableMatches.keys().next().value);
+      const text = normalizeText(match.speech?.text || event.text), stableAt = match.stableAt ?? now;
       const nearEnding = Number.isFinite(match.offset) && Number.isFinite(match.length) && match.offset >= match.length - 1;
       const settled = Boolean(event.isFinal || event.speechFinal || event.semanticSupported ||
         (nearEnding && now - stableAt >= PERFORMANCE_SETTINGS.stableMs));
-      this.returnWitnesses = this.returnWitnesses.filter(w => endMs - w.endMs <= PERFORMANCE_SETTINGS.returnSupportMs);
+      this.returnWitnesses = this.returnWitnesses.filter(w => endMs - w.endMs <=
+        (w.settled ? PERFORMANCE_SETTINGS.retainedSupportMs : PERFORMANCE_SETTINGS.returnSupportMs));
       const previous = this.returnWitnesses.findLast(w => startMs >= w.endMs && endMs > w.endMs &&
-        index > w.index && index <= w.index + PERFORMANCE_SETTINGS.returnMaximumStep &&
+        index > w.index && index <= w.index + (match.confidence < .8
+          ? PERFORMANCE_SETTINGS.weakReturnMaximumStep : PERFORMANCE_SETTINGS.returnMaximumStep) &&
         (w.itemId !== event.itemId || (Number.isInteger(match.speech?.firstWordId) && match.speech.firstWordId > w.lastWordId &&
           normalizeText(event.text).includes(w.text))));
-      const supported = previous && match.confidence >= .8 && match.evidence >= 4 && match.margin >= .07;
+      const literal = !match.phonetic && match.confidence >= PERFORMANCE_SETTINGS.weakReturnConfidence &&
+        match.evidence >= 4 && match.matchedCharacters >= PERFORMANCE_SETTINGS.weakReturnMatches && match.margin >= .1;
+      const steps = previous ? (previous.steps || 1) + 1 : 1;
+      const supported = previous && ((match.confidence >= .8 && previous.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) ||
+        (literal && steps >= PERFORMANCE_SETTINGS.weakReturnSteps));
       if (settled && (strong || supported)) this.backgroundConfirmed = {index, startMs, endMs, at: now};
       this.returnDecision = {reason: this.lock === 'live' ? 'operator_live_lock' : !settled ? 'waiting_for_stable_speech'
         : !strong && !supported ? 'needs_independent_support'
           : !strong && now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs ? 'switch_hold' : 'script_reacquired', index, strong, supported: Boolean(supported),
         confidence: match.confidence, evidence: match.evidence, margin: match.margin, startMs, endMs,
-        supportingIndex: previous?.index ?? null};
+        supportingIndex: previous?.index ?? null, pathSteps: steps, retainedPhrase: match.retained === true};
       if (this.lock !== 'live' && settled && (strong || (supported && now - this.switchedAt >= PERFORMANCE_SETTINGS.switchHoldMs))) {
         const returnEvidence = this.returnDecision;
         const action = this.transition('script', 'script_reacquired', now);
@@ -192,11 +200,13 @@ class PerformanceFollower {
         return {...action, index, matchSource: match.semantic ? 'semantic' : 'transcript',
           audioStartMs: startMs, audioEndMs: endMs, confidence: match.confidence ?? null, returnEvidence};
       }
-      if (match.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) {
+      if ((match.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) || literal) {
         // Revisions update their own range, never erase a different cue's
         // nonoverlapping witness or count as a second observation.
         this.returnWitnesses = this.returnWitnesses.filter(w => !(w.index === index && w.itemId === event.itemId && startMs < w.endMs));
-        this.returnWitnesses.push({index, itemId: event.itemId, startMs, endMs, text, lastWordId: match.speech?.lastWordId});
+        this.returnWitnesses.push({index, itemId: event.itemId, startMs, endMs, text,
+          rawText: match.speech?.text || event.text, confidence: match.confidence, settled, steps,
+          lastWordId: match.speech?.lastWordId});
         this.returnWitnesses = this.returnWitnesses.slice(-PERFORMANCE_SETTINGS.returnWitnesses);
       }
       return null;

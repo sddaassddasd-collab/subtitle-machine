@@ -49,7 +49,7 @@ class SemanticFollower {
     if (!target.speech || !preceding.speech || this.invalidReason(h)) return false;
     const [best, runner] = h.textCandidates(preceding.speech).sort((a, b) => b.confidence - a.confidence);
     if (best?.index !== preceding.index || best.confidence < S.textConfidence || best.evidence < S.textEvidence ||
-      best.matchedCharacters < S.literalMatches || best.confidence - (runner?.confidence ?? 0) < S.textMargin) return false;
+      best.matchedCharacters < S.literalMatches || (best.supportMargin ?? best.confidence - (runner?.confidence ?? 0)) < S.textMargin) return false;
     h.record('supported', {...data, reason: 'word_span_text', supportSource: 'text',
       textConfidence: best.confidence, supportingIndex: preceding.index,
       firstWordId: target.speech.firstWordId, lastWordId: target.speech.lastWordId,
@@ -78,7 +78,7 @@ class SemanticFollower {
         const [best, runner] = h.textCandidates(revision).sort((a, b) => b.confidence - a.confidence);
         if (best && !best.phonetic && best.index !== p.index && best.confidence >= S.phoneticConfidence &&
           best.evidence >= S.textEvidence && best.matchedCharacters >= S.literalMatches &&
-          best.confidence - (runner?.confidence ?? 0) >= S.textMargin) {
+          (best.supportMargin ?? best.confidence - (runner?.confidence ?? 0)) >= S.textMargin) {
           h.record('support_wait', {reason: 'revised_text_contradiction', inputId: revision.inputId,
             proposalInputId: p.inputId, candidateIndex: best.index, confidence: best.confidence,
             supportText: revision.text});
@@ -91,16 +91,20 @@ class SemanticFollower {
         pendingAgeMs: this.now() - p.at});
       return false;
     }
-    const candidates = h.textCandidates(speech).sort((a, b) => b.confidence - a.confidence);
+    const candidates = h.textCandidates(speech).sort((a, b) => b.confidence - a.confidence ||
+      (b.speech?.endMs || 0) - (a.speech?.endMs || 0));
     const best = candidates[0], runner = candidates[1];
-    const margin = best ? best.confidence - (runner?.confidence ?? 0) : 0;
+    const support = best?.speech || speech;
+    const margin = best ? best.supportMargin ?? best.confidence - (runner?.confidence ?? 0) : 0;
     const fromIndex = p.weak?.index ?? p.index;
     const matches = best?.matchedCharacters ?? 0;
     const strong = best && best.confidence >= (best.phonetic ? S.phoneticConfidence : S.textConfidence) &&
       best.evidence >= S.textEvidence && matches >= S.literalMatches;
     const weak = best && !best.phonetic && best.confidence >= S.weakConfidence &&
       best.evidence >= S.weakEvidence && matches >= S.weakLiteralMatches;
-    const near = best && best.index >= fromIndex && best.index <= fromIndex + S.maximumStep &&
+    const maximumStep = strong && best.confidence >= S.skipConfidence && matches >= S.skipLiteralMatches
+      ? S.strongMaximumStep : S.maximumStep;
+    const near = best && best.index >= fromIndex && best.index <= fromIndex + maximumStep &&
       (strong || best.index > fromIndex);
     const reason = !best ? 'no_text_candidate' : margin < S.textMargin ? 'ambiguous_text_support'
       : !near ? 'text_outside_proposed_path' : !(strong || weak) ? 'insufficient_text_support' : null;
@@ -108,27 +112,27 @@ class SemanticFollower {
       confidence: best?.confidence ?? null, margin, matchedCharacters: matches, evidence: best?.evidence ?? 0,
       textConfidence: best?.confidence ?? null, semanticMatchConfidence: p.matchConfidence,
       asrConfidence: revision.confidence, scoreSource: 'text_alignment',
-      supportText: speech.text, audioStartMs: speech.startMs, audioEndMs: speech.endMs,
-      firstWordId: speech.firstWordId ?? null, lastWordId: speech.lastWordId ?? null,
+      supportText: support.text, audioStartMs: support.startMs, audioEndMs: support.endMs,
+      firstWordId: support.firstWordId ?? null, lastWordId: support.lastWordId ?? null,
       pendingAgeMs: this.now() - p.at, phonetic: best?.phonetic === true};
     if (reason) {
       h.record('support_wait', {...data, reason});
       // A clear competing position invalidates the proposal. Weak or ambiguous
       // observations do not erase it or renew its lifetime.
-      if (strong && margin >= S.textMargin && (best.index < p.index || best.index > fromIndex + S.maximumStep))
+      if (strong && margin >= S.textMargin && (best.index < p.index || best.index > fromIndex + maximumStep))
         this.clearPending(state, 'contradictory_text');
       return false;
     }
     const steps = (p.weak?.steps ?? 0) + 1;
     if (!strong && steps < S.weakSteps) {
-      p.weak = {index: best.index, endMs: speech.endMs, steps};
+      p.weak = {index: best.index, endMs: support.endMs, steps};
       h.record('support_wait', {...data, reason: 'weak_path_needs_next_cue', pathSteps: steps});
       return false;
     }
     h.record('supported', {...data, reason: strong ? 'independent_text' : 'ordered_weak_text',
       supportSource: best.phonetic ? 'phonetic' : 'text', pathSteps: steps});
     state.pending = null;
-    h.accept(best, {...speech, supportSource: best.phonetic ? 'phonetic' : 'text', proposalInputId: p.inputId});
+    h.accept(best, {...support, supportSource: best.phonetic ? 'phonetic' : 'text', proposalInputId: p.inputId});
     state.resolved = true;
     state.controller?.abort();
     return true;
@@ -137,15 +141,18 @@ class SemanticFollower {
     let budget = this.budgets.get(stream);
     if (!budget) { budget = {lastRequest: -Infinity, busy: false, itemRequests: new Map()}; this.budgets.set(stream, budget); }
     let state = this.states.get(stream);
+    const sameDisplay = state && Number.isInteger(observation.displayIndex) && state.displayIndex === observation.displayIndex;
     if (state && (state.context !== observation.context || state.scope !== observation.scope || state.scriptScope !== observation.scriptScope ||
-      state.currentIndex !== observation.currentIndex)) {
+      (state.currentIndex !== observation.currentIndex && !sameDisplay))) {
       this.reset(stream, 'position_or_script_changed'); state = null;
     }
     if (!state) {
       state = {pending: null, memory: new SemanticTranscript(),
-        context: observation.context, scope: observation.scope, scriptScope: observation.scriptScope, currentIndex: observation.currentIndex};
+        context: observation.context, scope: observation.scope, scriptScope: observation.scriptScope,
+        displayIndex: observation.displayIndex, currentIndex: observation.currentIndex};
       this.states.set(stream, state);
     }
+    state.currentIndex = observation.currentIndex;
     state.handlers = handlers;
     const now = this.now(), revision = state.memory.remember(observation, now);
     if (observation.textResolved || state.resolved) { this.reset(stream, 'text_resolved'); return; }

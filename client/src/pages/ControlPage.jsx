@@ -10,6 +10,7 @@ import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
 import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import AutoFollowHistory from '../components/AutoFollowHistory'
+import ControlOutputPreview from '../components/ControlOutputPreview'
 import {APP_BUILD} from '../lib/build-info'
 import {signalMetrics} from '../lib/audio-signal'
 import {resolveControlPosition} from '../lib/control-position'
@@ -1025,6 +1026,7 @@ const ControlPage = () => {
       ? params.sessionId.trim()
       : ''
   const [sessionMeta, setSessionMeta] = useState(null)
+  const [output, setOutput] = useState(null)
   const [lines, setLines] = useState([])
   const linesRef = useRef(lines)
   const positionCellIdRef = useRef('')
@@ -1555,6 +1557,7 @@ const ControlPage = () => {
         }
       }
       setSessionMeta(nextSession)
+      if (payload?.output) setOutput(payload.output)
       setLines(nextLines)
       syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
       const nextLiveLineId = nextLines[effectiveLiveIndex]?.id || null
@@ -2074,6 +2077,7 @@ const ControlPage = () => {
     socket.on('disconnect', markSocketDisconnected)
     socket.on('control:update', applySessionPayload)
     socket.on('control:position', handlePositionUpdate)
+    socket.on('control:output', setOutput)
     socket.on('control:transcription', handleTranscriptionUpdate)
     socket.on('control:auto-follow', handleAutoFollowUpdate)
     socket.on('control:deleted', handleSessionDeleted)
@@ -4843,6 +4847,9 @@ const ControlPage = () => {
 
   const currentLine = lines[liveCurrentIndex] || null
   const isLiveOutput = sessionMeta?.captionMode === 'live'
+  const previewOutput = output?.sessionId === sessionId ? output : null
+  const previewLine = previewOutput?.line || currentLine
+  const previewIsLive = previewOutput ? previewOutput.source === 'transcription' : isLiveOutput
   const editingModeLabel = editingModeEnabled && lines.length > 0
     ? currentIndex === liveCurrentIndex
       ? '編輯模式已開啟，清單暫停跟隨 CUE。'
@@ -6550,7 +6557,7 @@ const ControlPage = () => {
               style={projectorPreviewStyle}
             >
               <div className="viewer-preview-stage">
-                <div
+                {previewOutput ? <ControlOutputPreview payload={previewOutput} scope={`${sessionId}:${selectedCellId}`} /> : <div
                   className="viewer-preview-text"
                   style={previewRoleColor ? { color: previewRoleColor } : undefined}
                 >
@@ -6561,19 +6568,19 @@ const ControlPage = () => {
                         </div>
                       ))
                     : '\u00a0'}
-                </div>
+                </div>}
               </div>
             </div>
-            {!isLiveOutput && currentLine?.role && (
+            {!previewIsLive && previewLine?.role && (
               <div
                 className="viewer-preview-role"
                 style={previewRoleColor ? { color: previewRoleColor } : undefined}
               >
-                角色：{currentLine.role}
+                角色：{previewLine.role}
               </div>
             )}
-            {!isLiveOutput && currentLine?.type === 'direction' && <small className="input-note">目前為舞台指示，台詞輸出空白。</small>}
-            {!isLiveOutput && currentLineMusicVisible && (
+            {!previewIsLive && previewLine?.type === 'direction' && <small className="input-note">目前為舞台指示，台詞輸出空白。</small>}
+            {!previewIsLive && currentLineMusicVisible && (
               <div className="viewer-preview-music">
                 {getMusicText(currentLine)}
               </div>

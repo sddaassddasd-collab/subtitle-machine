@@ -17,6 +17,19 @@ function liveCandidates(script, window, speech) {
   return [...byIndex.values()];
 }
 
+function textSupportCandidates(speech, locate) {
+  const windows = wordWindows(speech, {maximumWords: 24, windowWords: 12, minimumCharacters: 3})
+    .filter(w => speech.endMs - w.endMs <= 2000)
+    .sort((a, b) => b.endMs - a.endMs || b.text.length - a.text.length).slice(0, 36);
+  const result = [];
+  for (const part of [speech, ...windows]) {
+    const candidates = locate(part).sort((a, b) => b.confidence - a.confidence);
+    const best = candidates[0];
+    if (best) result.push({...best, speech: part, supportMargin: best.confidence - (candidates[1]?.confidence || 0)});
+  }
+  return result;
+}
+
 function locateLiveScript(performance, lines, transcript, options, previousScript) {
   const window = performance.searchWindow(options.receivedAt);
   const speech = freshSpeech({...options, text: transcript}, performance.lastConfirmedEnd);
@@ -43,13 +56,14 @@ function locateLiveScript(performance, lines, transcript, options, previousScrip
     const best = candidates[0];
     return best ? {...best, margin: best.confidence - (candidates[1]?.confidence || 0)} : null;
   }).filter(Boolean);
-  const admitted = pools.filter(c => c.evidence >= 4 && c.confidence >= .8 && c.margin >= .07);
+  const admitted = pools.filter(c => c.evidence >= 4 && ((c.confidence >= .8 && c.margin >= .07) ||
+    (!c.phonetic && c.confidence >= .7 && c.matchedCharacters >= 3 && c.margin >= .1)));
   const best = (admitted.length ? admitted : pools).sort((a, b) =>
     b.speech.endMs - a.speech.endMs || b.confidence - a.confidence || b.evidence - a.evidence)[0];
   const accepted = admitted.includes(best);
-  return {status: 'searching', reason: accepted ? 'background_script_candidate' : 'background_script_uncertain',
+  return {status: 'searching', reason: accepted ? best.confidence >= .8 ? 'background_script_candidate' : 'background_script_provisional' : 'background_script_uncertain',
     ...(accepted ? {index: best.index} : {}), candidate: best || null, searchWindow: window,
     evidence: {startMs: best?.speech.startMs ?? speech.startMs, endMs: best?.speech.endMs ?? speech.endMs}, completed: false};
 }
 
-module.exports = {locateLiveScript, liveCandidates};
+module.exports = {locateLiveScript, liveCandidates, textSupportCandidates};

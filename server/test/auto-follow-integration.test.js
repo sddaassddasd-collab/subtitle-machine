@@ -54,6 +54,10 @@ function fixture(mode = 'auto') {
     broadcastAutoFollowState: () => emissions.push('diagnostics'),
     getLiveTranscriptionPatchPayload: () => ({ active: true }),
     getLiveTranslationPatchPayload: () => ({liveEntries: [{id: 'current', text: '目前台詞', translations: {en: 'Current line'}}]}),
+    getOutputTranscriptionEntries: () => {
+      const held = context.getAutoFollowState(session.id).captionDisplay.held;
+      return held ? [held.entry] : [];
+    },
     LIVE_TRANSLATION_LANGUAGE_CODES: new Set(['en']), isLiveTranslationLanguageAllowed: () => true,
     getLiveTranslationRoom: (id, language) => `viewer-live:${id}:${language}`,
     hasSocketRoomConnections: () => true,

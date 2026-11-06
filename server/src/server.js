@@ -16,7 +16,7 @@ const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow'
 const {trackerSnapshot, clientMetadata} = require('./follow-trace');
 const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
 const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
-const {locateLiveScript: locateBackgroundScript, liveCandidates} = require('./live-script');
+const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
 const {CaptionPresentation} = require('./caption-presentation');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
@@ -5745,7 +5745,8 @@ function getOutputTranscriptionEntries(session, stream) {
       ? {...entry.translations, ...fragment.provisionalTranslations, ...fragment.translations} : entry.translations}];
   }
   if (!session.automaticLive) return buildTranscriptionDisplayEntries(stream);
-  return performanceCaptionEntries(getAutoFollowState(session.id).performance.buffer || [], stream);
+  const state = getAutoFollowState(session.id);
+  return state.captionDisplay.publish(performanceCaptionEntries(state.performance.buffer || [], stream));
 }
 
 function getOutputTranscriptionText(session, stream) {
@@ -8116,6 +8117,7 @@ function getControlPayload(session) {
   const selectedCell = getSelectedCell(normalized);
   return {
     sessionId: normalized.id,
+    output: getProjectorPayload(normalized),
     session: getSessionSummary(normalized),
     lines,
     languageSources: getPublicCellLanguageSources(
@@ -8287,7 +8289,6 @@ function withPerformanceCaption(session, payload) {
       displayMode: PROJECTOR_DISPLAY_MODES.TRANSCRIPTION};
   }
   if (session.automaticLive && payload.liveEntries?.length) {
-    presentation.publish(getOutputTranscriptionEntries(session, transcriptionStreams.get(session.id)));
     const entry = payload.liveEntries.at(-1);
     return {...payload, line: {text: entry.text, type: 'dialogue'}, text: entry.text, liveEntries: [entry], liveLines: [entry.text]};
   }
@@ -8920,9 +8921,9 @@ function getLiveTranscriptionPatchPayload(sessionId, stream) {
 function broadcastLiveTranscriptionState(sessionId, stream) {
   const session = getSessionRecord(sessionId);
   if (!session || (getCaptionMode(session) !== 'live' && !holdingCaption(session))) return;
-  if (session.automaticLive) getAutoFollowState(sessionId).captionDisplay.publish(getOutputTranscriptionEntries(session, stream));
   const payload = getLiveTranscriptionPatchPayload(sessionId, stream);
   if (!payload) return;
+  broadcastControlOutput(session);
 
   const selectedCell = getSelectedCell(session);
   if (selectedCell?.id) {
@@ -9017,6 +9018,7 @@ function broadcastLiveTranslationState(sessionId, stream, languageCode) {
   // Use the same small patch for the projector so translations cannot replace
   // unrelated display state while they are streaming.
   io.to(`projector:${sessionId}`).emit('projector:translation-patch', payload);
+  broadcastControlOutput(session);
 }
 
 function broadcastViewerState(sessionId) {
@@ -9024,6 +9026,7 @@ function broadcastViewerState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
   const revision = bumpViewerStateRevision(sessionId);
+  broadcastControlOutput(session);
 
   session.cells.forEach((cell) => {
     const viewerRoom = `viewer:${sessionId}:${cell.id}`;
@@ -9143,8 +9146,10 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   session.currentIndex = nextIndex;
   const presentation = autoFollowStates.get(session.id)?.captionDisplay;
   if (presentation?.held && !presentation.holding(nextIndex, session.selectedCellId)) {
+    const held = presentation.held;
     presentation.clear();
-    autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'next_cue', index: nextIndex, ...followHistoryClock(session.id)});
+    autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'next_cue', index: nextIndex,
+      fromIndex: held.index, heldEntryId: held.entry.id, heldText: held.entry.text, ...followHistoryClock(session.id)});
   }
   referenceRuntime.position(session, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0,
     {continuous, reason: manualOverride ? 'manual_position' : continuous ? 'sequential_advance' : 'cue_jump'});
@@ -9167,6 +9172,11 @@ function broadcastControlPosition(session) {
   io.to(patchRoom).emit('control:position', {sessionId: session.id,
     cellId: session.selectedCellId, currentIndex: session.currentIndex, lineId: session.lines[session.currentIndex]?.id,
     displayEnabled: session.displayEnabled, autoFollow: getPublicAutoFollowState(session)});
+}
+
+function broadcastControlOutput(session) {
+  if (hasSocketRoomConnections(`control:${session.id}`))
+    io.to(`control:${session.id}`).emit('control:output', getProjectorPayload(session));
 }
 
 function followHistoryClock(sessionId) {
@@ -9408,7 +9418,10 @@ function applyPerformanceAction(session, action) {
     if (action.source === 'script' && action.reason === 'script_reacquired') {
       const entries = performanceCaptionEntries(performance.returnBuffer || [], transcriptionStreams.get(session.id));
       const held = state.captionDisplay.reacquired(action.index, entries, action.audioStartMs, action.audioEndMs, session.selectedCellId);
-      if (held) autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'waiting_for_next_cue', index: action.index, ...followHistoryClock(session.id)});
+      if (held) autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'waiting_for_next_cue', index: action.index,
+        heldEntryId: state.captionDisplay.held.entry.id, heldText: state.captionDisplay.held.entry.text,
+        audioStartMs: state.captionDisplay.held.entry.startMs, audioEndMs: state.captionDisplay.held.entry.endMs,
+        ...followHistoryClock(session.id)});
     } else state.captionDisplay.clear();
     performance.returnBuffer = null;
     session.automaticLive = action.source === 'live';
@@ -9665,11 +9678,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     return;
   }
   const held = state.captionDisplay;
-  if (held.holding(session.currentIndex, session.selectedCellId) && options.endMs >= held.held.entry.endMs) {
-    const speech = freshSpeech({...options, text: transcript}, held.held.entry.startMs);
-    if (speech) held.held.entry = {id: options.itemId, text: speech.text, startMs: speech.startMs, endMs: speech.endMs,
-      isFinal: options.isFinal === true, translations: speech.text === held.held.entry.text ? held.held.entry.translations : {}};
-  }
+  if (held.holding(session.currentIndex, session.selectedCellId)) held.revise({...options, text: transcript});
   const wasLive = session.automaticLive === true;
   const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs},
     performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
@@ -9764,24 +9773,28 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
     if (line.type === 'direction') continue;
     candidates.push({index, lineId: line.id, text: String(line.text || '').slice(0, SEMANTIC_SETTINGS.cueCharacters)});
   }
-  const context = JSON.stringify([cellId, session.transcriptionLanguage, options.streamId, candidates]);
+  const context = JSON.stringify([cellId, session.transcriptionLanguage, options.streamId]);
+  const script = prepareScript(lines, tracker.script);
+  tracker.script = script;
   void semanticFollower.observe(stream, {...options, client: stream.translationClient, text: transcript,
-    currentIndex: fromIndex, context, scope: tracker, scriptScope: lines, candidates, textResolved: !live && Number.isInteger(result.index)}, {
+    currentIndex: fromIndex, displayIndex, context, scope: tracker, scriptScope: script, candidates, textResolved: !live && Number.isInteger(result.index)}, {
     isCurrent: () => {
       if (getSessionRecord(sessionId) !== session) return 'session_changed';
       if (transcriptionStreams.get(sessionId) !== stream || stream.closing) return 'stream_changed';
       if (session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO || !ensureTranscriptionState(session).semanticFollow) return 'feature_disabled';
-      if (session.currentIndex !== displayIndex || session.automaticLive !== live) return 'display_position_changed';
+      if (session.currentIndex !== displayIndex || (session.automaticLive !== live &&
+        (live || !session.automaticLive || performance.lock !== 'auto'))) return 'display_position_changed';
       if (live && performance.searchWindow(receivedAt).origin !== fromIndex) return 'background_position_changed';
       if (session.selectedCellId !== cellId) return 'cell_changed';
       if (getAutoFollowState(sessionId).tracker !== tracker) return 'tracker_reset';
       if (state.lastVerifiedAt !== verifiedAt) return 'newer_verified_text';
-      if (getFollowingLines(session) !== lines) return 'script_or_language_changed';
+      if (getFollowingLines(session) !== lines || prepareScript(lines, tracker.script) !== script) return 'script_or_language_changed';
       if (stream.autoFollowAudioMs - options.endMs > SEMANTIC_SETTINGS.maximumResultAgeMs) return 'audio_result_expired';
       return true;
     },
-    textCandidates: speech => live ? liveCandidates(prepareScript(lines, tracker.script), window, speech)
-      : localSupportCandidates(tracker.script, fromIndex, speech.text),
+    textCandidates: speech => textSupportCandidates(speech, part => live
+      ? liveCandidates(prepareScript(lines, tracker.script), window, part)
+      : localSupportCandidates(tracker.script, fromIndex, part.text)),
     record: (status, data) => {
       const performance = getPerformanceFollower(session);
       if (['pending', 'current_support'].includes(status)) performance.semanticAt = Date.now();
@@ -9827,6 +9840,7 @@ function getAutoFollowTranscriptOptions(stream, itemId, isFinal, timing = {}) {
 function broadcastProjectorState(sessionId) {
   const session = getSession(sessionId);
   if (!session) return;
+  broadcastControlOutput(session);
 
   io.to(`projector:${sessionId}`).emit(
     'projector:update',

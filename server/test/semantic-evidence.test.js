@@ -4,6 +4,7 @@ const {SemanticTranscript, freshSpeech} = require('../src/semantic-transcript');
 const {SemanticFollower} = require('../src/semantic-follow');
 const {prepareScript, localSupportCandidates} = require('../src/auto-follow');
 const {SEMANTIC_SETTINGS: S} = require('../src/follow-settings');
+const {textSupportCandidates} = require('../src/live-script');
 
 const event = (itemId, text, startMs = 0, endMs = 1000, extra = {}) =>
   ({itemId, text, startMs, endMs, isFinal: true, ...extra});
@@ -191,4 +192,27 @@ test('a clear same-audio literal revision cancels a conflicting proposal without
   await h.observe(event('a', '最後變成另一格清楚的台詞', 0, 1800));
   assert.equal(h.accepted.length, 0);
   assert.ok(h.records.some(r => r.status === 'reset' && r.reason === 'revised_text_contradiction'));
+});
+
+test('a semantic proposal can use a later clear word range after three intervening cues', async () => {
+  const lines = ['目前停在這個地方', '演員改寫的第一句', '兩位專家冷靜', '先聽聽別人的說法', '只有面對問題我們才有辦法解決'];
+  const script = prepareScript(lines.map(text => ({text})));
+  const h = harness();
+  h.handlers.textCandidates = speech => textSupportCandidates(speech, part => localSupportCandidates(script, 0, part.text));
+  await h.observe(event('a', '演員使用完全不同的說法'));
+  h.clock(1000);
+  await h.observe(event('b', '雜亂的開頭只有面對問題我們才有辦法解決', 1000, 4000, {words: [
+    {word: '雜亂的開頭', start: 1, end: 2}, {word: '只有面對問題我們才有辦法解決', start: 2.1, end: 4}]}));
+  assert.deepEqual(h.accepted.map(c => c.index), [4]);
+  assert.equal(h.accepted[0].speech.startMs, 2100);
+  assert.equal(h.accepted[0].speech.text, lines[4]);
+  assert.ok(h.records.some(e => e.reason === 'independent_text' && e.firstWordId === 1));
+});
+
+test('weak text cannot use the larger strong-evidence skip allowance', async () => {
+  const h = harness(); await h.observe(event('a', '演員改寫的第一句話'));
+  h.candidates([match(4, .74)]);
+  await h.observe(event('b', '只有少量字詞能配到後面', 1000, 2000));
+  assert.equal(h.accepted.length, 0);
+  assert.ok(h.records.some(e => e.reason === 'text_outside_proposed_path'));
 });

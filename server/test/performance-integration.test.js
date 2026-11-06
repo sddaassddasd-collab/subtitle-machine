@@ -317,3 +317,38 @@ test('reselecting the located cue manually clears a pending handoff without adva
   assert.equal(f.session.currentIndex, 3);
   assert.equal(f.viewer().source, 'script'); assert.equal(f.viewer().text, texts[3]);
 });
+
+test('an unrecognized next-utterance draft leaves viewer, projector and control preview on the held sentence', t => {
+  const f = setup(t); f.begin();
+  const spoken = texts[3] + '呢';
+  f.say(spoken, 'spoken', 12000, 14000, 14000, {isFinal: false}); f.viewer();
+  f.say(spoken, 'spoken', 12000, 14100, 14500);
+  f.say('其實跟核心', 'next-draft', 15000, 15880, 15880, {isFinal: false});
+  assert.equal(f.session.currentIndex, 3);
+  for (const out of [f.viewer(), f.projector(), f.control().output]) {
+    assert.equal(out.text, spoken); assert.equal(out.captionPresentation.handoffIndex, 3);
+  }
+  f.say(texts[4], 'next-cue', 16000, 18000);
+  for (const out of [f.viewer(), f.projector(), f.control().output]) {
+    assert.equal(out.source, 'script'); assert.equal(out.text, texts[4]);
+  }
+});
+
+test('a pending semantic proposal survives automatic live handoff and uses a later timed phrase as support', async t => {
+  const f = setup(t, {texts: [texts[0], '專家改口提出另一套療法', '國王最喜歡的就是歌手',
+    {text: '（兩人停頓）', type: 'direction'}, '這是後面另一段台詞']});
+  f.say(texts[0], 'anchor', 0, 1000);
+  f.enableSemantic(async () => ({choices: [{message: {content: '{"index":1,"confidence":0.95}'}}]}));
+  f.say('今天突然想先跟大家聊一件事情', 'proposal', 1100, 3000, 3000);
+  await new Promise(r => setImmediate(r));
+  assert.ok(f.events.some(e => e.status === 'pending'));
+  f.follower().semanticAt = -Infinity;
+  f.say('外面下著雨不曉得大家帶了傘沒有', 'improv', 4000, 8000, 8000);
+  assert.equal(f.session.automaticLive, true);
+  f.say('亂掉的開頭國王最喜歡就是歌手', 'support', 8100, 11000, 11000, {words: [
+    {word: '亂掉的開頭', start: 8.1, end: 9}, {word: '國王最喜歡就是歌手', start: 9.1, end: 11}]});
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.session.currentIndex, 2);
+  assert.ok(f.events.some(e => e.status === 'supported' && e.reason === 'independent_text'));
+  assert.ok(!f.events.some(e => e.status === 'reset' && e.reason === 'position_or_script_changed'));
+});
