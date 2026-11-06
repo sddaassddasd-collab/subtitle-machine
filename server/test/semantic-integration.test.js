@@ -2,6 +2,29 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const createFixture = require('./helpers/audio-server-fixture');
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('semantic verification of a short-opening paraphrase confirms the same cue and prepares the next opening', async t => {
+  const f = createFixture({allowCueChanges: true, texts: ['旋律聽起來都好奇怪', '讓人心裡悶悶的。', '我以為自己休息一下就好']});
+  t.after(() => f.dispose());
+  const records = [], confirmations = [];
+  f.history.event = (_id, type, data) => records.push({type, ...data});
+  f.history.confirm = (...args) => confirmations.push(args);
+  f.enableSemantic(async () => ({choices: [{message: {content: JSON.stringify({ambiguous: false,
+    matches: [{index: 1, matchConfidence: .9, firstWordId: 0, lastWordId: 0}]})}}]}));
+  f.stream.autoFollowAudioMs = 1000;
+  f.transcript('旋律聽起來都好奇怪', {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
+  f.stream.autoFollowAudioMs = 8000;
+  f.transcript('讓人的心裡頭是悶悶的', {streamId: 's', itemId: 'b', startMs: 6500, endMs: 8000,
+    isFinal: true, words: [{word: '讓人的心裡頭是悶悶的', start: 6.5, end: 8}]});
+  await flush();
+  assert.equal(f.session.currentIndex, 1);
+  assert.equal(f.state().preparedIndex, 2);
+  assert.ok(records.some(e => e.reason === 'current_opening_text_semantic'));
+  assert.ok(records.some(e => e.type === 'opening_review' && e.status === 'confirmed'));
+  assert.ok(confirmations.some(args => args[1] === 1 && args[2] === 'semantic' && args[3].completed === false));
+  f.stream.autoFollowAudioMs = 8500;
+  f.transcript('我以', {streamId: 's', itemId: 'c', startMs: 8200, endMs: 8500});
+  assert.equal(f.session.currentIndex, 2);
+});
 test('the real server recovers a nearby long paraphrase using stable literal-semantic corroboration without arming an onset', async t => {
   const f = createFixture({allowCueChanges: true, texts: ['你又來了這樣根本沒有用', '你的方法才沒有用', '兩位先冷靜', '我說過', '你們又沒找到問題核心了']});
   t.after(() => f.dispose());

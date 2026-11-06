@@ -3,7 +3,7 @@ const {SemanticTranscript, freshSpeech} = require('./semantic-transcript');
 const {compactInput, selectMatches, requestSemanticCandidate} = require('./semantic-candidates');
 const {normalizeText} = require('./follow-text');
 const {alignedWords} = require('./word-evidence');
-const {corroborateLongMatch} = require('./semantic-corroboration');
+const {corroborateLongMatch, corroborateCurrentMatch} = require('./semantic-corroboration');
 
 // Short/uncertain proposals require independent forward support. A bounded,
 // stable long literal range may also corroborate semantics on the same audio.
@@ -46,10 +46,11 @@ class SemanticFollower {
   }
   corroborate(state, match, data) {
     if (this.invalidReason(state.handlers)) return false;
-    const proof = corroborateLongMatch(state, match);
+    const current = corroborateCurrentMatch(state, match);
+    const proof = current || corroborateLongMatch(state, match);
     if (!proof) return false;
     const {speech, literal} = proof;
-    state.handlers.record('supported', {...data, reason: 'stable_long_text_semantic',
+    state.handlers.record('supported', {...data, reason: current ? 'current_opening_text_semantic' : 'stable_long_text_semantic',
       supportSource: 'joint_text_semantic', independentAudio: false, candidateIndex: match.index,
       textConfidence: literal.confidence, margin: literal.supportMargin, evidence: literal.evidence,
       matchedCharacters: literal.matchedCharacters, firstWordId: speech.firstWordId,

@@ -220,19 +220,21 @@ test('capture worklet emits 20 ms mono PCM frames with no missing samples', () =
   let Processor;
   const packets = [];
   const context = vm.createContext({
-    sampleRate: 48000,
+    sampleRate: 48000, currentFrame: 0,
     AudioWorkletProcessor: class { constructor() { this.port = { postMessage: data => packets.push(data) }; } },
     registerProcessor: (_name, implementation) => { Processor = implementation; },
   });
   vm.runInContext(fs.readFileSync(require.resolve('../../client/src/worklets/mic-capture-processor.js'), 'utf8'), context);
   const processor = new Processor();
   for (let i = 0; i < 15; i += 1) {
+    context.currentFrame = i * 128;
     processor.process([[new Float32Array(128).fill(0.25), new Float32Array(128).fill(0.75)]]);
   }
   assert.equal(packets.length, 2);
-  assert.equal(packets[0].length, 960);
-  assert.equal(packets[1].length, 960);
-  assert.ok(packets.every(packet => packet.every(sample => sample === 0.5)));
+  assert.equal(packets[0].samples.length, 960);
+  assert.equal(packets[1].samples.length, 960);
+  assert.ok(packets.every(packet => packet.samples.every(sample => sample === 0.5)));
+  assert.equal(packets[0].endTime, .02); assert.equal(packets[1].endTime, .04);
 });
 
 test('changing a performance cell clears the previous tracking anchor', () => {

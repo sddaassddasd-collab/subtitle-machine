@@ -12,6 +12,30 @@ const event = (id, startMs, endMs, text = '這是即興發言完全不在劇本�
   ({itemId: id, startMs, endMs, audioMs: endMs, text, isFinal: true});
 const match = (index, extra = {}) => ({index, confidence: 1, evidence: 9, margin: .5, ...extra});
 const establish = p => p.observe(event('anchor', 0, 1000, texts[0]), match(0), 1000);
+test('short paraphrases and moderately unclear speech participate in fallback, but a rewritten prefix is not stable', () => {
+  const {p} = fixture(); establish(p);
+  p.observe(event('a', 1100, 2000, '來說吧'), null, 2000);
+  p.observe({...event('b', 2300, 4500, '當成你最好的朋友'), confidence: .56}, null, 4500);
+  assert.equal(p.maybeLive(4700, 6600).source, 'live');
+  assert.equal(p.reason, 'sustained_unclear_speech');
+  const {p: q} = fixture(); establish(q);
+  q.observe({...event('x', 1100, 2500, '拜託您饒了我'), isFinal: false}, null, 2500);
+  q.observe({...event('x', 1100, 3500, '拜託您饒了我不要關進去'), isFinal: false}, null, 3500);
+  assert.ok(q.mismatch, 'preserved growing prefix is usable before final');
+  q.observe({...event('y', 4000, 5000, '突然完全不同'), isFinal: false}, null, 5000);
+  assert.equal(q.fallbackDecision.reason, 'waiting_for_stable_prefix');
+});
+test('a genuinely long utterance can fall back, while withdrawing evidence cannot leave phantom audio duration', () => {
+  const {p} = fixture(); establish(p);
+  p.observe(event('long', 1100, 8500, '這是一段持續很久而且完全沒有對應任何劇本內容的即興發言'), null, 8500);
+  assert.equal(p.maybeLive(8600, 15000).source, 'live');
+  const {p: q} = fixture(); establish(q);
+  q.observe(event('a', 1100, 3000), null, 3000);
+  q.observe(event('b', 3100, 9000), null, 6000);
+  q.observe({...event('b', 3100, 9000), confidence: .2}, null, 7000);
+  assert.equal(q.mismatch.endMs, 3000);
+  assert.equal(q.maybeLive(9000, 15000), null);
+});
 function enterLive(p) {
   establish(p);
   p.observe(event('x', 1100, 3000), null, 3000);
@@ -136,9 +160,12 @@ test('invalidated, overlapping, cross-scene and boundary-containing overlap rang
 test('audio ticks allow already established mismatch evidence to mature, but silence alone is never evidence', () => {
   const {p} = fixture(); establish(p);
   assert.equal(p.tick(5000, 5000), null);
+  p.tick(6000, 6000);
   p.observe(event('x', 5100, 7000), null, 7000);
+  p.tick(7000, 7000); p.tick(8000, 8000); p.tick(9000, 9000);
   p.observe(event('y', 7100, 10000), null, 10000);
   assert.equal(p.source, 'script');
+  p.tick(10000, 10000); p.tick(11000, 11000);
   assert.equal(p.tick(12000, 12000).source, 'live');
   const {p: stale} = fixture(); establish(stale);
   stale.observe(event('x', 1100, 3000), null, 3000);

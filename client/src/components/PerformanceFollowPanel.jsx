@@ -2,6 +2,7 @@ import {useEffect, useRef, useState} from 'react'
 import './PerformanceFollowPanel.css'
 
 const reasons = {ready: '等待台詞', context_changed: '等待定位', sustained_unmatched_speech: '持續偏離劇本，顯示即時字幕',
+  sustained_unclear_speech: '持續辨識不佳，顯示即時字幕並繼續定位',
   script_reacquired: '已重新找到劇本', overlap_started: '交疊段輔助走格', paced_estimate: '依節奏估計，尚未辨識確認',
   overlap_limit: '交疊段已達上限，等待台詞', capture_gap: '收音中斷，已停止估計', overlap_exit_recognized: '已辨識出口台詞',
   operator_cancel: '已取消交疊走格', operator_pause: '交疊走格已暫停', operator_resume: '交疊走格繼續',
@@ -77,7 +78,7 @@ export default function PerformanceFollowPanel({session, lines, socketRef, runti
       <summary>即興切換與交疊段設定{draft ? '（尚未儲存）' : ''}</summary>
       <label className="checkbox-row"><input type="checkbox" checked={settings.automaticLive}
         onChange={e => edit({...settings, automaticLive: e.target.checked})}/>持續偏離劇本時自動顯示即時字幕，找到可靠台詞後接回（實驗功能）</label>
-      <p className="input-note">先確認過劇本位置，持續收到可用發話且附近台詞對不上時才會切換。短暫改詞交由文字／語意比對；沒有辨識文字時不自動判定為即興。鎖定輸出只固定字幕來源，仍持續定位；人工跳格會取消估計並鎖定劇本來源。</p>
+      <p className="input-note">先確認過劇本位置，持續發話但附近台詞對不上時才會切換；中度低信心文字也會參與累積。短暫改詞交由文字／語意比對；沒有辨識文字或收音中斷時保留目前字幕。鎖定輸出仍持續定位；人工跳格會取消估計並鎖定劇本來源。</p>
       <label className="checkbox-row"><input type="checkbox" checked={settings.scriptCorrection !== false}
         onChange={e => edit({...settings, scriptCorrection: e.target.checked})}/>即時字幕參考附近劇本校正同音／近音錯字</label>
       <p className="input-note">劇本詞彙提示在即時字幕期間也會持續更新。文字校正需 OpenAI 金鑰與後端文字校正功能，依用量計費；先顯示辨識文字，再於背景校正。保留演員的改詞、語尾及即興，原始辨識與時間仍供定位使用，校正文字不作為換格證據。</p>

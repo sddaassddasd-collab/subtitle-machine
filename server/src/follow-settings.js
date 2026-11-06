@@ -63,13 +63,15 @@ const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, 
   textConfidence: .86, phoneticConfidence: .90, textEvidence: 5, literalMatches: 4, textMargin: .10,
   jointConfidence: .82, jointCharacters: 10, jointLiteralMatches: 8, jointCoverage: .75,
   jointProgress: .8, jointMaximumStep: 4, jointAnchorTtlMs: 30000, wordTimestampToleranceMs: 750,
+  currentConfidence: .9, currentTextConfidence: .65, currentLiteralMatches: 4, currentCoverage: .8,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 9, onset: 3, acoustic: 4, diagnostics: 11, semantic: 6, performance: 4, captionCorrection: 1, captionPresentation: 3}),
+  versions: Object.freeze({text: 9, onset: 3, acoustic: 4, diagnostics: 12, semantic: 7, performance: 5, captionCorrection: 1, captionPresentation: 3}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,
   captionCorrection: require('./script-caption-correction').CAPTION_CORRECTION_SETTINGS,
   captionPresentation: require('./caption-presentation').CAPTION_PRESENTATION_SETTINGS,
+  transport: require('./transcription-health').TRANSPORT_SETTINGS,
 });
 module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS};

@@ -45,4 +45,33 @@ function corroborateLongMatch(state, match) {
   return literal ? {speech, literal} : null;
 }
 
-module.exports = {corroborateLongMatch};
+// A displayed short opening already fixes the position. Verify that SAME cue
+// with a stable timed span and substantial literal coverage; never use this
+// shortcut to relocate, confirm a negated line, or invent a sentence ending.
+function corroborateCurrentMatch(state, match) {
+  const h = state.handlers, context = h.corroborationContext?.(), original = match.speech;
+  if (!context || !original || match.tier !== 'high' || !Number.isFinite(match.matchConfidence) || match.matchConfidence < S.currentConfidence ||
+    !h.textCandidates || context.predictionSource !== 'opening' || !context.predicted ||
+    match.index !== context.displayIndex || !context.allowed(match.index)) return null;
+  const anchor = context.anchor;
+  if (!anchor?.literal || anchor.confidence < S.minimumConfidence ||
+    anchor.index !== match.index - 1 || original.startMs < anchor.atMs ||
+    original.endMs - anchor.atMs > S.jointAnchorTtlMs) return null;
+  const item = state.memory.items.get(original.itemId), latest = item?.revisions.at(-1);
+  const record = {itemId: original.itemId, text: normalizeText(original.text), rawText: original.text,
+    startMs: original.startMs, endMs: original.endMs};
+  const speech = latest && preservedSpeech(latest, record, S.wordTimestampToleranceMs);
+  if (!speech || context.audioMs - speech.endMs > S.maximumResultAgeMs ||
+    meaningMarkers(speech.text) !== meaningMarkers(match.text)) return null;
+  const stable = latest.isFinal || item.revisions.some(r => r.inputId !== latest.inputId &&
+    latest.receivedAt - r.receivedAt >= S.interimStableMs && preservedSpeech(r, record, S.wordTimestampToleranceMs));
+  if (!stable) return null;
+  const literal = h.textCandidates(speech).find(c => c.index === match.index && !c.phonetic &&
+    normalizeText(c.speech?.text || c.heard || '') === normalizeText(speech.text) &&
+    c.confidence >= S.currentTextConfidence && c.matchedCharacters >= S.currentLiteralMatches &&
+    c.matchedCharacters / c.length >= S.currentCoverage && c.offset / c.length >= S.currentCoverage &&
+    c.supportMargin >= S.textMargin);
+  return literal ? {speech, literal} : null;
+}
+
+module.exports = {corroborateLongMatch, corroborateCurrentMatch};

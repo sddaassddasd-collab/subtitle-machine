@@ -46,7 +46,8 @@ class MicCaptureProcessor extends AudioWorkletProcessor {
           }
           this.pendingSampleCount -= takeCount;
         }
-        this.port.postMessage(batch, [batch.buffer]);
+        const endTime = (currentFrame + frameCount - this.pendingSampleCount) / sampleRate;
+        this.port.postMessage({samples: batch, endTime}, [batch.buffer]);
       }
     }
     return true;

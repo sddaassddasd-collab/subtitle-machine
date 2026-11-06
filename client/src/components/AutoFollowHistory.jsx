@@ -12,7 +12,8 @@ const eventNames = {run_start: '開始紀錄', run_end: '結束紀錄', interrup
   cue_heard: '文字涵蓋字幕', audio_reset: '重設聲音累積', audio_position: '更新聲音搜尋位置',
   decision_trace: '決策前後紀錄', transcript_revision: '辨識修訂', acoustic_summary: '聲音比對摘要',
   capture_summary: '收音品質摘要', stream_configuration: '辨識與程式設定', problem_mark: '問題標記',
-  capture_status: '收音狀態', capture_audio: '收到現場音訊', control_mode: '跟戲模式切換'}
+  capture_status: '收音狀態', capture_audio: '收到現場音訊', control_mode: '跟戲模式切換',
+  capture_health: '收音中斷與恢復', transport_health: '辨識傳輸與伺服器負載', fallback_decision: '即時字幕接手判斷'}
 const captureNames = {ready: '辨識連線就緒', connecting: '辨識連線中', paused: '已暫停', error: '發生錯誤'}
 const time = at => at == null ? '—' : new Date(at).toLocaleString('zh-TW', {timeZone: 'Asia/Taipei', hour12: false,
   year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3})

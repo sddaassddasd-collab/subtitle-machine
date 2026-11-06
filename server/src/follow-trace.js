@@ -87,6 +87,10 @@ function clientMetadata(value) {
   const audio = source.audio && typeof source.audio === 'object' ? source.audio : {};
   return {build: {commit: String(source.build?.commit || 'unknown').slice(0, 80), builtAt: String(source.build?.builtAt || '').slice(0, 40)},
     userAgent: String(source.userAgent || '').slice(0, 400),
+    captureId: typeof source.captureId === 'string' ? source.captureId.slice(0, 100) : '',
+    captureClock: typeof source.captureClock === 'string' ? source.captureClock.slice(0, 80) : '',
+    recovery: source.recovery ? {reason: String(source.recovery.reason || '').slice(0, 80),
+      attempt: Math.max(0, Math.min(3, Number(source.recovery.attempt) || 0))} : null,
     audio: Object.fromEntries(['contextSampleRate', 'sampleRate', 'channelCount', 'echoCancellation', 'noiseSuppression', 'autoGainControl']
       .filter(key => typeof audio[key] === 'boolean' || (Number.isFinite(audio[key]) && audio[key] >= 0))
       .map(key => [key, audio[key]]))};

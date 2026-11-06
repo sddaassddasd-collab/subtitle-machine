@@ -13,6 +13,7 @@ import AutoFollowHistory from '../components/AutoFollowHistory'
 import ControlOutputPreview from '../components/ControlOutputPreview'
 import {APP_BUILD} from '../lib/build-info'
 import {signalMetrics} from '../lib/audio-signal'
+import {CaptureRecovery, CAPTURE_LIMITS, captureAgeMs} from '../lib/capture-recovery'
 import {resolveControlPosition} from '../lib/control-position'
 import {
   areProjectorLayoutsEqual,
@@ -210,6 +211,7 @@ const CUE_CONFIRM_TIMEOUT_MS = 2000
 const TRANSCRIPTION_CONTEXT_SAVE_DELAY_MS = 500
 
 const TARGET_SAMPLE_RATE = 24000
+const MIC_DIAGNOSTIC_UPDATE_MS = 500
 const MIC_CAPTURE_WORKLET_URL = new URL(
   '../worklets/mic-capture-processor.js',
   import.meta.url,
@@ -1173,6 +1175,8 @@ const ControlPage = () => {
     resumeListenersCleanup: null,
   })
   const transcriptionAttemptRef = useRef(0)
+  const [captureRecovery] = useState(() => new CaptureRecovery())
+  const captureStartRef = useRef(null)
   const projectorLayoutInputValues = useMemo(
     () => ({
       fontSizePercent: String(projectorLayout.fontSizePercent),
@@ -1491,7 +1495,13 @@ const ControlPage = () => {
   }, [])
 
   const applyTranscriptionPayload = useCallback((rawTranscription) => {
+    const captureId = captureStateRef.current.captureId
+    if (captureId && rawTranscription?.captureId && rawTranscription.captureId !== captureId) return
     const nextTranscription = normalizeTranscriptionState(rawTranscription)
+    if (nextTranscription.status === 'error') {
+      if (rawTranscription?.recoverable) captureRecovery.request('provider_backpressure')
+      else captureRecovery.cancel()
+    }
     setTranscription(() => {
       if (transcriptionContextDirtyRef.current) {
         return {
@@ -1504,7 +1514,7 @@ const ControlPage = () => {
         nextTranscription.transcriptionContext
       return nextTranscription
     })
-  }, [])
+  }, [captureRecovery])
 
   const applySessionPayload = useCallback(
     (payload) => {
@@ -2048,10 +2058,16 @@ const ControlPage = () => {
     }
 
     const markSocketDisconnected = () => {
+      captureRecovery.request('control_disconnected')
       setMicDiagnostics((prev) => ({
         ...prev,
         socketConnected: false,
       }))
+    }
+
+    const handleCaptureHealth = (payload) => {
+      if (payload?.recoverable && payload.captureId === captureStateRef.current.captureId)
+        captureRecovery.request(payload.reason || 'capture_stalled')
     }
 
     const handleSessionDeleted = () => {
@@ -2075,6 +2091,7 @@ const ControlPage = () => {
     socket.on('connect', markSocketConnected)
     socket.on('reconnect', rejoinAndRefresh)
     socket.on('disconnect', markSocketDisconnected)
+    socket.on('control:capture-health', handleCaptureHealth)
     socket.on('control:update', applySessionPayload)
     socket.on('control:position', handlePositionUpdate)
     socket.on('control:output', setOutput)
@@ -2093,6 +2110,7 @@ const ControlPage = () => {
     }
 
     return () => {
+      captureRecovery.cancel()
       disposed = true
       releaseMicrophoneCapture()
       if (sessionId) {
@@ -2110,6 +2128,7 @@ const ControlPage = () => {
     applyTranscriptionPayload,
     persistTranscriptionContext,
     requestCueScroll,
+    captureRecovery,
   ])
 
   useEffect(() => {
@@ -2121,6 +2140,7 @@ const ControlPage = () => {
   }, [clearPendingLineClick, clearTranscriptionContextSaveTimer])
 
   useEffect(() => {
+    if (captureStateRef.current.starting) return
     if (transcription.active || transcription.status === 'connecting') {
       return
     }
@@ -2235,7 +2255,7 @@ const ControlPage = () => {
     if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) {
       const started = await handleStartLiveTranscription({ autoFollow: true })
       if (!started) return
-    } else if (autoStartedTranscriptionRef.current) {
+    } else if (autoStartedTranscriptionRef.current || (captureRecovery.desired && captureRecovery.options?.autoFollow)) {
       handleStopLiveTranscription({ autoFollow: true })
     }
 
@@ -2563,7 +2583,12 @@ const ControlPage = () => {
       return true
     }
 
+    if (!options.recovering) captureRecovery.arm({autoFollow, languageOverride: selectedSourceLanguage})
+    const intentGeneration = captureRecovery.generation
+
     let attemptId, acquiredStream, pendingContext, pendingCleanup
+    const canceled = () => attemptId !== transcriptionAttemptRef.current ||
+      intentGeneration !== captureRecovery.generation || !captureRecovery.desired
     const discardPendingCapture = () => {
       if (pendingContext && pendingContext === captureStateRef.current.audioContext) return
       pendingCleanup?.()
@@ -2597,7 +2622,7 @@ const ControlPage = () => {
         },
       })
       acquiredStream = stream
-      if (attemptId !== transcriptionAttemptRef.current) { discardPendingCapture(); return false }
+      if (canceled()) { discardPendingCapture(); return false }
 
       const AudioContextClass = window.AudioContext || window.webkitAudioContext
       if (!AudioContextClass) {
@@ -2607,7 +2632,7 @@ const ControlPage = () => {
       const audioContext = new AudioContextClass()
       pendingContext = audioContext
       await audioContext.resume()
-      if (attemptId !== transcriptionAttemptRef.current) { discardPendingCapture(); return false }
+      if (canceled()) { discardPendingCapture(); return false }
 
       const sourceNode = audioContext.createMediaStreamSource(stream)
       const silenceNode = audioContext.createGain()
@@ -2616,16 +2641,24 @@ const ControlPage = () => {
       let transcriptionReady = false
       let nextAudioSequence = 1
       let lastAckDiagnosticAt = 0
+      let lastSampleAt = Date.now()
+      const captureId = `${lastSampleAt}:${attemptId}`
 
       const sendAudioPacket = (packet) => {
         if (attemptId !== transcriptionAttemptRef.current) return
         const socket = socketRef.current
-        if (!socket?.connected || !sessionId) return
+        if (!socket?.connected || !sessionId || captureRecovery.pending || !captureRecovery.desired) return
+        if (Date.now() - packet.capturedAt > CAPTURE_LIMITS.maximumAgeMs) {
+          captureRecovery.request('capture_backlog'); return
+        }
         socket.emit('transcription:audio', {
           ...packet, stale: Date.now() - packet.capturedAt > 250, clientAgeMs: Math.max(0, Date.now() - packet.capturedAt),
         }, (ack) => {
+          if (attemptId !== transcriptionAttemptRef.current) return
           const acknowledgedAt = Date.now()
-          if (ack?.ok === true && acknowledgedAt - lastAckDiagnosticAt < 120) return
+          if (ack?.ok === true) captureStateRef.current.lastAckAt = acknowledgedAt
+          if (ack?.recoverable) captureRecovery.request('provider_backpressure')
+          if (ack?.ok === true && acknowledgedAt - lastAckDiagnosticAt < MIC_DIAGNOSTIC_UPDATE_MS) return
           lastAckDiagnosticAt = acknowledgedAt
           setMicDiagnostics((prev) => ({
             ...prev,
@@ -2645,9 +2678,18 @@ const ControlPage = () => {
         })
       }
 
-      const emitSamples = (sourceSamples) => {
+      const emitSamples = (sourceSamples, endTime = audioContext.currentTime) => {
         if (attemptId !== transcriptionAttemptRef.current) return
         if (!sourceSamples?.length) return
+        const now = Date.now(), ageMs = captureAgeMs(audioContext.currentTime, endTime)
+        lastSampleAt = now
+        captureStateRef.current.lastSampleAt = now
+        captureStateRef.current.lastCaptureAgeMs = ageMs
+        if (ageMs > CAPTURE_LIMITS.maximumAgeMs) {
+          if (transcriptionReady) captureRecovery.request('capture_backlog')
+          return
+        }
+        if (captureRecovery.pending) return
         const socket = socketRef.current
         if (!socket || !sessionId) return
 
@@ -2664,10 +2706,10 @@ const ControlPage = () => {
         const durationMs = (pcm16.length / TARGET_SAMPLE_RATE) * 1000
         const metrics = signalMetrics(downsampled)
         const level = metrics.level
-        const now = Date.now()
-        if (now - micDiagnosticsUpdateRef.current > 120) {
+        if (now - micDiagnosticsUpdateRef.current > MIC_DIAGNOSTIC_UPDATE_MS) {
           micDiagnosticsUpdateRef.current = now
           setMicDiagnostics((prev) => ({
+            ...prev,
             active: true,
             lastLevel: Number(level.toFixed(4)),
             lastSentAt: now,
@@ -2681,7 +2723,9 @@ const ControlPage = () => {
           durationMs,
           level,
           sequence: nextAudioSequence,
-          capturedAt: now,
+          captureId,
+          capturedAt: now - ageMs,
+          captureAgeMs: ageMs,
           quality: {peak: metrics.peak, clippedSamples: metrics.clippedSamples, samples: metrics.samples},
         }
         nextAudioSequence += 1
@@ -2706,7 +2750,7 @@ const ControlPage = () => {
         typeof AudioWorkletNodeClass === 'function'
       ) {
         await audioContext.audioWorklet.addModule(MIC_CAPTURE_WORKLET_URL.href)
-        if (attemptId !== transcriptionAttemptRef.current) { discardPendingCapture(); return false }
+        if (canceled()) { discardPendingCapture(); return false }
         const workletNode = new AudioWorkletNodeClass(
           audioContext,
           'mic-capture-processor',
@@ -2717,11 +2761,9 @@ const ControlPage = () => {
           },
         )
         workletNode.port.onmessage = (workletEvent) => {
-          const sourceSamples = workletEvent.data
+          const sourceSamples = workletEvent.data?.samples
           if (sourceSamples instanceof Float32Array) {
-            emitSamples(sourceSamples)
-          } else if (sourceSamples?.length > 0) {
-            emitSamples(Float32Array.from(sourceSamples))
+            emitSamples(sourceSamples, workletEvent.data.endTime)
           }
         }
         sourceNode.connect(workletNode)
@@ -2738,7 +2780,7 @@ const ControlPage = () => {
           ) {
             channels.push(event.inputBuffer.getChannelData(channelIndex))
           }
-          emitSamples(mixChannelsToMono(channels))
+          emitSamples(mixChannelsToMono(channels), event.playbackTime)
         }
         sourceNode.connect(processorNode)
         processorNode.connect(silenceNode)
@@ -2803,6 +2845,11 @@ const ControlPage = () => {
         captureNode,
         silenceNode,
         resumeListenersCleanup,
+        lastSampleAt,
+        lastAckAt: null,
+        readyAt: null,
+        captureId,
+        starting: true,
       }
 
       const trackSettings = stream.getAudioTracks()[0]?.getSettings?.() || {}
@@ -2818,6 +2865,7 @@ const ControlPage = () => {
               apiKey,
               autoFollow,
               clientInfo: {build: APP_BUILD, userAgent: navigator.userAgent,
+                captureId, captureClock: 'audio-thread-v1', recovery: options.recovery,
                 audio: {contextSampleRate: audioContext.sampleRate, ...captureSettings}},
               provider: transcription.provider || DEFAULT_TRANSCRIPTION_PROVIDER,
               model: transcription.model || DEFAULT_TRANSCRIPTION_MODEL,
@@ -2839,13 +2887,16 @@ const ControlPage = () => {
           )
       })
       if (startResult?.ok !== true) {
-        throw new Error(startResult?.reason || '語音辨識服務未就緒')
+        throw Object.assign(new Error(startResult?.reason || '語音辨識服務未就緒'), {recoverable: startResult?.recoverable === true})
       }
-      if (attemptId !== transcriptionAttemptRef.current || captureStateRef.current.audioContext !== audioContext) {
+      if (canceled() || captureStateRef.current.audioContext !== audioContext) {
         throw new Error('麥克風收音已停止')
       }
       transcriptionReady = true
-      pendingAudioPackets.splice(0).forEach(sendAudioPacket)
+      captureStateRef.current.starting = false
+      captureStateRef.current.readyAt = Date.now()
+      // Startup is a new provider clock; never replay the permission/connect backlog.
+      pendingAudioPackets.length = 0
       if (!autoFollow) {
         projectorDisplayModeDirtyRef.current = true
         projectorDisplayModeDraftRef.current =
@@ -2871,6 +2922,7 @@ const ControlPage = () => {
       autoStartedTranscriptionRef.current = false
       projectorStartedTranscriptionRef.current = false
       releaseMicrophoneCapture()
+      if (!options.recovering || error?.recoverable === false || ['NotAllowedError', 'NotFoundError'].includes(error?.name)) captureRecovery.cancel()
       socketRef.current?.emit('transcription:stop', { sessionId })
       setTranscription((prev) => ({
         ...prev,
@@ -2886,7 +2938,40 @@ const ControlPage = () => {
     }
   }
 
+  useEffect(() => { captureStartRef.current = handleStartLiveTranscription })
+
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      const state = captureStateRef.current, now = Date.now()
+      if (captureRecovery.exhausted) {
+        captureRecovery.cancel()
+        releaseMicrophoneCapture()
+        socketRef.current?.emit('transcription:stop', {sessionId, preserveText: true})
+        setStatus({kind: 'error', message: '收音自動恢復未成功，請重新啟動收音或手動接管。'})
+        return
+      }
+      if (captureRecovery.desired && !captureRecovery.pending && !captureRecovery.inFlight && state.readyAt) {
+        const reason = now - (state.lastSampleAt || state.readyAt) > CAPTURE_LIMITS.sampleGapMs ? 'capture_stalled'
+          : now - (state.lastAckAt || state.readyAt) > CAPTURE_LIMITS.ackGapMs ? 'audio_ack_timeout' : null
+        if (reason && captureRecovery.request(reason, now))
+          setStatus({kind: 'info', message: '收音傳輸停滯，正在恢復；目前字幕保留。'})
+      }
+      const options = captureRecovery.take(socketRef.current?.connected, now)
+      if (!options) return
+      socketRef.current.emit('transcription:health', {sessionId, reason: options.recovery.reason,
+        captureId: state.captureId, sampleAgeMs: now - (state.lastSampleAt || now),
+        ackAgeMs: now - (state.lastAckAt || now), captureAgeMs: state.lastCaptureAgeMs || 0})
+      setStatus({kind: 'info', message: `正在恢復收音（${options.recovery.attempt}／${CAPTURE_LIMITS.maximumAttempts}），目前字幕保留。`})
+      const ok = await captureStartRef.current?.(options)
+      captureRecovery.complete(options.generation, ok)
+      if (!captureRecovery.desired && options.generation === captureRecovery.generation)
+        setStatus({kind: 'error', message: '收音自動恢復未成功，請重新啟動收音或手動接管。'})
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [captureRecovery, sessionId])
+
   const changeCaptionMode = async (mode, language) => {
+    captureRecovery.cancel()
     if (!socketRef.current?.connected) throw new Error('尚未連上節目，請稍後再試')
     const response = await new Promise((resolve, reject) => socketRef.current.timeout(5000).emit('caption:set-mode', {
       sessionId, mode, language,
@@ -2941,12 +3026,14 @@ const ControlPage = () => {
   }
 
   const handlePauseLiveCaptions = () => {
+    captureRecovery.cancel()
     releaseMicrophoneCapture()
     socketRef.current?.emit('transcription:stop', {sessionId, preserveText: true})
     setStatus({kind: 'info', message: '已暫停收音，字幕保留；可繼續收音或返回劇本'})
   }
 
   const handleStopLiveTranscription = (options = {}) => {
+    captureRecovery.cancel()
     if (!sessionId) return
     releaseMicrophoneCapture()
     socketRef.current?.emit('transcription:stop', { sessionId })

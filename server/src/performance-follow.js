@@ -2,8 +2,9 @@ const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 4, mismatchMs: 4500, mismatchAudioMs: 3000,
-  minimumItems: 2, minimumCharacters: 12, stableMs: 900, semanticGraceMs: 2500,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 5, mismatchMs: 4500, mismatchAudioMs: 3000,
+  minimumItems: 2, minimumCharacters: 8, minimumSpeechConfidence: .35,
+  longItemMs: 6500, longItemCharacters: 18, stablePrefixCharacters: 3, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
   switchHoldMs: 4000, maximumLagMs: 5000, bufferMs: 6000, bufferItems: 3,
   returnConfidence: .94, returnCharacters: 5, returnMargin: .12, returnAhead: 18,
@@ -62,6 +63,7 @@ class PerformanceFollower {
       lastReliableIndex: this.lastReliable?.index ?? null, backgroundIndex: this.backgroundIndex ?? null,
       backgroundConfirmedIndex: this.backgroundConfirmed?.index ?? null,
       searchWindow: this.lastSearchWindow ?? null, returnDecision: this.returnDecision ?? null,
+      fallbackDecision: this.fallbackDecision ?? null,
       preparedIndex: this.prepared && Date.now() - this.prepared.at < 15000 ? this.prepared.index : null,
       group: this.group ? {id: this.group.id, name: this.group.name, start: this.group.start,
         end: this.group.end, index: this.group.index, paused: this.group.paused,
@@ -93,6 +95,14 @@ class PerformanceFollower {
   hasRecentScriptContext(now = Date.now()) {
     return this.source !== 'live' || now - (this.backgroundConfirmed?.at ?? this.switchedAt) <= PERFORMANCE_SETTINGS.scriptContextTtlMs;
   }
+  forgetMismatch(itemId) {
+    const m = this.mismatch;
+    if (!m) return;
+    m.items.delete(itemId);
+    if (!m.items.size) { this.mismatch = null; return; }
+    m.startMs = Math.min(...[...m.items.values()].map(x => x.startMs));
+    m.endMs = Math.max(...[...m.items.values()].map(x => x.endMs));
+  }
   speech(event, now) {
     if (!event.itemId || !Number.isFinite(event.startMs) || !Number.isFinite(event.endMs) || event.endMs <= event.startMs) return null;
     if (event.audioMs - event.endMs > PERFORMANCE_SETTINGS.maximumLagMs || event.endMs > event.audioMs + 250) return null;
@@ -100,12 +110,16 @@ class PerformanceFollower {
     const prior = this.buffer.find(x => x.itemId === event.itemId);
     if (!fresh || !normalizeText(fresh.text)) {
       if (prior) this.buffer = this.buffer.filter(x => x !== prior);
-      this.mismatch?.items.delete(event.itemId);
+      this.forgetMismatch(event.itemId);
       return null;
     }
     const text = String(fresh.text).slice(-300), unchanged = prior?.text === text;
+    const a = normalizeText(prior?.text), b = normalizeText(text);
+    let prefix = 0; while (prefix < a.length && a[prefix] === b[prefix]) prefix++;
+    const preservesPrefix = prefix >= PERFORMANCE_SETTINGS.stablePrefixCharacters;
     const entry = {itemId: event.itemId, startMs: fresh.startMs, endMs: fresh.endMs, text,
-      at: now, stableAt: unchanged ? prior.stableAt : now, isFinal: event.isFinal === true, id: event.itemId};
+      at: now, stableAt: unchanged || preservesPrefix ? prior.stableAt : now,
+      confidence: event.confidence, isFinal: event.isFinal === true, id: event.itemId};
     this.buffer = this.buffer.filter(x => x.itemId !== entry.itemId && x.endMs > event.audioMs - PERFORMANCE_SETTINGS.bufferMs);
     this.buffer.push(entry); this.buffer.sort((a, b) => a.endMs - b.endMs);
     this.buffer = this.buffer.slice(-PERFORMANCE_SETTINGS.bufferItems);
@@ -117,22 +131,33 @@ class PerformanceFollower {
       match = returnMatch(this.stableMatches, event, match, now, PERFORMANCE_SETTINGS);
       this.returnWitnesses = this.returnWitnesses.filter(w => w.itemId !== event.itemId || preservedSpeech(event, w));
     }
-    if (match && Number.isInteger(match.index)) return this.recognize(match, event, now);
+    if (match && Number.isInteger(match.index)) {
+      this.recognitionReliable = false;
+      const action = this.recognize(match, event, now);
+      if (this.source === 'live' || action || this.recognitionReliable) return action;
+    }
     if (this.source === 'live') {
       this.returnDecision = {reason: 'no_reliable_candidate'};
     }
-    if (!speech || this.group || this.source === 'live' || this.lock !== 'auto' || !this.settings.automaticLive || !this.lastReliable) return null;
-    if (Number.isFinite(event.confidence) && event.confidence < .6) {
-      this.mismatch?.items.delete(event.itemId); return null;
+    const reject = !speech ? 'no_fresh_speech' : this.group ? 'overlap_active' : this.source === 'live' ? 'already_live'
+      : this.lock !== 'auto' ? 'operator_script_lock' : !this.settings.automaticLive ? 'disabled'
+        : !this.lastReliable ? 'no_script_anchor' : null;
+    if (reject) { this.fallbackDecision = {reason: reject}; return null; }
+    if (Number.isFinite(event.confidence) && event.confidence < PERFORMANCE_SETTINGS.minimumSpeechConfidence) {
+      this.forgetMismatch(event.itemId);
+      this.fallbackDecision = {reason: 'speech_confidence_too_low', confidence: event.confidence}; return null;
     }
-    if (!speech.isFinal && now - speech.stableAt < PERFORMANCE_SETTINGS.stableMs) return null;
+    if (!speech.isFinal && now - speech.stableAt < PERFORMANCE_SETTINGS.stableMs) {
+      this.fallbackDecision = {reason: 'waiting_for_stable_prefix', stableMs: now - speech.stableAt}; return null;
+    }
     if (this.mismatch && speech.startMs - this.mismatch.endMs > PERFORMANCE_SETTINGS.mismatchGapMs) this.mismatch = null;
     const m = this.mismatch ||= {at: now, startMs: speech.startMs, endMs: -1, items: new Map()};
     if (speech.endMs <= m.endMs && !m.items.has(speech.itemId)) return null;
     m.items.set(speech.itemId, speech);
     // Revisions replace evidence, never count as an additional utterance.
-    m.endMs = Math.max(...[...m.items.values()].map(x => x.endMs));
     while (m.items.size > 12) m.items.delete(m.items.keys().next().value);
+    m.startMs = Math.min(...[...m.items.values()].map(x => x.startMs));
+    m.endMs = Math.max(...[...m.items.values()].map(x => x.endMs));
     return this.maybeLive(event.audioMs, now);
   }
   maybeLive(audioMs, now) {
@@ -141,13 +166,24 @@ class PerformanceFollower {
       audioMs - m.endMs > PERFORMANCE_SETTINGS.maximumLagMs) return null;
     const parts = [...m.items.values()].sort((a, b) => a.startMs - b.startMs);
     if (!parts.length) return null;
-    let end = -1, items = 0, characters = 0;
-    for (const part of parts) if (part.startMs >= end) { items++; characters += normalizeText(part.text).length; end = part.endMs; }
-    if (items < PERFORMANCE_SETTINGS.minimumItems || characters < PERFORMANCE_SETTINGS.minimumCharacters ||
-      now - m.at < PERFORMANCE_SETTINGS.mismatchMs || m.endMs - m.startMs < PERFORMANCE_SETTINGS.mismatchAudioMs ||
-      now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs || now - this.semanticAt < PERFORMANCE_SETTINGS.semanticGraceMs) return null;
+    let end = -1, items = 0, characters = 0, unclear = false;
+    for (const part of parts) if (part.startMs >= end) {
+      items++; characters += normalizeText(part.text).length; end = part.endMs;
+      if (Number.isFinite(part.confidence) && part.confidence < .6) unclear = true;
+    }
+    const elapsedMs = now - m.at, speechMs = m.endMs - m.startMs;
+    const longItem = items === 1 && characters >= PERFORMANCE_SETTINGS.longItemCharacters &&
+      speechMs >= PERFORMANCE_SETTINGS.longItemMs && elapsedMs >= PERFORMANCE_SETTINGS.longItemMs;
+    const reason = items < PERFORMANCE_SETTINGS.minimumItems && !longItem ? 'needs_distinct_speech'
+      : characters < PERFORMANCE_SETTINGS.minimumCharacters ? 'needs_more_characters'
+        : elapsedMs < PERFORMANCE_SETTINGS.mismatchMs ? 'mismatch_hold'
+          : speechMs < PERFORMANCE_SETTINGS.mismatchAudioMs ? 'needs_more_audio'
+            : now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs ? 'switch_hold'
+              : now - this.semanticAt < PERFORMANCE_SETTINGS.semanticGraceMs ? 'semantic_grace' : null;
+    this.fallbackDecision = {reason: reason || 'ready', items, characters, elapsedMs, speechMs, unclear};
+    if (reason) return null;
     this.buffer = this.buffer.filter(x => x.endMs > audioMs - PERFORMANCE_SETTINGS.bufferMs);
-    return this.transition('live', 'sustained_unmatched_speech', now);
+    return this.transition('live', unclear ? 'sustained_unclear_speech' : 'sustained_unmatched_speech', now);
   }
   recognize(match, event, now = Date.now()) {
     const {index} = match, line = this.lines[index];
@@ -216,9 +252,9 @@ class PerformanceFollower {
     }
     const reliable = match.semantic || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
       (match.pathConfirmed && match.evidence >= 4);
-    this.mismatch = null;
-    if (!reliable) return null;
-    if (endMs <= this.lastConfirmedEnd) return null;
+    if (!reliable || endMs <= this.lastConfirmedEnd) return null;
+    this.recognitionReliable = true;
+    this.mismatch = null; this.fallbackDecision = {reason: 'script_matched', index};
     this.confirm(index, startMs, endMs, now);
     let exitedGroupId = null;
     if (this.group && index > this.group.end) {
@@ -260,7 +296,12 @@ class PerformanceFollower {
     const lastAt = this.lastPacketAt; this.lastPacketAt = now;
     const lastAudioMs = this.lastPacketAudioMs; this.lastPacketAudioMs = audioMs;
     const g = this.group;
-    if (!g) return this.maybeLive(audioMs, now);
+    if (!g) {
+      if (lastAt !== undefined && now - lastAt > PERFORMANCE_SETTINGS.audioGapMs) {
+        this.mismatch = null; this.fallbackDecision = {reason: 'capture_gap'}; return null;
+      }
+      return this.maybeLive(audioMs, now);
+    }
     if (audioMs >= g.expiresAudioMs || now - g.startedAt >= g.maximumSeconds * 1000 ||
       (lastAt !== undefined && now - lastAt > PERFORMANCE_SETTINGS.audioGapMs) ||
       (lastAudioMs !== undefined && audioMs - lastAudioMs > PERFORMANCE_SETTINGS.audioGapMs)) {
