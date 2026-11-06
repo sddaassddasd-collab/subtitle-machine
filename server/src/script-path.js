@@ -50,10 +50,10 @@ function isCurrentSuffix(script, currentIndex, text, best, currentCandidate) {
 // Weaker evidence has its own lane: it must not out-rank or erase the normal
 // path. Only a recent, literal text anchor permits this three-cue recovery.
 function observeWeakScriptPath(tracker, script, currentIndex, candidates, event) {
-  const anchor = tracker.lastLocated;
+  const anchor = tracker.textAnchor || tracker.lastLocated;
   const anchored = anchor?.literal && anchor.confidence >= T.strongConfidence &&
     currentIndex >= anchor.index && currentIndex <= anchor.index + 1 &&
-    event.startMs >= anchor.atMs && event.endMs - anchor.atMs <= T.pathTtlMs;
+    event.startMs >= anchor.atMs && event.endMs - anchor.atMs <= T.weakAnchorTtlMs;
   if (!anchored) { tracker.weakPath = {hypotheses: [], lastMs: -1}; return null; }
   const lane = tracker.weakPath ||= {hypotheses: [], lastMs: -1};
   if (event.endMs <= lane.lastMs) return null;
@@ -85,4 +85,4 @@ function observeWeakScriptPath(tracker, script, currentIndex, candidates, event)
   const c = candidates.find(c => c.index === best.index);
   return c ? {...c, weakPath: true, pathConfirmed: true, pathSteps: best.steps} : null;
 }
-module.exports = {observeScriptPath, observeWeakScriptPath, isCurrentSuffix};
+module.exports = {observeScriptPath, observeWeakScriptPath, isCurrentSuffix, ...require('./word-path')};

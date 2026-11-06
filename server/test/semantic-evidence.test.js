@@ -176,7 +176,9 @@ test('the exact compact API input and candidates are logged and linked to transc
   const requested = h.records.find(r => r.status === 'requested');
   assert.deepEqual(requested.input, sent);
   assert.equal(sent.latest.inputId, 'raw-revision-id');
-  assert.equal(sent.latest.words, undefined, 'word timings do not bloat the model prompt');
+  assert.deepEqual(sent.latest.words, [{id: 0, text: '內容'}]);
+  assert.ok(!JSON.stringify(sent).includes('confidence'));
+  assert.ok(!JSON.stringify(sent).includes('startMs'));
   assert.deepEqual(requested.candidates.map(c => c.index), [0, 1, 2, 3, 4]);
 });
 

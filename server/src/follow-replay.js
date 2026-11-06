@@ -21,6 +21,7 @@ function replayFollow(report, implementation = engine) {
     const result = implementation.followTranscript(tracker, lines, currentIndex, {
       streamId: event.providerStreamId, itemId: event.itemId, order: event.order,
       text: event.text, startMs: event.audioStartMs, endMs: event.audioEndMs, isFinal: event.isFinal,
+      words: event.words, revisionId: event.revisionId || event.id,
     });
     const alignmentMs = performance.now() - started;
     maximumAlignmentMs = Math.max(maximumAlignmentMs, alignmentMs);
@@ -30,8 +31,8 @@ function replayFollow(report, implementation = engine) {
     reasons[reason] = (reasons[reason] || 0) + 1;
     if (Number.isInteger(result.index)) {
       verified.add(result.index);
-      if (result.index !== currentIndex) decisions.push({at: event.at, audioEndMs: event.audioEndMs,
-        fromIndex: currentIndex, index: result.index, reason});
+      if (result.index !== currentIndex) decisions.push({at: event.at, audioEndMs: result.evidence?.endMs ?? event.audioEndMs,
+        fromIndex: currentIndex, index: result.index, reason, wordWitnesses: result.candidate?.wordWitnesses});
       currentIndex = result.index;
     }
   }

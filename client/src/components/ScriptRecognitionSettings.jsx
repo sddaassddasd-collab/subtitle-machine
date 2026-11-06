@@ -43,7 +43,7 @@ export default function ScriptRecognitionSettings({sessionId, socketRef, vocabul
       onChange={event => { revision.current++; setSemanticEnabled(event.target.checked) }}/>
       啟用 AI 語意恢復（實驗功能，需 OpenAI 金鑰，依用量計費）
     </label>
-    <small>文字定位失敗時，送辨識文字、同句修訂及附近劇本。語意候選需後續獨立的文字或語意證據支持才恢復位置，不推測句尾；一般換格不等待 AI。</small>
+    <small>文字定位失敗時，送辨識文字、詞編號、同句修訂及附近劇本。語意候選需不重疊的文字或語意證據支持才恢復位置，不推測句尾；一般換格不等待 AI。</small>
     <button type="button" disabled={saving} onClick={save}>{saving ? '儲存中…' : '儲存詞彙與診斷設定'}</button>
     {message && <p role="status">{message}</p>}
     {preview.length > 0 && <details><summary>本次附近台詞的提示詞預覽</summary><p>{preview.join('、')}</p></details>}

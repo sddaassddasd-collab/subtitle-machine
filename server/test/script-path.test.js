@@ -39,7 +39,7 @@ test('three ordered weak cues require a recent literal anchor and never reuse an
     if (mode === 'direction') entries[1].source.type = 'direction';
     let result;
     for (let i = 0; i < 3; i++) {
-      const start = mode === 'expired' ? 15000 + i * 1000 : mode === 'overlap' ? 500 : 500 + i * 1000;
+      const start = mode === 'expired' ? 35000 + i * 1000 : mode === 'overlap' ? 500 : 500 + i * 1000;
       const choices = [weak(i + 2), ...(mode === 'ambiguous' ? [weak(i + 3)] : [])];
       result = observeWeakScriptPath(tracker, {...script, entries}, 0, choices,
         event(mode === 'same_item' ? 'a' : `a${i}`, start, start + 1000 + (mode === 'overlap' ? i * 1000 : 0)));

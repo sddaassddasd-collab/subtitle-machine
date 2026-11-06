@@ -1,10 +1,10 @@
 // Script following is independent of ASR segment boundaries and display state.
 // Times are milliseconds on the provider's audio clock, never arrival wall time.
-const OpenCC = require('opencc-js');
-const traditionalize = OpenCC.Converter({ from: 'cn', to: 'twp' });
+const {normalizeText} = require('./follow-text');
+const {freshSpeech, wordWindows} = require('./word-evidence');
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
-const {observeScriptPath, observeWeakScriptPath, isCurrentSuffix} = require('./script-path');
+const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const MAX_HEARD = T.maxHeard;
 const SEQUENCE_TTL_MS = T.sequenceTtlMs;
 const DIRECTION_SILENCE_MS = O.directionSilenceMs;
@@ -60,11 +60,6 @@ function prepareScript(lines, previous) {
   return { entries, chars, phonemes, bigrams, positions, starts, exactLines };
 }
 
-function normalizeText(text) {
-  return traditionalize(String(text || '').normalize('NFKC'))
-    .replace(/[（(][^（）()]{0,80}[）)]/gu, '')
-    .replace(/[\p{P}\p{Z}\p{S}\s]/gu, '').toLocaleLowerCase();
-}
 
 function createTracker({ ignoreBeforeMs = -1 } = {}) {
   return {
@@ -78,8 +73,10 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     referenceFence: null,
     referenceProgress: null,
     lastLocated: null,
+    textAnchor: null,
     path: {hypotheses: [], lastMs: -1},
     weakPath: {hypotheses: [], lastMs: -1},
+    wordPath: {hypotheses: []},
   };
 }
 
@@ -170,7 +167,7 @@ function traceAlignment(input, text, freePrefix = true) {
 }
 
 function matchedSpans(best, script) {
-  if (best.confidence < T.strongConfidence || best.contextualShort || best.weakPath) return [];
+  if (best.confidence < T.strongConfidence || best.contextualShort || best.weakPath || best.locationOnly) return [];
   const input = Array.from(best.heard).slice(-MAX_HEARD);
   const end = script.starts[best.index] + best.offset;
   const start = Math.max(0, end - MAX_HEARD * 2);
@@ -193,29 +190,49 @@ function matchedSpans(best, script) {
 
 // One edit in a short, already located cue is useful evidence, even when an
 // added particle changes the last character. Never use this for reacquisition.
-function matchContextualShort(tracker, script, currentIndex, text, event) {
+function matchContextualShort(tracker, script, currentIndex, text, event, next = false) {
   const recent = tracker.sequence?.index === currentIndex && event.endMs >= tracker.sequence.atMs &&
     event.endMs - tracker.sequence.atMs <= SEQUENCE_TTL_MS;
   const predicted = tracker.prediction?.index === currentIndex && event.endMs >= tracker.prediction.onsetMs &&
     event.endMs - tracker.prediction.onsetMs <= SEQUENCE_TTL_MS;
   if (!recent && !predicted) return null;
-  const entry = script.entries[currentIndex], input = Array.from(text);
+  let index = currentIndex;
+  if (next) {
+    index++;
+    if (!recent || script.entries[currentIndex]?.next !== index || script.entries[currentIndex].source.music ||
+      script.entries[index]?.source.type === 'direction') return null;
+    const speech = freshSpeech({...event, text}, tracker.sequence.observed.endMs);
+    if (!speech) return null;
+    text = normalizeText(speech.text);
+  }
+  const entry = script.entries[index], input = Array.from(text);
   if (!entry?.text || entry.source.music || entry.length < T.shortMinLength || entry.length > T.shortMaxLength ||
     Math.abs(input.length - entry.length) > 1) return null;
   const {cost, pairs} = traceAlignment(input, Array.from(entry.text), false);
   const missingShort = entry.length === T.shortMinLength && input.length === T.predictedShortMatchedCharacters &&
-    (predicted || recent) && pairs.length === input.length;
+    !next && (predicted || recent) && pairs.length === input.length;
   if (cost !== T.shortMaxEdits || pairs.length < (missingShort ? T.predictedShortMatchedCharacters : T.shortMatchedCharacters)) return null;
   // A similar nearby phrase cannot be resolved by a one-edit allowance alone.
-  for (let index = Math.max(0, currentIndex - T.nearbyBehind); index <= Math.min(script.entries.length - 1, currentIndex + T.nearbyAhead); index++) {
-    if (index === currentIndex) continue;
-    const other = script.entries[index];
+  for (let otherIndex = Math.max(0, currentIndex - T.nearbyBehind); otherIndex <= Math.min(script.entries.length - 1, currentIndex + T.nearbyAhead); otherIndex++) {
+    if (otherIndex === index) continue;
+    const other = script.entries[otherIndex];
     if (!other.text || Math.abs(other.length - input.length) > 1) continue;
     if (traceAlignment(input, Array.from(other.text), false).cost <= cost) return null;
   }
   const confidence = Math.max(missingShort ? T.contextualShortConfidence : 0, 1 - cost / Math.max(input.length, entry.length));
-  return {index: currentIndex, offset: pairs.at(-1).script + 1, length: entry.length,
-    confidence, rank: confidence, evidence: pairs.length, heard: text, contextualShort: true};
+  return {index, offset: pairs.at(-1).script + 1, length: entry.length,
+    confidence, rank: confidence, evidence: pairs.length, heard: text, contextualShort: true,
+    ...(next ? {shortNext: true, locationOnly: true} : {})};
+}
+
+function canRecoverShort(tracker, script, currentIndex, best, event) {
+  const anchor = tracker.textAnchor;
+  return Boolean(anchor && currentIndex >= anchor.index && currentIndex <= anchor.index + 1 &&
+    event.startMs >= anchor.atMs && event.endMs - anchor.atMs <= T.weakAnchorTtlMs &&
+    best?.index > currentIndex + 1 && best.index <= currentIndex + T.recoveryAhead && best.confidence === 1 &&
+    best.heard === normalizeText(event.text) && best.heard === script.entries[best.index].text &&
+    best.evidence >= T.shortRecoveryEvidence && script.exactLines.get(best.heard)?.length === 1 &&
+    !script.entries.slice(currentIndex, best.index + 1).some(e => e.source.music || e.source.type === 'direction'));
 }
 
 // Only a recently established local position permits filler/trailing-word
@@ -261,7 +278,7 @@ function canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous)
     best.index > currentIndex + 1 && best.index <= currentIndex + T.recoveryAhead &&
     event.endMs - anchor.atMs >= T.recoveryAfterMs && event.endMs - anchor.atMs <= T.recoveryTtlMs &&
     event.startMs >= anchor.atMs && best.confidence >= T.recoveryMinimumConfidence &&
-    best.evidence >= T.recoveryMinimumEvidence &&
+    (best.evidence >= T.recoveryMinimumEvidence || canRecoverShort(tracker, script, currentIndex, best, event)) &&
     !script.entries.slice(currentIndex, best.index + 1).some(entry => entry.source.music));
 }
 
@@ -521,8 +538,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.referenceFence = null;
     tracker.referenceProgress = null;
     tracker.lastLocated = null;
+    tracker.textAnchor = null;
     tracker.path = {hypotheses: [], lastMs: -1};
     tracker.weakPath = {hypotheses: [], lastMs: -1};
+    tracker.wordPath = {hypotheses: []};
   }
   tracker.script = script;
   if (event.startMs < tracker.latestStartMs ||
@@ -614,6 +633,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
     candidates = [short, ...candidates.filter(candidate => candidate.index !== currentIndex)];
     best = short;
   }
+  if (!short && (!best || best.confidence < T.minimumConfidence)) {
+    const nextShort = matchContextualShort(tracker, script, currentIndex, text, event, true);
+    if (nextShort) { best = nextShort; candidates = [best, ...candidates.filter(c => c.index !== best.index)]; }
+  }
   const correction = suffixConflict || pathCandidate ? null : evaluateCorrection(tracker, script, currentIndex, text, event);
   const corrected = correction?.candidates[0];
   const next = script.entries[currentIndex]?.next;
@@ -642,6 +665,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const uncertain = (reason, message) => {
     if (tracker.referenceProgress?.index === currentIndex && tracker.referenceProgress.completed &&
       event.endMs <= tracker.referenceProgress.audioEndMs) return {ignored: true, reason: 'older_than_reference_completion'};
+    if (!suffixConflict && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(reason)) {
+      const words = recoverWordPosition(tracker, script, lines, currentIndex, {...event, text, minimumIndex: item.maxIndex ?? -1});
+      if (words) return words;
+    }
     tracker.directionWait = null;
     if (!waitingForOpening && !(text.length <= 2 && tracker.located && tracker.anchor &&
       event.endMs - tracker.anchor.endMs <= SEQUENCE_TTL_MS)) {
@@ -694,7 +721,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const recoveredNearby = relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous);
   if (relocation) {
     if (best.confidence < (best.weakPath ? T.weakPathConfidence : best.pathConfirmed ? T.minimumConfidence : T.strongConfidence) ||
-      (!best.pathConfirmed && text.length < T.relocationEvidence) || (ambiguous && !exactUnique && !best.pathConfirmed)) {
+      (!best.pathConfirmed && text.length < T.relocationEvidence && !recoveredNearby) || (ambiguous && !exactUnique && !best.pathConfirmed)) {
       return uncertain('relocation_requirements', '疑似跳詞，正在核對新的位置。');
     }
     if (!best.pathConfirmed && !recoveredNearby && (!correction?.accepted || corrected.index !== best.index)) {
@@ -718,15 +745,23 @@ function followTranscript(tracker, lines, currentIndex, event) {
     observed: { itemId: event.itemId, text, endMs: event.endMs } };
   tracker.lastLocated = {index: best.index, atMs: event.endMs, confidence: best.confidence,
     literal: !best.phonetic && !best.trailingCharacters && !best.weakPath && best.evidence >= T.relocationEvidence};
-  if (relocation) tracker.correction.pending = null;
   const entry = script.entries[best.index];
+  const shortAnchor = best.confidence === 1 && best.evidence >= T.shortAnchorEvidence && !best.context &&
+    entry.text.includes(best.heard) && !script.entries.some((e, i) => i !== best.index &&
+      i >= best.index - T.nearbyBehind && i <= best.index + T.nearbyAhead && e.text.includes(best.heard));
+  if (!best.phonetic && !best.trailingCharacters && !best.weakPath &&
+    best.confidence >= T.strongConfidence && (tracker.lastLocated.literal || shortAnchor))
+    tracker.textAnchor = {...tracker.lastLocated, literal: true};
+  const shortRecovery = recoveredNearby && best.evidence < T.recoveryMinimumEvidence;
+  if (shortRecovery) best = {...best, locationOnly: true, shortRecovery: true};
+  if (relocation) tracker.correction.pending = null;
   const tail = entry.tail;
   // Only arm from the actual end of a line, never merely from ASR is_final.
-  const completed = !best.weakPath && !best.phonetic && !best.trailingCharacters && progress === 1 && best.confidence >= T.strongConfidence &&
+  const completed = !best.locationOnly && !best.weakPath && !best.phonetic && !best.trailingCharacters && progress === 1 && best.confidence >= T.strongConfidence &&
     best.heard.endsWith(tail) && (best.evidence >= 3 || expectedShort);
   const following = entry.next;
   const nearEnding = progress >= T.nearEndingProgress && entry.length - best.offset <= T.nearEndingRemaining;
-  const canPrepare = !best.weakPath && !best.phonetic && !best.trailingCharacters && (completed || nearEnding) && best.confidence >= T.strongConfidence && following === best.index + 1 &&
+  const canPrepare = !best.locationOnly && !best.weakPath && !best.phonetic && !best.trailingCharacters && (completed || nearEnding) && best.confidence >= T.strongConfidence && following === best.index + 1 &&
     !lines[best.index]?.music && !lines[following]?.music;
   tracker.preparedIndex = canPrepare ? following : null;
   tracker.armedIndex = canPrepare && completed ? following : null;
@@ -749,7 +784,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   }
   return {
     index: best.index, candidate: best, progress, completed, armedIndex: tracker.armedIndex,
-    reason: best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
+    reason: best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
       : best.trailingCharacters ? 'trailing_tolerance' : best.colloquial ? 'local_colloquial' : best.recovered ? 'suffix_recovery'
       : best.openingConfirmed ? 'opening_confirmed' : 'text_matched',
     spans: matchedSpans(best, script),
@@ -888,6 +923,40 @@ function applyReferencePosition(tracker, lines, index, evidence) {
   return true;
 }
 
+function recoverWordPosition(tracker, script, lines, currentIndex, event) {
+  const anchor = tracker.textAnchor;
+  if (!anchor || currentIndex < anchor.index || currentIndex > anchor.index + 1 ||
+    event.endMs - anchor.atMs > T.weakAnchorTtlMs) return null;
+  let to = Math.min(lines.length - 1, currentIndex + T.weakPathAhead);
+  for (let i = currentIndex; i <= to; i++) if (lines[i].music || lines[i].type === 'direction') { to = i - 1; break; }
+  const candidates = [];
+  for (const speech of wordWindows(event, {maximumWords: T.wordWindowWords, windowWords: T.wordWindowLength,
+    maximumCharacters: T.wordWindowCharacters})) {
+    if (speech.startMs < anchor.atMs) continue;
+    const heard = normalizeText(speech.text);
+    for (let index = currentIndex; index <= to; index++) {
+      const entry = script.entries[index];
+      if (heard.length > entry.length / T.weakPathConfidence ||
+        Array.from(heard).filter(char => entry.text.includes(char)).length < T.shortMatchedCharacters) continue;
+      for (const c of align(heard, script, index, index, {local: true})) {
+        if (c.confidence < T.weakPathConfidence || c.matchedCharacters < Math.min(T.shortAnchorEvidence, entry.length) || c.offset < 2) continue;
+        candidates.push({...c, speech, rank: c.confidence + .01 * Math.min(c.evidence, 12)});
+      }
+    }
+  }
+  const best = observeWordPath(tracker, script, currentIndex, candidates, event);
+  if (!best || (tracker.prediction && best.speech.endMs <= tracker.prediction.onsetMs) ||
+    !applySemanticLocation(tracker, lines, best.index, best.speech)) return null;
+  tracker.candidates = [{index: best.index, confidence: best.confidence, progress: 0}];
+  // Text ranges can establish a new position; this path never supplies a
+  // completed ending, fake intermediate visits or an onset preparation.
+  if (best.confidence >= T.strongConfidence && best.matchedCharacters >= T.shortAnchorEvidence)
+    tracker.textAnchor = {index: best.index, atMs: best.speech.endMs, confidence: best.confidence, literal: true};
+  return {index: best.index, candidate: best, progress: 0, completed: false, armedIndex: null, spans: [],
+    evidence: {startMs: best.speech.startMs, endMs: best.speech.endMs},
+    reason: 'word_span_recovery', status: 'corrected', message: '已依不重疊詞區間恢復附近位置，持續核對台詞。'};
+}
+
 // Isolated new speech only: no earlier ASR items, expectation bonus or global
 // correction. Competing nearby lines remain present for ambiguity checks.
 function localSupportCandidates(script, currentIndex, text) {
@@ -914,6 +983,7 @@ function applySemanticLocation(tracker, lines, index, event) {
   tracker.prediction = null; tracker.referenceFence = null; tracker.referenceProgress = null;
   tracker.path = {hypotheses: [], lastMs: event.endMs};
   tracker.weakPath = {hypotheses: [], lastMs: event.endMs};
+  tracker.wordPath = {hypotheses: []};
   tracker.correction = createCorrection();
   tracker.lastLocated = {index, atMs: event.endMs};
   tracker.sequence = {index, atMs: event.endMs, observed: {itemId: event.itemId,

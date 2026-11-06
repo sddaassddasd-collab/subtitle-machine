@@ -1,5 +1,6 @@
 const {SEMANTIC_SETTINGS: S} = require('./follow-settings');
-const {normalizeText} = require('./auto-follow');
+const {normalizeText} = require('./follow-text');
+const {timedWords, freshSpeech} = require('./word-evidence');
 
 // Bounded hypotheses, not a concatenated transcript. Superseded ASR words are
 // labelled alternatives; their audio still belongs to the same observation.
@@ -16,14 +17,7 @@ class SemanticTranscript {
     }
     const last = item.revisions.at(-1);
     if (last?.isFinal || (last?.text === event.text && last.isFinal === Boolean(event.isFinal))) return null;
-    const words = Array.isArray(event.words) ? event.words.slice(-S.maximumWords).flatMap(w => {
-      const startMs = Number.isFinite(w.startMs) ? w.startMs : w.start * 1000;
-      const endMs = Number.isFinite(w.endMs) ? w.endMs : w.end * 1000;
-      return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs &&
-        startMs >= event.startMs && endMs <= event.endMs + 1
-        ? [{text: String(w.word || w.text || '').slice(0, 80), startMs, endMs,
-          confidence: Number.isFinite(w.confidence) ? w.confidence : null}] : [];
-    }) : [];
+    const words = timedWords(event, S.maximumWords);
     const sequence = ++this.sequence;
     const revision = {inputId: event.revisionId || `${event.itemId}:${sequence}`, itemId: event.itemId,
       text: String(event.text).slice(-S.heardCharacters), startMs: event.startMs, endMs: event.endMs,
@@ -71,15 +65,4 @@ class SemanticTranscript {
 }
 function commonPrefix(a, b) { let i = 0; while (i < a.length && a[i] === b[i]) i++; return i; }
 
-// Whole new items are independent. Overlap or same-item growth needs actual
-// timestamped words forming the latest hypothesis's suffix, never text diff.
-function freshSpeech(revision, afterMs) {
-  if (revision.endMs <= afterMs) return null;
-  if (revision.startMs >= afterMs) return revision;
-  const words = revision.words.filter(w => w.startMs >= afterMs);
-  if (!words.length || words.some((w, i) => i && w.startMs < words[i - 1].endMs)) return null;
-  const text = words.map(w => w.text).join('');
-  if (!normalizeText(text) || !normalizeText(revision.text).endsWith(normalizeText(text))) return null;
-  return {...revision, text, words, startMs: words[0].startMs, endMs: words.at(-1).endMs};
-}
 module.exports = {SemanticTranscript, freshSpeech};

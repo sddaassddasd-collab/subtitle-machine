@@ -69,7 +69,7 @@ test('the real server sends superseded interim words separately when the final l
   await flush();
   assert.equal(input.heard, '我真的呢要使用我的');
   assert.equal(input.alternatives[0].text, '我真的呢要使用我的搔癢');
-  assert.equal(input.evidenceEndMs, 2000);
+  assert.equal(input.evidenceEndMs, undefined, 'audio clocks stay in local diagnostics');
   assert.equal(f.session.currentIndex, 0);
 });
 test('newer successful literal positioning invalidates outstanding semantic inference immediately', async t => {
@@ -104,4 +104,27 @@ test('semantic candidates cannot skip across music and stage direction boundarie
     assert.deepEqual(candidates.map(c => c.index), [0, 1]);
     assert.equal(f.session.currentIndex, 0);
   }
+});
+
+test('the server maps the final cue inside one ASR item and exports disjoint supporting word ranges without completion', async t => {
+  const f = createFixture({allowCueChanges: true, texts: ['目前的台詞完全不一樣', '你們的論點', '既是對的', '又是錯的']});
+  t.after(() => f.dispose());
+  const events = [], confirmations = [];
+  f.history.event = (sessionId, type, data) => events.push({type, ...data});
+  f.history.confirm = (...args) => confirmations.push(args);
+  f.enableSemantic(async () => ({choices: [{message: {content: JSON.stringify({ambiguous: false, matches: [
+    {index: 1, matchConfidence: .95, firstWordId: 0, lastWordId: 2},
+    {index: 2, matchConfidence: .85, firstWordId: 3, lastWordId: 6},
+  ]})}}]}));
+  const words = ['你們的', '論', '點', '哎', '其實', '對', '的'].map((word, i) => ({word, start: i, end: i + 1}));
+  f.stream.autoFollowAudioMs = 7000;
+  f.transcript(words.map(w => w.word).join(''), {streamId: 's', itemId: 'a', startMs: 0, endMs: 7000, words, isFinal: true});
+  await flush();
+  assert.equal(f.session.currentIndex, 2);
+  assert.equal(f.state().lastDecision.source, 'semantic');
+  assert.equal(f.state().lastDecision.firstWordId, 3);
+  assert.equal(f.state().lastDecision.supportingLastWordId, 2);
+  assert.equal(f.state().armedIndex, null);
+  assert.equal(confirmations.length, 0);
+  assert.ok(events.some(e => e.reason === 'word_span_text' && e.matchConfidence === .85));
 });

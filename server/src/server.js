@@ -8982,6 +8982,9 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
       audioEndMs: decision.audioEndMs, onsetAudioMs: decision.onsetAudioMs, silenceAudioMs: decision.silenceAudioMs,
       supportSource: decision.supportSource, proposalInputId: decision.proposalInputId,
       supportingInputId: decision.supportingInputId,
+      firstWordId: decision.firstWordId, lastWordId: decision.lastWordId,
+      supportingFirstWordId: decision.supportingFirstWordId, supportingLastWordId: decision.supportingLastWordId,
+      wordWitnesses: decision.wordWitnesses,
     } : null,
   });
   const continuous = !manualOverride && nextIndex === session.currentIndex + 1 &&
@@ -9399,6 +9402,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0,
       phonetic: result.candidate.phonetic === true, pathConfirmed: result.candidate.pathConfirmed === true,
       weakPath: result.candidate.weakPath === true,
+      wordEvidence: result.candidate.wordEvidence === true, shortRecovery: result.candidate.shortRecovery === true,
+      locationOnly: result.candidate.locationOnly === true, wordWitnesses: result.candidate.wordWitnesses,
       pathSteps: result.candidate.pathSteps || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
@@ -9413,9 +9418,9 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     confidence: result.candidate?.confidence ?? null, message: result.message,
     ...(Number.isInteger(result.index) ? { lastVerifiedAt: now } : {}),
   });
-  const evidence = {...followHistoryClock(sessionId), text: sanitizeLineText(transcript).slice(0, 2000),
+  const evidence = {...followHistoryClock(sessionId), text: sanitizeLineText(result.candidate?.wordEvidence ? result.candidate.speech.text : transcript).slice(0, 2000),
     itemId: options.itemId, providerStreamId: options.streamId,
-    audioMs: options.endMs ?? null, audioStartMs: options.startMs ?? null,
+    audioMs: result.evidence?.endMs ?? options.endMs ?? null, audioStartMs: result.evidence?.startMs ?? options.startMs ?? null,
     candidateIndex: result.candidate?.index, confidence: result.candidate?.confidence,
     message: result.message, candidates: state.tracker.candidates?.slice(0, 3), alignmentMs: state.lastAlignmentMs};
   if (result.spans?.length) {
@@ -9428,8 +9433,10 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   }
   if (Number.isInteger(result.index) && result.index !== session.currentIndex) {
     recordAutoFollowDecision(sessionId, result.index, result.status === 'corrected' ? 'correction' : 'transcript', {
-      transcriptReceivedAt: receivedAt, transcriptAudioLagMs: state.lastTranscriptAudioLagMs,
-      transcriptAudioEndMs: options.endMs,
+      transcriptReceivedAt: receivedAt, transcriptAudioLagMs: result.evidence && Number.isFinite(audioMs)
+        ? Math.max(0, audioMs - result.evidence.endMs) : state.lastTranscriptAudioLagMs,
+      transcriptAudioEndMs: result.evidence?.endMs ?? options.endMs,
+      wordWitnesses: result.candidate?.wordWitnesses,
     });
     updateAutoFollowState(sessionId, { lastAdvancedAt: now });
     applyCurrentIndexChange(session, result.index);
@@ -9478,8 +9485,12 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
       if (!applySemanticLocation(tracker, lines, candidate.index, speech)) return;
       recordAutoFollowDecision(sessionId, candidate.index, 'semantic', {transcriptReceivedAt: receivedAt,
         transcriptAudioEndMs: speech.endMs, semanticSupported: true, supportSource: speech.supportSource,
-        proposalInputId: speech.proposalInputId, supportingInputId: speech.inputId});
-      updateAutoFollowState(sessionId, {lastAdvancedAt: Date.now(), status: AUTO_FOLLOW_STATUS.ADVANCED,
+        proposalInputId: speech.proposalInputId, supportingInputId: speech.inputId,
+        firstWordId: speech.firstWordId, lastWordId: speech.lastWordId,
+        supportingFirstWordId: speech.supportingFirstWordId, supportingLastWordId: speech.supportingLastWordId});
+      updateAutoFollowState(sessionId, {lastAdvancedAt: Date.now(), started: true, listening: true,
+        lastCandidateIndex: candidate.index, lastCandidateText: lines[candidate.index]?.text || '', confidence: null,
+        status: AUTO_FOLLOW_STATUS.ADVANCED,
         message: '已由語意候選及後續獨立證據恢復位置，等待文字核對。'});
       applyCurrentIndexChange(session, candidate.index);
     },

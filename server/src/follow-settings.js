@@ -17,6 +17,8 @@ const TEXT_SETTINGS = Object.freeze({
   pathWidth: 4, pathTtlMs: 12000, pathMinimumEvidence: 3, pathMinimumSteps: 2,
   pathMaximumStep: 2, pathSkipPenalty: 0.025, pathRetention: 0.7,
   weakPathConfidence: .70, weakPathEvidence: 5, weakPathMatches: 4, weakPathMinimumSteps: 3, weakPathAhead: 6,
+  weakAnchorTtlMs: 30000, shortRecoveryEvidence: 5, shortAnchorEvidence: 4,
+  wordWindowWords: 24, wordWindowLength: 12, wordWindowCharacters: 60, wordPathSteps: 2, wordRevisionToleranceMs: 200,
   phoneticCost: 0.35, phoneticMinimumMatches: 4,
   fullScanCharacters: 2000, correctionWindowCount: 12,
   normalization: 'NFKC/opencc-cn-twp/remove-parentheses-punctuation',
@@ -51,14 +53,14 @@ const DIAGNOSTIC_SETTINGS = Object.freeze({
   maxPendingEvents: 5000, maxPendingBytes: 8 * 1024 * 1024, flushMs: 250,
 });
 const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, cooldownMs: 3000,
-  maximumResultAgeMs: 5000, minimumConfidence: .88, supportTtlMs: 15000, maximumStep: 2,
+  maximumResultAgeMs: 5000, minimumConfidence: .88, candidateConfidence: .75, supportTtlMs: 15000, maximumStep: 2,
   minimumTextLength: 6, ahead: 18, cueCharacters: 300, heardCharacters: 500,
   historyMs: 8000, historyItems: 8, revisionsPerItem: 4, alternatives: 2, previousItems: 2,
   previousCharacters: 160, maximumWords: 128, interimStableMs: 600, requestsPerItem: 2, newTextCharacters: 4,
   textConfidence: .86, phoneticConfidence: .90, textEvidence: 5, literalMatches: 4, textMargin: .10,
-  weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2});
+  weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 7, onset: 1, acoustic: 4, diagnostics: 4, semantic: 2}),
+  versions: Object.freeze({text: 8, onset: 1, acoustic: 4, diagnostics: 5, semantic: 3}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
 });
