@@ -13,7 +13,7 @@ const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates } = require('./auto-follow');
 const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
-const {trackerSnapshot, clientMetadata} = require('./follow-trace');
+const {trackerSnapshot, clientMetadata, captureTransportDetails} = require('./follow-trace');
 const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
 const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
 const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
@@ -9358,6 +9358,8 @@ function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} 
       nextState.performance.rates = [...previousState.performance.rates];
       nextState.performance.usedGroups = new Set(previousState.performance.usedGroups);
       nextState.captionDisplay.reconnect(previousState.captionDisplay, session.currentIndex, session.selectedCellId);
+      if (!session.automaticLive && (previousState.started || previousState.performance.lastReliable || previousState.tracker.captureRecovery))
+        nextState.tracker.captureRecovery = {index: session.currentIndex};
     }
   }
   if (session?.automaticLive) {
@@ -13764,6 +13766,7 @@ io.on('connection', (socket) => {
       reason: String(data.reason || '').slice(0, 80), captureId: String(data.captureId || '').slice(0, 100),
       cause: String(data.cause || '').slice(0, 100),
       attempt: Math.max(0, Math.min(3, Number(data.attempt) || 0)),
+      ...captureTransportDetails(data),
       ...Object.fromEntries(['sampleAgeMs', 'ackAgeMs', 'captureAgeMs'].filter(k => Number.isFinite(data[k]))
         .map(k => [k, Math.max(0, Math.min(600000, data[k]))]))});
   });

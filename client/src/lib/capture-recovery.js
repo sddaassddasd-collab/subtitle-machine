@@ -14,9 +14,11 @@ export class CaptureRecovery {
     if (this.desired) this.report?.({reason: 'recovery_cancelled', cause, attempt: this.attempts || 0})
     this.desired = false; this.pending = false; this.inFlight = false; this.exhausted = false
     this.afterFlightReason = null; this.generation = (this.generation || 0) + 1
+    this.reconnecting = false
   }
   arm(options) {
     this.cancel('new_capture_intent'); this.desired = true; this.options = options; this.attempts = 0; this.stableAt = 0
+    this.lastTransport = null
   }
   request(reason, now = Date.now()) {
     if (!this.desired || this.pending) return false
@@ -36,7 +38,7 @@ export class CaptureRecovery {
     this.startedAt = now
     this.report?.({reason: 'recovery_attempt', cause: this.reason, attempt: this.attempts})
     return {...this.options, forceRestart: true, preserveTextOnRestart: true, recovering: true,
-      recovery: {reason: this.reason, attempt: this.attempts}, generation: this.generation}
+      recovery: {reason: this.reason, attempt: this.attempts, ...(this.lastTransport ? {transport: this.lastTransport} : {})}, generation: this.generation}
   }
   complete(generation, ok, now = Date.now()) {
     if (generation !== this.generation || !this.desired) return

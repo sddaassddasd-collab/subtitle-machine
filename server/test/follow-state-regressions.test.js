@@ -4,6 +4,8 @@ const fixture = require('./helpers/audio-server-fixture');
 const {normalizePerformanceSettings, PerformanceFollower} = require('../src/performance-follow');
 const {CaptionPresentation} = require('../src/caption-presentation');
 const {suffixSpeech} = require('../src/word-evidence');
+const {createTracker, followTranscript} = require('../src/auto-follow');
+const distantLines = Array.from({length: 130}, (_, i) => `遠處另一幕完全不相干的場景與對話內容編號${i}`);
 const flush = async () => {for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))};
 
 function setup(t, texts) {
@@ -35,6 +37,17 @@ test('the reported multi-cue suffix stays verified in the fallback arbiter with 
   assert.equal(f.follower().mismatch, null);
   assert.equal(f.follower().fallbackDecision.reason, 'script_matched');
   assert.equal(f.session.automaticLive, undefined);
+});
+
+test('recorded ASR revisions keep the current ending before the prepared two-character cue, without jumping ahead', () => {
+  const recorded = require('./fixtures/cue-tail.json'), tracker = createTracker(), decisions = [];
+  let index = recorded.initialIndex;
+  for (const event of recorded.events) {
+    const result = followTranscript(tracker, recorded.lines, index, {...event, streamId: 'recorded'});
+    if (Number.isInteger(result.index)) index = result.index;
+    if (['感到快樂', '另外', '另外快樂'].includes(event.text)) decisions.push({text: event.text, index: index + 1});
+  }
+  assert.deepEqual(decisions, [{text: '感到快樂', index: 15}, {text: '另外', index: 16}, {text: '另外快樂', index: 17}]);
 });
 
 test('a matched suffix starting inside a provider word uses that whole word without estimating an inner timestamp', () => {
@@ -98,6 +111,50 @@ test('script-mode capture recovery preserves position and allows fallback before
   assert.equal(f.session.automaticLive, true);
   assert.equal(f.session.currentIndex, 0);
   assert.notEqual(f.follower().fallbackDecision.reason, 'no_script_anchor');
+});
+
+test('the reported capture restart reacquires an isolated distinctive nearby suffix on the new word clock', t => {
+  const f = setup(t, ['他就會被關進隔離所裡進行快樂教育', '直到他重新感到快樂',
+    '這就是快樂王國一直保持快樂的秘密', '有一天', ...distantLines]);
+  const revisions = []; f.history.revision = (_id, text, _options, data) => revisions.push({text, ...data});
+  f.say('他就會被關進隔離所裡進行快樂教育', 'old', 70000, 72000);
+  f.restartTracking(); f.restartTracking();
+  f.say('一直保持', 'new', 0, 880, 74000, {isFinal: false,
+    words: [{word: '一直保持', startMs: 0, endMs: 880}]});
+  assert.equal(f.session.currentIndex, 0);
+  f.say('一直保持快樂的秘密', 'new', 0, 1920, 75000,
+    {words: [{word: '一直保持快樂的秘密', startMs: 0, endMs: 1920}]});
+  assert.equal(f.session.currentIndex, 2);
+  assert.equal(revisions.at(-1).reason, 'capture_reacquired');
+  assert.equal(f.follower().lastReliable.endMs, 1920);
+  assert.equal(f.state().preparedIndex, 3);
+});
+
+test('the capture shortcut requires fresh word clocks and distinctive speech without music barriers; ordinary relocation keeps its own rules', t => {
+  for (const [text, endMs, words, boundary] of [
+    ['一直保持快樂的秘密', 1920, false, null], ['快樂', 1920, true, null],
+    ['一直保持快樂的秘密', 9000, true, null], ['一直保持快樂的秘密', 1920, true, {music: true}],
+  ]) {
+    const f = setup(t, ['他就會被關進隔離所裡進行快樂教育', {text: '直到他重新感到快樂', ...boundary},
+      '這就是快樂王國一直保持快樂的秘密', ...distantLines]);
+    const revisions = []; f.history.revision = (_id, _text, _options, data) => revisions.push(data);
+    f.say('他就會被關進隔離所裡進行快樂教育', 'old', 70000, 72000); f.restartTracking();
+    f.say(text, 'new', 0, endMs, 80000, {words: words ? [{word: text, startMs: 0, endMs}] : undefined});
+    assert.notEqual(revisions.at(-1).reason, 'capture_reacquired', text);
+    if (text === '快樂') assert.equal(f.session.currentIndex, 0);
+  }
+});
+
+test('a normally verified three-character cue clears the previous mismatch instead of switching to live captions immediately afterwards', t => {
+  const f = setup(t, ['想必你是準備要寫一首讓大家快樂的歌吧', '歌手說', '喔對我會準備寫一首歌']);
+  f.say('想必你是準備要寫一首讓大家快樂的歌吧', 'anchor', 0, 1000);
+  f.say('完全不同的內容需要重新理解', 'x', 1100, 3000, 3000);
+  f.say('而且還有其他的話要說', 'y', 3100, 6000, 6000);
+  f.say('歌手說', 'cue', 6100, 6800, 6800,
+    {words: [{word: '歌手說', startMs: 6100, endMs: 6800}]});
+  f.tick(7300, 7600);
+  assert.equal(f.session.currentIndex, 1); assert.notEqual(f.session.automaticLive, true);
+  assert.equal(f.follower().mismatch, null); assert.equal(f.follower().lastReliable.index, 1);
 });
 
 test('capture recovery holds visible wording without reusing old ASR IDs or time fences', () => {

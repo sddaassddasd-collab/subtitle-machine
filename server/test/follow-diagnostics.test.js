@@ -1,9 +1,22 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {FollowTrace, trackerSnapshot, transcriptDetails, clientMetadata} = require('../src/follow-trace');
+const {FollowTrace, trackerSnapshot, transcriptDetails, clientMetadata, captureTransportDetails} = require('../src/follow-trace');
 const {CaptureSummary, AcousticSummary} = require('../src/follow-metrics');
 const {DIAGNOSTIC_SETTINGS: D, FOLLOW_SETTINGS} = require('../src/follow-settings');
 const {createTracker, followTranscript} = require('../src/auto-follow');
+
+test('capture transport snapshots retain queue and RTT evidence across recovery without arbitrary client data', () => {
+  const transport = {transportType: 'polling', inFlightPackets: 50, inFlightAudioMs: 1000, oldestAckAgeMs: 1400,
+    engineQueuedBytes: 70000, webSocketBufferedBytes: Infinity, rttMs: 900, apiKey: 'never export'};
+  const clean = captureTransportDetails(transport);
+  assert.equal(clean.transportType, 'polling'); assert.equal(clean.oldestAckAgeMs, 1400);
+  assert.equal(clean.engineQueuedBytes, 70000); assert.equal(clean.apiKey, undefined);
+  assert.equal(clean.webSocketBufferedBytes, undefined);
+  const metadata = clientMetadata({captureTransport: {version: 1, maximumInFlightMs: 1000},
+    recovery: {reason: 'capture_transport_backlog', attempt: 1, transport}});
+  assert.equal(metadata.captureTransport.maximumInFlightMs, 1000);
+  assert.deepEqual(metadata.recovery.transport, clean);
+});
 
 test('decision windows retain pre/post samples, coalesce triggers and never duplicate sample IDs', () => {
   const trace = new FollowTrace(), chunks = [];

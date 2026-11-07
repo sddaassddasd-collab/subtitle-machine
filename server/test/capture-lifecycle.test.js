@@ -11,7 +11,7 @@ function fixture({waitPermission=false,waitResume=false}={}) {
   const track={stops:0,readyState:'live',stop(){this.stops++;this.readyState='ended';}};
   const media={getTracks:()=>[track],getAudioTracks:()=>[track]};
   const attempts={current:0},capture={current:{}},node=()=>({connect(){},disconnect(){},gain:{value:0}});
-  const calls={backendStops:0,listenerCount:0,audio:[]},statuses=[],contexts=[];
+  const calls={backendStops:0,listenerCount:0,audio:[],reconnects:0,transportCloses:0},statuses=[],contexts=[];
   const events={addEventListener(){calls.listenerCount++;},removeEventListener(){calls.listenerCount--;}};
   class AudioContext {
     constructor(){this.state='running';this.closes=0;this.sampleRate=48000;this.currentTime=0;contexts.push(this);}
@@ -20,12 +20,18 @@ function fixture({waitPermission=false,waitResume=false}={}) {
     createMediaStreamSource(){return node();}createGain(){return node();}createScriptProcessor(){return node();}
     addEventListener(){calls.listenerCount++;}removeEventListener(){calls.listenerCount--;}
   }
-  const socket={connected:true,timeout(){return this;},emit(name,_payload,reply){
+  const listeners=new Map();
+  const socket={connected:true,io:{engine:{writeBuffer:[],transport:{name:'websocket',ws:{bufferedAmount:0},close(){calls.transportCloses++;}}}},
+    on(name,fn){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
+    off(name,fn){listeners.get(name)?.delete(fn);},
+    disconnect(){this.connected=false;},connect(){calls.reconnects++;this.connected=true;for(const fn of listeners.get('connect')||[])fn();},
+    timeout(){return this;},emit(name,_payload,reply){
     if(name==='transcription:start')replyProvider=reply;
     if(name==='transcription:stop')calls.backendStops++;
     if(name==='transcription:audio')calls.audio.push(_payload);
   }};
   const context=vm.createContext({
+    performance, setTimeout, clearTimeout,
     useEffect(){},captureStartRef:{},MIC_DIAGNOSTIC_UPDATE_MS:500,TARGET_SAMPLE_RATE:24000,
     mixChannelsToMono:channels=>channels[0],downsampleFloat32:s=>s,float32ToInt16:s=>s,
     int16ToBase64:()=> 'AA==',signalMetrics:()=>({level:.1,peak:.2,samples:480,clippedSamples:0}),setMicDiagnostics(){},
@@ -41,8 +47,9 @@ function fixture({waitPermission=false,waitResume=false}={}) {
   });
   vm.runInContext(fs.readFileSync(require.resolve('../../client/src/lib/capture-recovery.js'),'utf8').replace(/export /g,'')+
     '\nglobalThis.captureRecovery = new CaptureRecovery();',context);
+  vm.runInContext(fs.readFileSync(require.resolve('../../client/src/lib/capture-transport.js'),'utf8').replace(/export /g,''),context);
   vm.runInContext(source.slice(start,end)+'\nglobalThis.begin=handleStartLiveTranscription;',context);
-  return {begin:()=>context.begin({autoFollow:true}),attempts,capture,track,contexts,calls,statuses,recovery:context.captureRecovery,
+  return {begin:options=>context.begin({autoFollow:true,...options}),attempts,capture,track,contexts,calls,statuses,recovery:context.captureRecovery,
     allowPermission:()=>allowPermission(),allowResume:()=>allowResume(),replyProvider:value=>replyProvider(null,value)};
 }
 
@@ -75,6 +82,15 @@ test('a matching running snapshot can acknowledge capture readiness before the s
   f.capture.current.confirmReady();assert.equal(await pending,true);
   assert.equal(f.capture.current.starting,false);
   f.replyProvider({ok:true});assert.equal(f.recovery.desired,true);
+});
+
+test('a transmission recovery resets the real capture connection before requesting a new provider stream',async()=>{
+  const f=fixture();f.recovery.arm({autoFollow:true});
+  const pending=f.begin({recovering:true,recovery:{reason:'capture_transport_backlog',attempt:1}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.calls.reconnects,1);assert.equal(f.calls.transportCloses,1);
+  f.replyProvider({ok:true});assert.equal(await pending,true);
+  assert.ok(f.capture.current.audioTransport);
 });
 
 test('a canceled audio setup closes its context without changing the newer capture',async()=>{

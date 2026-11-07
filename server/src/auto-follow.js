@@ -1,7 +1,7 @@
 // Script following is independent of ASR segment boundaries and display state.
 // Times are milliseconds on the provider's audio clock, never arrival wall time.
 const {normalizeText} = require('./follow-text');
-const {freshSpeech, suffixSpeech, wordWindows} = require('./word-evidence');
+const {alignedWords, freshSpeech, suffixSpeech, wordWindows} = require('./word-evidence');
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
@@ -79,6 +79,7 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     weakPath: {hypotheses: [], lastMs: -1},
     wordPath: {hypotheses: []},
     shortOpenings: false, openingPlan: null, selectedStartIndex: null,
+    captureRecovery: null,
   };
 }
 
@@ -250,6 +251,20 @@ function recoveryAnchor(tracker, currentIndex) {
     return {index: currentIndex, atMs: confirmed.atMs};
   }
   return null;
+}
+
+function canReacquireCapture(tracker, script, currentIndex, best, event) {
+  const recovery = tracker.captureRecovery, text = normalizeText(event.text);
+  if (!recovery || recovery.index !== currentIndex || event.endMs > T.captureRecoveryMs ||
+    !best || best.index <= currentIndex || best.index > currentIndex + T.captureRecoveryAhead ||
+    best.confidence < T.captureRecoveryConfidence || best.context || best.phonetic || best.weakPath ||
+    text.length < T.captureRecoveryCharacters || !alignedWords(event).length ||
+    !script.entries[best.index].text.endsWith(text) ||
+    script.entries.slice(currentIndex, best.index + 1).some(e => e.source.music || e.source.type === 'direction')) return false;
+  // The selected position survives recovery, but old audio evidence does not.
+  // Reacquire only an isolated, distinctive literal suffix on the NEW clock.
+  return script.entries.slice(Math.max(0, currentIndex - T.nearbyBehind), currentIndex + T.nearbyAhead + 1)
+    .filter(e => e.text.includes(text)).length === 1;
 }
 
 function localCandidates(tracker, script, currentIndex, text, event) {
@@ -519,8 +534,10 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
       directionWait: tracker.directionWait, openingHint: tracker.openingHint,
       lastLocated: tracker.lastLocated,
     } : {};
+    const captureRecovery = tracker.streamId === null ? tracker.captureRecovery : null;
     Object.assign(tracker, createTracker({ ignoreBeforeMs }), {
       ...referenceState, streamId: event.streamId, script: tracker.script,
+      captureRecovery,
     });
   }
   if (event.startMs < tracker.ignoreBeforeMs || event.endMs <= tracker.ignoreBeforeMs) {
@@ -625,7 +642,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     candidates = [...byIndex.values()].sort((a, b) => b.rank - a.rank);
   }
   const currentSuffix = candidates[0]?.index > currentIndex + 1 ? align(text, script, currentIndex, currentIndex)[0] : null;
-  const suffixConflict = isCurrentSuffix(script, currentIndex, text, candidates[0], currentSuffix);
+  let suffixConflict = isCurrentSuffix(script, currentIndex, text, candidates[0], currentSuffix);
   if (suffixConflict && currentSuffix) candidates = [{...currentSuffix, rank: currentSuffix.confidence}];
   const pathCandidate = observeScriptPath(tracker, script, currentIndex, candidates, event);
   const weakPathCandidate = observeWeakScriptPath(tracker, script, currentIndex, candidates, {...event, text});
@@ -662,6 +679,17 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   if (!pathCandidate && weakPathCandidate && (!best || best.confidence < T.minimumConfidence)) {
     best = weakPathCandidate;
     candidates = [best, ...candidates.filter(c => c.index !== best.index)];
+  }
+  // Path promotion happens AFTER the initial suffix check. Recheck the final
+  // winner so a remembered path cannot turn this cue's ending into a later
+  // cue's opening (for example, jumping over a short intervening line).
+  if (best?.index > currentIndex + 1) {
+    const suffix = align(text, script, currentIndex, currentIndex)[0];
+    if (isCurrentSuffix(script, currentIndex, text, best, suffix)) {
+      suffixConflict = true;
+      best = {...suffix, rank: suffix.confidence}; candidates = [best];
+      tracker.path.hypotheses = tracker.path.hypotheses.filter(h => h.index <= currentIndex || h.endMs !== event.endMs);
+    }
   }
   // The selected display is the starting occurrence. Repeated copies elsewhere
   // do not override an equally good current-cue match on initial acquisition.
@@ -727,16 +755,18 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   const relocation = best.index !== currentIndex && best.index !== next;
   const caughtUp = relocation && canCatchUp(tracker, script, currentIndex, best, event);
   const recoveredNearby = relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous);
+  const captureReacquired = relocation && canReacquireCapture(tracker, script, currentIndex, best, event);
   if (relocation) {
     if (best.confidence < (best.weakPath ? T.weakPathConfidence : best.pathConfirmed ? T.minimumConfidence : T.strongConfidence) ||
       (!best.pathConfirmed && text.length < T.relocationEvidence && !recoveredNearby) || (ambiguous && !exactUnique && !best.pathConfirmed)) {
       return uncertain('relocation_requirements', '疑似跳詞，正在核對新的位置。');
     }
-    if (!best.pathConfirmed && !recoveredNearby && (!correction?.accepted || corrected.index !== best.index)) {
+    if (!best.pathConfirmed && !recoveredNearby && !captureReacquired && (!correction?.accepted || corrected.index !== best.index)) {
       return uncertain('correction_pending', '疑似跳詞，等待後續語音確認。');
     }
   }
   item.maxIndex = Math.max(item.maxIndex ?? best.index, best.index);
+  tracker.captureRecovery = null;
   const progress = best.offset / best.length;
   if (tracker.referenceProgress?.index === best.index && event.endMs <= tracker.referenceProgress.audioEndMs &&
     progress < tracker.referenceProgress.progress) return {ignored: true, reason: 'reference_progress_regression'};
@@ -792,7 +822,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   return {
     index: best.index, candidate: best, progress, completed, armedIndex: tracker.armedIndex,
-    reason: best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
+    reason: captureReacquired ? 'capture_reacquired' : best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
       : best.trailingCharacters ? 'trailing_tolerance' : best.colloquial ? 'local_colloquial' : best.recovered ? 'suffix_recovery'
       : best.openingConfirmed ? 'opening_confirmed' : 'text_matched',
     spans: matchedSpans(best, script),

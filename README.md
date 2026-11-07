@@ -438,3 +438,9 @@ python3 server/scripts/transcribe-performance.py --audio clip.wav --model small 
 
 恢復流程另記 `recovery_scheduled`、`recovery_attempt`、`recovery_ready`、`recovery_failed`、`recovery_timeout`、`recovery_cancelled` 與 `recovery_exhausted`，停止串流後原控制端仍可回報最後階段。啟動時同一 captureId 的 running 狀態也可確認準備完成，避免 start ACK 延遲讓已有聲音的收音端一直等待。恢復尚未完成時收到的新錯誤會保留，完成後再有限次重試。
 恢復中的麥克風／音訊啟動最多等待十二秒，逾時使舊請求失效，再依剩餘次數重試；舊請求晚到不能完成或覆蓋新嘗試。穩定三十秒後的重試額度只重置一次，連續失敗仍最多三次。
+
+控制頁在交給 Socket.IO 前限制待確認音訊：最多一秒音訊、最舊確認等待最多 1.5 秒，並檢查 Engine.IO 佇列及原生 WebSocket 待傳量（最多 64 KiB 或 64 個 Engine.IO 封包）。正常時逐批立即傳送，不額外等候湊批；超限會停止舊時間軸並進入有限次恢復，不丟掉部分聲音後假裝時間軸仍連續。傳輸積壓、確認逾時或 `stale_capture` 恢復會關閉舊實體連線、重新連線與加入控制房間，再啟動新的採集與辨識；採集執行緒本身短暫積壓則只重建採集。自動重建不取消操作意圖，手動停止仍可使尚未完成的重建失效。
+
+`capture_health` 的 `capture_transport`、`capture_transport_blocked`、`capture_transport_ready` 保存連線類型、待確認封包／音訊量、最舊確認年齡、Engine.IO 與 WebSocket 佇列、確認 RTT 及最大 RTT。若舊連線塞住而無法送出診斷，最近的快照也會跟著下一次 `stream_configuration.frontend.recovery.transport` 保存；`frontend.captureTransport` 保存當時的傳輸上限。這些指標可區分採集積壓、傳送積壓與後端接收落後。
+
+前向路徑推測選出候選後，會重新檢查文字是否仍屬於目前格句尾，避免把句尾的重複字詞誤當成後面格子的開頭並跨過短句。收音重建後，前八秒可使用新串流的實際詞時間重新定位前三格內的唯一實字句尾：至少六字、分數至少 0.96，且不跨過音樂或舞台指示；這項捷徑不沿用舊錄音時間。正常核對成功的短句也會解除失配累積。沒有收到或辨識到的台詞不會被自動捏造為已顯示。

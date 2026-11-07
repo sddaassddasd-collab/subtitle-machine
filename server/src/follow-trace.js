@@ -49,6 +49,7 @@ class FollowTrace {
 
 function trackerSnapshot(tracker, currentIndex) {
   return {currentIndex, located: tracker.located, progressIndex: tracker.progressIndex, progress: tracker.progress,
+    captureRecovery: tracker.captureRecovery,
     armedIndex: tracker.armedIndex, preparedIndex: tracker.preparedIndex,
     prediction: tracker.prediction ? {index: tracker.prediction.index, source: tracker.prediction.source || 'onset', onsetMs: tracker.prediction.onsetMs} : null,
     openingPlan: tracker.openingPlan ? {fromIndex: tracker.openingPlan.fromIndex, index: tracker.openingPlan.index,
@@ -82,6 +83,15 @@ function transcriptDetails(text, options) {
       confidence: Number.isFinite(word.confidence) ? word.confidence : null}))};
 }
 
+function captureTransportDetails(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {transportType: ['websocket', 'polling', 'webtransport'].includes(source.transportType) ? source.transportType : 'unknown',
+    ...Object.fromEntries(['transportVersion', 'version', 'maximumInFlightMs', 'acknowledgementMs', 'maximumBufferedBytes',
+      'maximumQueuedPackets', 'reportMs', 'reconnectMs', 'inFlightPackets', 'inFlightAudioMs', 'oldestAckAgeMs',
+      'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets']
+      .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(10000000, source[key]))]))};
+}
+
 function clientMetadata(value) {
   const source = value && typeof value === 'object' ? value : {};
   const audio = source.audio && typeof source.audio === 'object' ? source.audio : {};
@@ -90,9 +100,11 @@ function clientMetadata(value) {
     captureId: typeof source.captureId === 'string' ? source.captureId.slice(0, 100) : '',
     captureClock: typeof source.captureClock === 'string' ? source.captureClock.slice(0, 80) : '',
     recovery: source.recovery ? {reason: String(source.recovery.reason || '').slice(0, 80),
-      attempt: Math.max(0, Math.min(3, Number(source.recovery.attempt) || 0))} : null,
+      attempt: Math.max(0, Math.min(3, Number(source.recovery.attempt) || 0)),
+      ...(source.recovery.transport ? {transport: captureTransportDetails(source.recovery.transport)} : {})} : null,
+    ...(source.captureTransport ? {captureTransport: captureTransportDetails(source.captureTransport)} : {}),
     audio: Object.fromEntries(['contextSampleRate', 'sampleRate', 'channelCount', 'echoCancellation', 'noiseSuppression', 'autoGainControl']
       .filter(key => typeof audio[key] === 'boolean' || (Number.isFinite(audio[key]) && audio[key] >= 0))
       .map(key => [key, audio[key]]))};
 }
-module.exports = {FollowTrace, trackerSnapshot, transcriptDetails, clientMetadata};
+module.exports = {FollowTrace, trackerSnapshot, transcriptDetails, clientMetadata, captureTransportDetails};
