@@ -155,6 +155,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         dispose() {
           const active = transcriptionStreams.get(session.id);
           clearTimeout(active?.initTimeout); clearInterval(active?.healthTimer); clearInterval(active?.keepAliveTimer);
+          active?.providerQueue?.close();
           referenceRuntime.dispose();
           for (const timer of currentIndexPersistTimers.values()) clearTimeout(timer);
           for (const timer of latestRoomStateKeyframes.values()) clearTimeout(timer);

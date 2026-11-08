@@ -21,3 +21,7 @@
 傳輸版本 7／pipeline 版本 4：未確認音訊窗口由 4 秒起步，依實測 ACK 往返延遲增加（1.5 倍 RTT 加 1 秒餘裕），最多 12 秒，單次連線內不縮小；以 `uploadWindowMs` 記錄有效值。音訊與送出緩衝仍有硬上限。積壓本身只產生 `capture_backlog_waiting` 與延遲狀態，不再觸發重連；20 秒沒有累計接收進度才記錄 `capture_reception_stalled` 並恢復連線。探測成功但序號不前進不算恢復。真正斷線仍使用既有有限重試；成功重連保留既有有界佇列，不再額外裁成 1 秒。容量超限與實際過期仍可能裁音，持續低於即時需求的頻寬無法保證不丟音。
 
 診斷版本 21 新增 `packetSequence`，與歷史事件的全域 `sequence` 分開。封包時間鏈應以 `captureId + packetSequence` 串接；舊版 sequence 已被匯出事件序號覆寫，不能可靠地當作封包編號。
+
+伺服器診斷版本 22：Deepgram 的 audio-thread-v2 串流遇到供應商送出緩衝達 48,000 bytes（約 1 秒 PCM）時，改在伺服器排隊，最多保留 12 秒。等待期間不確認為已提交；探測只回報已送交的封包序號。恢復後以不超過 1.25 倍即時速度追趕，避免一次灌入整批積壓。佇列 20 秒沒有提交進度或超出容量時才停止該串流並回報恢復需求。實際送出錯誤、斷線仍沿用既有處理；這些上限不能保證頻寬長期不足時不丟音。
+
+`provider_queue_waiting`、`provider_queue_drained`、`provider_queue_stalled`、`provider_queue_full` 位於 transport_health。`providerQueuedAudioMs`／`providerQueueAgeMs` 記錄伺服器待提交量／最老等待時間，與 WebSocket 的 `providerBufferedBytes` 分開。關閉有待提交音訊的串流時，`provider_queue_abandoned` 保存來源範圍與首尾封包序號。供應商是否真正接收、處理，仍需搭配辨識結果進度判斷。有效參數保存於 stream_configuration.effectiveSettings.providerQueue。

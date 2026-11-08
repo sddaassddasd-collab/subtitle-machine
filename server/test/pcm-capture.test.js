@@ -121,3 +121,24 @@ test('server records sampled receive/submission progress and every rejected sour
   assert.equal(drop.cause, 'expired_input');
   assert.equal(drop.providerSubmissionStatus, 'not_submitted');
 });
+
+test('real provider pressure defers submission and probe credit, then drains without replacing the stream', t => {
+  t.mock.timers.enable({apis: ['setInterval', 'Date'], now: 10000});
+  const f = createFixture({lineCount: 3}); t.after(() => f.dispose());
+  Object.assign(f.stream, {captureId: 'capture', captureClock: 'audio-thread-v2',
+    captureTimeline: new LiveAudioTimeline('mic')});
+  f.stream.socket.bufferedAmount = 100000;
+  f.event('transcription:audio-pcm', packet(1, {sourceId: 'mic', sourceStartMs: 0, sourceEndMs: 40,
+    capturedAt: Date.now(), captureAgeMs: 0}));
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.stream.closing, false);
+  assert.equal(f.stream.providerQueue.queuedMs, 40);
+  assert.equal(f.event('transcription:capture-probe', {captureId: 'capture'}).sequence, 0);
+  f.stream.socket.bufferedAmount = 0;
+  t.mock.timers.tick(20);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.stream.autoFollowAudioMs, 40);
+  assert.equal(f.stream.providerQueue.queuedMs, 0);
+  assert.equal(f.event('transcription:capture-probe', {captureId: 'capture'}).sequence, 1);
+  assert.equal(f.stream.closing, false);
+});
