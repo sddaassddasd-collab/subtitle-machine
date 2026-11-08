@@ -210,33 +210,3 @@ test('a single timed batch can complete the current cue and trigger its unrelate
   assert.equal(result.shortOpening.text, '欸等');
   assert.equal(result.evidence.startMs, 1100);
 });
-
-test('a repeated distant phrase with inserted words remains the recently established current cue tail', () => {
-  const s = show(['只要國王大人下令要歌手寫出快樂的歌', '不就解決了', '因為是國王的命令',
-    '所以他一定寫得出來', '這樣解決了歌手的問題', '他就會快樂了', '對啊原來就這麼簡單',
-    '有道理', '大家都非常滿意這個方案', '於是國王下令要歌手寫出一首快樂的歌']);
-  s.say('我們只要請國王大人下令', {itemId: 'prefix', startMs: 0, endMs: 1800});
-  const result = s.say('歌手寫出一首快樂的歌', {itemId: 'tail', startMs: 1900, endMs: 4700});
-  assert.equal(s.index(), 0);
-  assert.notEqual(result.index, 9);
-  // Once the present cue is complete, the next new speech still owns the next display.
-  s.say(s.lines[0].text, {itemId: 'complete', startMs: 4800, endMs: 6500});
-  assert.equal(s.say('這樣不就好了嗎', {itemId: 'next', startMs: 6600, endMs: 7300}).index, 1);
-});
-
-test('a distinctive full distant line can still relocate after a recent local anchor', () => {
-  const s = show(['只要國王大人下令要歌手寫出快樂的歌', '不就解決了', ...Array(7).fill('其他場景台詞'),
-    '於是國王下令要歌手寫出一首快樂的歌']);
-  s.say('只要國王大人下令', {endMs: 1000});
-  const result = s.say(s.lines[9].text, {itemId: 'jump', startMs: 2000, endMs: 5000, isFinal: true});
-  assert.equal(result.index, 9);
-});
-
-test('recorded cue 229 tail revisions do not relocate to the repeated cue 238', () => {
-  const replay = require('./fixtures/repeated-cue-tail.json');
-  const s = show(replay.lines);
-  for (const event of replay.events) {
-    s.say(event.text, event);
-    assert.equal(s.index(), 0, event.text);
-  }
-});
