@@ -56,7 +56,23 @@ test('delayed receipts release credit without replacing the connection or allowi
   }
   assert.deepEqual(f.blocked, [])
   assert.ok(f.transport.sentPackets > 300)
-  assert.ok(f.reports.some(e => e.reason === 'capture_flow_control'))
+  assert.ok(f.reports.some(e => e.reason === 'capture_transport_delayed'))
+})
+
+test('provider connection setup time alone does not report audio transport delay', () => {
+  const f = fixture(); f.clock(7000); f.send(1)
+  assert.equal(f.reports.some(e => e.reason === 'capture_transport_delayed'), false)
+  f.clock(7100); f.ack(1, {networkAgeMs: 0})
+  assert.equal(f.reports.some(e => e.reason === 'capture_transport_delayed'), false)
+})
+
+test('old network measurements expire and fresh PCM receipts clear the delay indication', () => {
+  const f = fixture(); f.send(1); f.clock(2000); f.ack(1, {networkAgeMs: 5000})
+  assert.equal(f.transport.delayed, true)
+  f.clock(7000); f.transport.check()
+  assert.equal(f.transport.delayed, false)
+  f.send(2); f.clock(7010); f.ack(2, {networkAgeMs: 0})
+  assert.equal(f.transport.delayed, false)
 })
 
 test('real sender congestion drops unsent frames, then replaces only a persistently blocked transport', () => {

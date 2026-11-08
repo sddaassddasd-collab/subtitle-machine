@@ -28,4 +28,29 @@ class LiveAudioTimeline {
       (range.sourceEndMs - range.sourceStartMs) / (range.providerEndMs - range.providerStartMs);
   }
 }
-module.exports = {LiveAudioTimeline};
+// A provider's result can start before a gap and still contain new speech.
+// Fence by the spoken range, not the utterance/container start. Deepgram word
+// times are seconds; internal diagnostic words may already use milliseconds.
+function transcriptAfterGap(text, timing, fenceMs) {
+  const result = {text, ...timing};
+  if (!(fenceMs > 0)) return result;
+  const endMs = Number.isFinite(timing.endMs) ? timing.endMs : null;
+  if (endMs !== null && endMs <= fenceMs) return null;
+  if (Number.isFinite(timing.startMs) && timing.startMs >= fenceMs - 1) return result;
+  const words = timing.words?.filter(word => {
+    const end = word.endMs ?? word.end * 1000;
+    return Number.isFinite(end) && end > fenceMs;
+  });
+  if (words?.length) {
+    result.words = words;
+    result.text = words.map(word => word.punctuated_word || word.punctuatedWord || word.word || '').join(' ')
+      .replace(/([\p{Script=Han}，。！？、])\s+(?=[\p{Script=Han}，。！？、])/gu, '$1');
+    result.startMs = Math.max(fenceMs, words[0].startMs ?? words[0].start * 1000);
+  } else {
+    // Providers without word timings must not become permanently muted merely
+    // because their utterance start is missing or precedes a transport gap.
+    result.startMs = Math.max(fenceMs, timing.startMs || 0);
+  }
+  return result;
+}
+module.exports = {LiveAudioTimeline, transcriptAfterGap};

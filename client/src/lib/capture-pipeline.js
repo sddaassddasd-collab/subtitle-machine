@@ -2,8 +2,9 @@ import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket} f
 import {signalMetrics} from './audio-signal.js'
 import {AUDIO_WIRE} from './capture-wire.mjs'
 
-export const PIPELINE_SETTINGS = Object.freeze({version: 2, sampleRate: 24000, maximumAgeMs: 250,
-  maximumQueuedMs: 200, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
+export const PIPELINE_SETTINGS = Object.freeze({version: 3, sampleRate: 24000, maximumAgeMs: 10000,
+  maximumQueuedMs: 8000, overflowRetainMs: 1000, startupRetainMs: 1000,
+  reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
 
 // Keep the fractional sample position across batches (including 44.1 kHz input).
 // Input time and provider time are distinct; dropped input is never counted as
@@ -69,7 +70,7 @@ export class CapturePipeline {
     }
     this.captureId = `${this.config.sourceId}:${++this.generation}`
     this.sequence = 0; this.firstReceipt = false; this.failedProbes = 0; this.probeAt = 0
-    this.droppedSince = null
+    this.droppedSince = null; this.probePending = null
     this.notify?.({type: 'epoch', captureId: this.captureId, generation: this.generation, sourceId: this.config.sourceId})
     this.state('connecting', '本機持續收音，正在建立辨識連線。')
     try {
@@ -84,7 +85,12 @@ export class CapturePipeline {
           }
           this.recover(reason, reason.startsWith('capture_transport') ? 'transport' : 'provider')
         },
-        onReport: data => this.report(data.reason, data),
+        onReport: data => {
+          this.report(data.reason, {...data, queuedAudioMs: this.queuedMs,
+            oldestQueuedAgeMs: this.queue.length ? Math.max(0, this.now() - this.queue[0].capturedAt) : 0})
+          if (data.reason === 'capture_transport_recovered' && this.firstReceipt && this.droppedSince === null)
+            this.state('running', '音訊傳輸已恢復，辨識持續進行。')
+        },
         onAck: ack => {
           if (ack.ok && ack.dropped && !ack.queued) {
             if (this.droppedSince === null) {
@@ -128,9 +134,10 @@ export class CapturePipeline {
       this.ready = true; this.connecting = false
       if (result.audioWire === AUDIO_WIRE) this.transport.packedEpoch = this.generation
       this.report('capture_transport_ready', {...this.transport.details()})
-      // Startup audio remains in a tiny latest-only queue. Do not burst an old
-      // permission/connect backlog into a new ASR clock.
-      this.droppedMs = (this.droppedMs || 0) + this.queuedMs; this.queue = []; this.queuedMs = 0
+      // Keep the last second of startup speech. During an established stream,
+      // retain continuous PCM through ordinary receipt/transport jitter.
+      this.trimQueue(PIPELINE_SETTINGS.startupRetainMs)
+      this.drain()
     } catch (error) {
       if (!this.desired || epoch !== this.epoch) return
       this.connecting = false
@@ -176,11 +183,17 @@ export class CapturePipeline {
       sourceId: this.config.sourceId, sourceStartMs: frame.endTime * 1000 - frame.samples.length / this.config.inputRate * 1000,
       sourceEndMs: frame.endTime * 1000, capturedAt: now - ageMs, captureAgeMs: ageMs, quality: metrics}
     this.queue.push(packet); this.queuedMs += durationMs
-    while (this.queuedMs > PIPELINE_SETTINGS.maximumQueuedMs && this.queue.length) {
+    // If a prolonged outage exceeds the finite buffer, skip one old block and
+    // resume a coherent stretch. Dropping 40 ms on every ACK destroyed speech.
+    if (this.queuedMs > PIPELINE_SETTINGS.maximumQueuedMs)
+      this.trimQueue(PIPELINE_SETTINGS.overflowRetainMs)
+    this.drain()
+  }
+  trimQueue(retainMs) {
+    while (this.queuedMs > retainMs && this.queue.length) {
       const dropped = this.queue.shift(); this.queuedMs -= dropped.durationMs
       this.droppedMs = (this.droppedMs || 0) + dropped.durationMs
     }
-    this.drain()
   }
   drain() {
     if (!this.ready || !this.desired || !this.transport) return
@@ -220,13 +233,15 @@ export class CapturePipeline {
     }
     if (!this.ready || !this.transport || !this.socket?.connected) return
     this.transport.check(); this.drain()
-    if (!this.ready || now < this.probeAt) return
+    if (!this.ready || now < this.probeAt || this.probePending) return
     const progress = this.transport.details()
     if (progress.lastAckAgeMs < T.acknowledgementMs && progress.outstandingAudioMs < T.probeThresholdMs) return
     this.probeAt = now + T.probeMs; const epoch = this.epoch
+    this.probePending = epoch
     this.socket.timeout(2000).emit('transcription:capture-probe', {
       sessionId: this.config.request.sessionId, captureId: this.captureId,
     }, (error, data) => {
+      if (this.probePending === epoch) this.probePending = null
       if (!this.desired || epoch !== this.epoch) return
       if (error) {
         this.failedProbes++

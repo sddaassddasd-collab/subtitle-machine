@@ -1,4 +1,5 @@
-const TRANSPORT_SETTINGS = Object.freeze({version: 2, reportMs: 5000, stallMs: 5000,
+const TRANSPORT_SETTINGS = Object.freeze({version: 3, reportMs: 5000, stallMs: 5000,
+  captureRetentionMs: 10000, gapResetMs: 1000,
   maximumPacketAgeMs: 1000, networkWarningMs: 1000, sustainedNetworkAgeMs: 3000,
   networkHoldMs: 5000, extremeNetworkAgeMs: 10000,
   maximumBufferedMs: 2000, sampleRate: 24000, bytesPerSample: 2});

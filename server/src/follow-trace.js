@@ -92,7 +92,8 @@ function captureTransportDetails(value) {
       'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets',
       'delayedAckMs', 'delayedForMs', 'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs',
       'expiredReceipts', 'droppedInputMs', 'sourceStartMs', 'sourceEndMs', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs']
-      .concat(['outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs'])
+      .concat(['outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs',
+        'queuedAudioMs', 'oldestQueuedAgeMs'])
       .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(604800000, source[key]))]))};
 }
 

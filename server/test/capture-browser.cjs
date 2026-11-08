@@ -57,31 +57,40 @@ async function main() {
         });
       }}]});
     io = new Server(vite.httpServer);
-    const stats = {frames: 0, starts: 0, connections: 0, probes: 0, lostReceipts: false, rejectProvider: false, stops: 0};
+    const stats = {frames: 0, starts: 0, connections: 0, probes: 0, lostReceipts: false, rejectProvider: false, stops: 0,
+      receiptDelayMs: 0, sourceGaps: 0};
     io.on('connection', socket => {
       stats.connections++;
       socket.on('transcription:start', (data, ack) => {
-        stats.starts++; socket.data.captureId = data.clientInfo.captureId; socket.data.audioMs = 0;
+        stats.starts++; socket.data.captureId = data.clientInfo.captureId; socket.data.audioMs = 0; socket.data.sourceEndMs = null;
         ack({ok: true, audioWire: AUDIO_WIRE});
       });
       const receive = data => {
         assert.equal(data.durationMs, data.pcm.length / 48, 'browser PCM clock must match binary bytes');
+        if (socket.data.sourceEndMs !== null && Math.abs(data.sourceStartMs - socket.data.sourceEndMs) > 1) stats.sourceGaps++;
+        socket.data.sourceEndMs = data.sourceEndMs;
         stats.frames++; socket.data.sequence = data.sequence; socket.data.audioMs += data.durationMs;
         if (stats.rejectProvider) {
           stats.rejectProvider = false;
           socket.emit('transcription:audio-ack', {captureId: data.captureId, sequence: data.sequence,
             ok: false, recoverable: true, recoveryReason: 'provider_backpressure'});
-        } else if (!stats.lostReceipts) socket.emit('transcription:audio-ack', {
-          ok: true, captureId: data.captureId, sequence: data.sequence, serverAudioMs: socket.data.audioMs,
-        });
+        } else if (!stats.lostReceipts) {
+          const receipt = {ok: true, captureId: data.captureId, sequence: data.sequence, serverAudioMs: socket.data.audioMs};
+          if (stats.receiptDelayMs) setTimeout(() => {if (socket.connected) socket.emit('transcription:audio-ack', receipt);}, stats.receiptDelayMs).unref();
+          else socket.emit('transcription:audio-ack', receipt);
+        }
       };
       socket.on('transcription:audio-pcm', receive);
       socket.on('transcription:audio-packed', bytes => {
         const decoded = decodeAudioPacket(bytes);
         receive({...decoded, pcm: Buffer.from(decoded.pcm), captureId: socket.data.captureId});
       });
-      socket.on('transcription:capture-probe', (_data, ack) => {stats.probes++; ack({ok: true,
-        captureId: socket.data.captureId, sequence: socket.data.sequence, serverAudioMs: socket.data.audioMs});});
+      socket.on('transcription:capture-probe', (_data, ack) => {
+        stats.probes++;
+        const receipt = {ok: true, captureId: socket.data.captureId, sequence: socket.data.sequence, serverAudioMs: socket.data.audioMs};
+        if (stats.receiptDelayMs) setTimeout(() => ack(receipt), stats.receiptDelayMs).unref();
+        else ack(receipt);
+      });
       socket.on('transcription:stop', () => stats.stops++);
     });
     await vite.listen();
@@ -136,6 +145,14 @@ async function main() {
     stats.lostReceipts = true; await wait(6500);
     assert.equal(stats.starts, 1); assert.ok(stats.probes >= 1);
     console.log('PASS: missing receipts beyond four seconds do not restart capture or ASR');
+    stats.lostReceipts = false; stats.receiptDelayMs = 3000;
+    const beforeDelayed = {frames: stats.frames, gaps: stats.sourceGaps};
+    await wait(8000);
+    assert.ok(stats.frames - beforeDelayed.frames >= 90, 'three-second receipts must still deliver continuous source audio');
+    assert.equal(stats.sourceGaps, beforeDelayed.gaps, 'receipt latency must not cut words out of the microphone stream');
+    assert.equal(stats.starts, 1);
+    console.log('PASS: real three-second PCM/probe receipts preserve source continuity without restarting ASR');
+    stats.receiptDelayMs = 0;
     stats.lostReceipts = false; uploadBps = 28000;
     const beforeLimited = stats.frames; await wait(5500);
     assert.equal(stats.starts, 1); assert.ok(stats.frames - beforeLimited >= 55, 'limited uplink must still deliver continuous PCM');

@@ -2,17 +2,29 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
+const {EventEmitter} = require('node:events');
 
 // Load the whole application, including its real authorization, normalization,
 // Socket.IO handlers and provider adapters. Only startup is replaced: tests must
 // never load the operator's store, listen on a port or contact an ASR service.
-module.exports = function createAudioServerFixture({ lineCount = 1000, texts, allowCueChanges = false } = {}) {
+module.exports = function createAudioServerFixture({ lineCount = 1000, texts, allowCueChanges = false, fakeDeepgram = false } = {}) {
   const filename = require.resolve('../../src/server');
   const source = fs.readFileSync(filename, 'utf8');
   assert.match(source, /startServer\(\);\s*$/);
   const loaded = new Module(filename, module);
   loaded.filename = filename;
   loaded.paths = Module._nodeModulePaths(path.dirname(filename));
+  if (fakeDeepgram) {
+    class FakeWebSocket extends EventEmitter {
+      static OPEN = 1; static CLOSED = 3;
+      constructor() {super(); this.readyState = 0; this.bufferedAmount = 0; this.sent = [];}
+      send(data) {this.sent.push(data);}
+      close() {this.readyState = FakeWebSocket.CLOSED;}
+    }
+    const requireModule = loaded.require.bind(loaded);
+    loaded.require = name => name === 'ws' ? FakeWebSocket
+      : name === 'openai' ? {OpenAI: class {}} : requireModule(name);
+  }
   loaded._compile(source.replace(/startServer\(\);\s*$/, `
     module.exports = function (lineCount, texts, allowCueChanges) {
       const user = { id: 'audio-load-owner', role: USER_ROLES.OPERATOR };
@@ -103,6 +115,15 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           return () => {socket.emit = emit; for (const timer of timers) clearTimeout(timer);};
         },
         currentStream: () => transcriptionStreams.get(session.id),
+        startProvider: (clientInfo = {}) => {
+          autoFollowHistory.start = async () => {};
+          startDeepgramTranscription({sessionId: session.id, socketId: 'load-socket',
+            apiKey: 'local-test-no-paid-request', language: 'zh-TW', clientInfo});
+          const active = transcriptionStreams.get(session.id);
+          active.socket.readyState = WebSocket.OPEN;
+          active.socket.emit('open');
+          return active;
+        },
         mockProviderStart: () => {
           startDeepgramTranscription = options => {
             const replacement = {...stream, socketId: options.socketId, captureId: options.clientInfo.captureId,
@@ -132,6 +153,8 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           stream.translationClient = {chat: {completions: {create: request}}};
         },
         dispose() {
+          const active = transcriptionStreams.get(session.id);
+          clearTimeout(active?.initTimeout); clearInterval(active?.healthTimer); clearInterval(active?.keepAliveTimer);
           referenceRuntime.dispose();
           for (const timer of currentIndexPersistTimers.values()) clearTimeout(timer);
           for (const timer of latestRoomStateKeyframes.values()) clearTimeout(timer);

@@ -21,7 +21,7 @@ const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-ca
 const {CaptionPresentation} = require('./caption-presentation');
 const {OnsetReview} = require('./onset-review');
 const {TranscriptionHealth, TRANSPORT_SETTINGS} = require('./transcription-health');
-const {LiveAudioTimeline} = require('./live-audio-timeline');
+const {LiveAudioTimeline, transcriptAfterGap} = require('./live-audio-timeline');
 const {AUDIO_WIRE} = require('./capture-wire.mjs');
 const {registerPcmCapture} = require('./pcm-capture');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
@@ -9722,11 +9722,16 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const before = trackerSnapshot(state.tracker, session.currentIndex);
   const receivedAt = Number.isFinite(options.receivedAt) ? options.receivedAt : Date.now();
   options = {...options, receivedAt, revisionId: crypto.randomUUID()};
-  if (stream?.captureGapFenceMs > 0 &&
-    (!Number.isFinite(options.startMs) || options.startMs < stream.captureGapFenceMs - 1)) {
-    autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before, after: before,
-      ignored: true, reason: 'audio_gap_fence'});
-    return;
+  if (stream?.captureGapFenceMs > 0) {
+    const afterGap = transcriptAfterGap(transcript, options, stream.captureGapFenceMs);
+    if (!afterGap) {
+      autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before, after: before,
+        ignored: true, reason: 'audio_gap_fence'});
+      return;
+    }
+    transcript = normalizeTranscriptionOutputText(afterGap.text, session.transcriptionLanguage);
+    options = {...afterGap};
+    delete options.text;
   }
   const alignmentStartedAt = Date.now();
   if ((options.language && normalizePerformanceLanguage(options.language) !== session.transcriptionLanguage) ||
@@ -12730,17 +12735,22 @@ function startDeepgramTranscription({
     if (event?.type !== 'Results') return;
     const receivedAt = Date.now();
     const alternative = event.channel?.alternatives?.[0];
-    const transcript = normalizeTranscriptionOutputText(
+    let transcript = normalizeTranscriptionOutputText(
       alternative?.transcript || '',
       selectedLanguage,
     );
     const start = Number.isFinite(Number(event.start)) ? Number(event.start) : 0;
-    if (stream.captureGapFenceMs > 0 && start * 1000 < stream.captureGapFenceMs - 1) {
+    const afterGap = transcriptAfterGap(transcript, {startMs: start * 1000,
+      endMs: Number.isFinite(alternative?.words?.at(-1)?.end)
+        ? alternative.words.at(-1).end * 1000 : (start + Number(event.duration || 0)) * 1000,
+      words: alternative?.words}, stream.captureGapFenceMs);
+    if (!afterGap) {
       autoFollowHistory.diagnostic(sessionId, 'text', 'audio_gap_fence', {
         ...followHistoryClock(sessionId), startMs: start * 1000, fenceMs: stream.captureGapFenceMs,
-        message: '缺口之前或跨越缺口的辨識結果未套用'});
+        message: '完全位於缺口之前的辨識結果未套用'});
       return;
     }
+    transcript = normalizeTranscriptionOutputText(afterGap.text, selectedLanguage);
     const itemId = `deepgram-${start.toFixed(3)}`;
     const timing = stream.autoFollowItems.get(itemId) || {order: ++stream.autoFollowOrder};
     stream.autoFollowItems.set(itemId, timing);
@@ -12774,12 +12784,8 @@ function startDeepgramTranscription({
         }
         handleAutoFollowTranscript(sessionId, transcript,
           getAutoFollowTranscriptOptions(stream, itemId, true, {
-            receivedAt, words: alternative?.words, confidence: alternative?.confidence,
+            ...afterGap, receivedAt, confidence: alternative?.confidence,
             speechFinal: event.speech_final, providerText: alternative?.transcript,
-            startMs: start * 1000,
-            endMs: Number.isFinite(alternative?.words?.at(-1)?.end)
-              ? alternative.words.at(-1).end * 1000
-              : (start + Number(event.duration || 0)) * 1000,
           }));
         if (fragment) {
           queueRequestedLiveTranslations(
@@ -12814,12 +12820,8 @@ function startDeepgramTranscription({
       scheduleDraftTranslations(stream, sessionId, itemId, transcript);
       handleAutoFollowTranscript(sessionId, transcript,
         getAutoFollowTranscriptOptions(stream, itemId, false, {
-          receivedAt, words: alternative?.words, confidence: alternative?.confidence,
+          ...afterGap, receivedAt, confidence: alternative?.confidence,
           speechFinal: event.speech_final, providerText: alternative?.transcript,
-          startMs: start * 1000,
-            endMs: Number.isFinite(alternative?.words?.at(-1)?.end)
-              ? alternative.words.at(-1).end * 1000
-              : (start + Number(event.duration || 0)) * 1000,
         }));
     }
     syncTranscriptionStateFromStream(sessionId, stream, {
@@ -13227,8 +13229,8 @@ function startRealtimeTranscription({
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
     if (!isCurrent()) return;
     if (!event.item_id || typeof event.delta !== 'string') return;
-    const startMs = stream.autoFollowItems.get(event.item_id)?.startMs;
-    if (stream.captureGapFenceMs > 0 && (!Number.isFinite(startMs) || startMs < stream.captureGapFenceMs - 1)) return;
+    const endMs = stream.autoFollowItems.get(event.item_id)?.endMs;
+    if (stream.captureGapFenceMs > 0 && Number.isFinite(endMs) && endMs <= stream.captureGapFenceMs) return;
 
     const previous = stream.draftByItemId.get(event.item_id) || '';
     const merged = normalizeTranscriptionOutputText(
@@ -13246,8 +13248,8 @@ function startRealtimeTranscription({
   rt.on('conversation.item.input_audio_transcription.completed', (event) => {
     if (!isCurrent()) return;
     if (!event.item_id) return;
-    const startMs = stream.autoFollowItems.get(event.item_id)?.startMs;
-    if (stream.captureGapFenceMs > 0 && (!Number.isFinite(startMs) || startMs < stream.captureGapFenceMs - 1)) return;
+    const endMs = stream.autoFollowItems.get(event.item_id)?.endMs;
+    if (stream.captureGapFenceMs > 0 && Number.isFinite(endMs) && endMs <= stream.captureGapFenceMs) return;
 
     const provisionalTranslations = finalizeDraftTranslations(
       stream,
@@ -13892,7 +13894,7 @@ io.on('connection', (socket) => {
         reason: 'network_delay_warning', ...network});
     }
     const expired = persistentCapture
-      ? stale === true || captureAgeMs > 250
+      ? stale === true || captureAgeMs > TRANSPORT_SETTINGS.captureRetentionMs
       : stale === true || captureAgeMs > TRANSPORT_SETTINGS.maximumPacketAgeMs || network.stop;
     if (stream.captureId && expired) {
       if (persistentCapture) {
@@ -13980,26 +13982,24 @@ io.on('connection', (socket) => {
         }
         if (mapping.gapMs >= 2) {
           const fenceMs = stream.autoFollowAudioMs || 0;
-          stream.captureGapFenceMs = fenceMs;
-          semanticFollower.reset(stream, 'capture_input_gap');
-          for (const itemId of stream.draftByItemId.keys()) {
-            if (stream.draftTranslationsByItemId && stream.draftTranslationWorkers && stream.draftTranslationVersions)
-              finalizeDraftTranslations(stream, itemId);
-            takeDraftLine(stream, itemId);
+          const resetTracking = fenceMs > 0 && mapping.gapMs >= TRANSPORT_SETTINGS.gapResetMs;
+          if (resetTracking) {
+            stream.captureGapFenceMs = fenceMs;
+            semanticFollower.reset(stream, 'capture_input_gap');
+            for (const itemId of stream.draftByItemId.keys()) {
+              if (stream.draftTranslationsByItemId && stream.draftTranslationWorkers && stream.draftTranslationVersions)
+                finalizeDraftTranslations(stream, itemId);
+              takeDraftLine(stream, itemId);
+            }
+            resetAutoFollowState(session.id, {tracker: createTracker({ignoreBeforeMs: fenceMs - 1}),
+              listening: true, status: AUTO_FOLLOW_STATUS.LISTENING,
+              message: '音訊有缺口，保留目前字幕並重新定位。'}, {preservePosition: true});
           }
-          resetAutoFollowState(session.id, {tracker: createTracker({ignoreBeforeMs: fenceMs - 1}),
-            listening: true, status: AUTO_FOLLOW_STATUS.LISTENING,
-            message: '音訊有缺口，保留目前字幕並重新定位。'}, {preservePosition: true});
           referenceRuntime.position(session, fenceMs, {reason: 'capture_input_gap', droppedInputAudioMs: mapping.gapMs});
-          // Finalize/commit separates the old utterance from new PCM while the
-          // source and transport keep running. Old asynchronous results are
-          // fenced above; provider time counts only PCM actually delivered.
-          if (fenceMs > 0) {
-            if (stream.provider === 'deepgram') stream.socket.send(JSON.stringify({type: 'Finalize'}));
-            else commitRealtimeAudioBuffer(stream, {allowSemanticFallback: true});
-          }
+          // Leave the ASR utterance running. Repeated Finalize messages on tiny
+          // gaps fragmented otherwise usable recognition and starved following.
           autoFollowHistory.event(session.id, 'audio_gap', {...followHistoryClock(session.id),
-            ...mapping, retainedIndex: session.currentIndex, captureId, sequence});
+            ...mapping, resetTracking, retainedIndex: session.currentIndex, captureId, sequence});
         }
       }
       if (stale !== true) {
