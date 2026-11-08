@@ -159,3 +159,13 @@ test('rejected model answers retain raw word IDs for diagnosis', async () => {
   assert.deepEqual(rejected.rawMatches, response.matches);
   assert.deepEqual(rejected.matches, []); assert.equal(h.accepted.length, 0);
 });
+
+
+test('semantic recovery includes a strong distant literal hint within a bounded search', () => {
+  const {recoveryCandidateEnd} = require('../src/semantic-candidates');
+  const lines = Array.from({length: 100}, () => ({text: '台詞'}));
+  assert.equal(recoveryCandidateEnd(lines, 0, [{index: 21, confidence: .9}]), 21);
+  assert.equal(recoveryCandidateEnd(lines, 0, [{index: 21, confidence: .5}]), 18);
+  assert.equal(recoveryCandidateEnd(lines, 0, [{index: 90, confidence: 1}]), 18);
+  assert.equal(recoveryCandidateEnd(lines, 95, [{index: 120, confidence: 1}]), 99);
+});

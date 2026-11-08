@@ -174,3 +174,26 @@ test('the server maps the final cue inside one ASR item and exports disjoint sup
   assert.equal(confirmations.length, 0);
   assert.ok(events.some(e => e.reason === 'word_span_text' && e.matchConfidence === .85));
 });
+
+test('server offers the distant literal relocation to semantic recovery instead of excluding it at 18 cues', async t => {
+  const texts = ['國王緊急召開了國是會議', ...Array.from({length: 20}, (_, i) => `其他場景台詞編號${i}`),
+    '如果你看過我的論文就知道'];
+  const f = createFixture({allowCueChanges: true, texts});
+  t.after(() => f.dispose());
+  const requests = [];
+  f.enableSemantic(async request => {
+    requests.push(JSON.parse(request.messages.at(-1).content));
+    return {choices: [{message: {content: JSON.stringify({matches: [], ambiguous: true})}}]};
+  });
+  f.stream.autoFollowAudioMs = 1000;
+  f.transcript(texts[0], {streamId: 's', itemId: 'anchor', startMs: 0, endMs: 1000, isFinal: true});
+  f.stream.autoFollowAudioMs = 5000;
+  f.transcript('如果你有看過我的論文', {streamId: 's', itemId: 'recovery', startMs: 2000, endMs: 5000,
+    isFinal: false, words: [{word: '如果你有看過我的論文', start: 2, end: 5}]});
+  await new Promise(resolve => setTimeout(resolve, 650));
+  f.transcript('如果你有看過我的論文的話', {streamId: 's', itemId: 'recovery', startMs: 2000, endMs: 5200,
+    isFinal: false, words: [{word: '如果你有看過我的論文', start: 2, end: 5}, {word: '的話', start: 5, end: 5.2}]});
+  await flush();
+  assert.ok(requests.some(request => request.candidates.some(candidate => candidate.index === 21)));
+  assert.equal(f.session.currentIndex, 0, 'a search hint alone must not commit a jump');
+});

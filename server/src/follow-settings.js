@@ -55,7 +55,8 @@ const DIAGNOSTIC_SETTINGS = Object.freeze({
   summaryMs: 5000, maxTranscriptChars: 2000, maxWords: 256,
   maxPendingEvents: 5000, maxPendingBytes: 8 * 1024 * 1024, flushMs: 250,
 });
-const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, cooldownMs: 3000,
+const SEMANTIC_SETTINGS = Object.freeze({
+  recoveryAhead: 60, model: 'gpt-4o-mini', timeoutMs: 2500, cooldownMs: 3000,
   maximumResultAgeMs: 5000, minimumConfidence: .88, candidateConfidence: .75, supportTtlMs: 15000, maximumStep: 2,
   strongMaximumStep: 4, skipConfidence: .92, skipLiteralMatches: 5,
   minimumTextLength: 6, ahead: 18, cueCharacters: 300, heardCharacters: 500,

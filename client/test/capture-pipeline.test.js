@@ -197,3 +197,17 @@ test('a sustained outage overflows in bounded blocks and the next second of spee
   assert.equal(f.stats.last.droppedInputMs, 0)
   f.pipeline.stop()
 })
+
+
+test('sustained slow receipts rebuild transport even while progress probes succeed', async () => {
+  const f = fixture({receiptDelay: 6000}); await flush()
+  for (let i = 1; i <= 750; i++) {
+    f.frame(i * 40); f.pipeline.tick(); await flush()
+  }
+  assert.ok(f.events.some(e => e.reason === 'capture_backlog_recovery'))
+  assert.ok(f.stats.starts > 1)
+  assert.ok(f.sockets.length > 1)
+  assert.equal(f.pipeline.desired, true)
+  assert.ok(f.pipeline.queuedMs <= S.maximumQueuedMs)
+  f.pipeline.stop()
+})

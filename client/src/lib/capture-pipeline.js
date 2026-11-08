@@ -4,7 +4,7 @@ import {AUDIO_WIRE} from './capture-wire.mjs'
 
 export const PIPELINE_SETTINGS = Object.freeze({version: 3, sampleRate: 24000, maximumAgeMs: 10000,
   maximumQueuedMs: 8000, overflowRetainMs: 1000, startupRetainMs: 1000,
-  reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
+  backlogMs: 4000, backlogRecoveryMs: 3000, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
 
 // Keep the fractional sample position across batches (including 44.1 kHz input).
 // Input time and provider time are distinct; dropped input is never counted as
@@ -69,6 +69,7 @@ export class CapturePipeline {
       })
     }
     this.captureId = `${this.config.sourceId}:${++this.generation}`
+    this.backlogSince = null
     this.sequence = 0; this.firstReceipt = false; this.failedProbes = 0; this.probeAt = 0
     this.droppedSince = null; this.probePending = null
     this.notify?.({type: 'epoch', captureId: this.captureId, generation: this.generation, sourceId: this.config.sourceId})
@@ -233,6 +234,17 @@ export class CapturePipeline {
     }
     if (!this.ready || !this.transport || !this.socket?.connected) return
     this.transport.check(); this.drain()
+    // ACKs can keep arriving while upload throughput remains below real time.
+    // A successful probe alone cannot repair that growing queue.
+    if (this.queuedMs >= PIPELINE_SETTINGS.backlogMs) {
+      this.backlogSince ??= now
+      if (now - this.backlogSince >= PIPELINE_SETTINGS.backlogRecoveryMs) {
+        this.report('capture_backlog_recovery', {queuedAudioMs: this.queuedMs,
+          ...this.transport.details()})
+        this.recover('capture_transport_backlog', 'transport')
+        return
+      }
+    } else this.backlogSince = null
     if (!this.ready || now < this.probeAt || this.probePending) return
     const progress = this.transport.details()
     if (progress.lastAckAgeMs < T.acknowledgementMs && progress.outstandingAudioMs < T.probeThresholdMs) return

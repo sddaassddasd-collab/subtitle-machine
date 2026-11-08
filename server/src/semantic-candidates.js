@@ -62,4 +62,15 @@ async function requestSemanticCandidate(client, observation, signal, model = S.m
   if (message?.refusal) return {matches: [], ambiguous: true};
   return JSON.parse(message?.content || '{}');
 }
-module.exports = {compactInput, selectMatches, requestSemanticCandidate};
+// Include a strong literal relocation hint without expanding every request to
+// the entire script. Never carry a hint across a music/direction boundary.
+function recoveryCandidateEnd(lines, fromIndex, hints = []) {
+  let end = Math.min(lines.length - 1, fromIndex + S.ahead);
+  for (const hint of hints) {
+    if (!Number.isInteger(hint.index) || hint.index <= end || hint.index >= lines.length ||
+      hint.index > fromIndex + S.recoveryAhead || hint.confidence < S.textConfidence) continue;
+    end = hint.index;
+  }
+  return end;
+}
+module.exports = {compactInput, selectMatches, requestSemanticCandidate, recoveryCandidateEnd};

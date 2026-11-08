@@ -13,6 +13,7 @@ const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates } = require('./auto-follow');
 const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
+const {recoveryCandidateEnd} = require('./semantic-candidates');
 const {trackerSnapshot, clientMetadata, captureTransportDetails} = require('./follow-trace');
 const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
 const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
@@ -9887,16 +9888,28 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
   if (lines[fromIndex]?.music || lines[fromIndex]?.type === 'direction') {
     semanticFollower.reset(stream, 'music_or_direction_barrier'); return;
   }
+  const script = prepareScript(lines, tracker.script);
+  tracker.script = script;
+  const heard = normalizeText(transcript);
+  const previousHint = tracker.semanticRecoveryHint;
+  const recoveryHints = live ? [] : [...tracker.candidates,
+    ...localSupportCandidates(script, fromIndex, transcript, {ahead: SEMANTIC_SETTINGS.recoveryAhead})
+      .filter(candidate => !candidate.phonetic && candidate.matchedCharacters >= SEMANTIC_SETTINGS.textEvidence)];
+  if (!live && previousHint?.fromIndex === fromIndex && previousHint.itemId === options.itemId &&
+    options.endMs >= previousHint.endMs && options.endMs - previousHint.endMs <= SEMANTIC_SETTINGS.maximumResultAgeMs &&
+    heard.startsWith(previousHint.text)) recoveryHints.push(previousHint);
+  const hint = recoveryHints.find(candidate => candidate.index > fromIndex + SEMANTIC_SETTINGS.ahead &&
+    candidate.index <= fromIndex + SEMANTIC_SETTINGS.recoveryAhead && candidate.confidence >= SEMANTIC_SETTINGS.textConfidence);
+  tracker.semanticRecoveryHint = hint ? {index: hint.index, confidence: hint.confidence, fromIndex,
+    itemId: options.itemId, text: heard, endMs: options.endMs} : null;
   const candidates = [];
-  for (let index = fromIndex; index <= (window?.to ?? Math.min(lines.length - 1, fromIndex + SEMANTIC_SETTINGS.ahead)); index++) {
+  for (let index = fromIndex; index <= (window?.to ?? recoveryCandidateEnd(lines, fromIndex, recoveryHints)); index++) {
     const line = lines[index];
     if (line.music || (!live && line.type === 'direction')) break;
     if (line.type === 'direction') continue;
     candidates.push({index, lineId: line.id, text: String(line.text || '').slice(0, SEMANTIC_SETTINGS.cueCharacters)});
   }
   const context = JSON.stringify([cellId, session.transcriptionLanguage, options.streamId]);
-  const script = prepareScript(lines, tracker.script);
-  tracker.script = script;
   const preparedIndex = tracker.openingPlan?.fromIndex === displayIndex ? tracker.openingPlan.index : null;
   const nextLength = normalizeText(lines[preparedIndex]?.text).length;
   const shortSequential = !live && !tracker.prediction && preparedIndex === displayIndex + 1 &&
@@ -9922,7 +9935,8 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
     },
     textCandidates: speech => textSupportCandidates(speech, part => live
       ? liveCandidates(prepareScript(lines, tracker.script), window, part)
-      : localSupportCandidates(tracker.script, fromIndex, part.text)),
+      : localSupportCandidates(tracker.script, fromIndex, part.text, {ahead: Math.min(SEMANTIC_SETTINGS.recoveryAhead,
+        Math.max(SEMANTIC_SETTINGS.ahead, (candidates.at(-1)?.index ?? fromIndex) - fromIndex + SEMANTIC_SETTINGS.strongMaximumStep))})),
     corroborationContext: () => ({displayIndex: session.currentIndex, audioMs: stream.autoFollowAudioMs,
       predicted: tracker.prediction?.index === session.currentIndex, predictionSource: tracker.prediction?.source,
       preparedIndex: tracker.openingPlan?.fromIndex === session.currentIndex ? tracker.openingPlan.index : null,
