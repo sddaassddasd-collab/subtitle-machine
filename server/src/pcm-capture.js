@@ -1,4 +1,4 @@
-const PCM_CAPTURE_SETTINGS = Object.freeze({version: 3, sampleRate: 24000, packetMs: 40, acknowledgementMs: 100});
+const PCM_CAPTURE_SETTINGS = Object.freeze({version: 4, sampleRate: 24000, packetMs: 40, acknowledgementMs: 100});
 
 // Socket.IO transports Buffer as binary. Only a cumulative receipt is returned;
 // an error is reported immediately and never hidden behind the ACK timer.
@@ -24,6 +24,11 @@ function registerPcmCapture(socket, receive) {
       !Number.isSafeInteger(sequence) || sequence < 1 || typeof captureId !== 'string' || !captureId || captureId.length > 100 ||
       !Number.isFinite(durationMs) || Math.abs(durationMs - pcm.length / 48) > 1) {
       reply({ok: false, reason: 'invalid_pcm_packet'}); return;
+    }
+    if (data.sourceId !== undefined && (typeof data.sourceId !== 'string' || !data.sourceId || data.sourceId.length > 100 ||
+      !Number.isFinite(data.sourceStartMs) || data.sourceStartMs < -1 || !Number.isFinite(data.sourceEndMs) ||
+      Math.abs(data.sourceEndMs - data.sourceStartMs - durationMs) > 1)) {
+      reply({ok: false, reason: 'invalid_source_clock'}); return;
     }
     receive({...data, audio: pcm}, reply);
   });

@@ -6,7 +6,8 @@ const fields = new Set(['runId', 'captureId', 'reason', 'cause', 'stage', 'statu
   'reportMs', 'reconnectMs', 'packetMs', 'cumulativeAckMs', 'inFlightPackets', 'inFlightAudioMs',
   'oldestAckAgeMs', 'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes',
   'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets', 'delayedAckMs', 'delayedForMs',
-  'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs'])
+  'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs',
+  'sourceId', 'sourceStartMs', 'sourceEndMs', 'droppedInputMs', 'expiredReceipts', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs'])
 export class CaptureHealthOutbox {
   constructor(sessionId, {storage, fetcher = (...args) => globalThis.fetch(...args), now = Date.now, id = () => crypto.randomUUID()} = {}) {
     this.sessionId = sessionId; this.storage = storage; this.fetcher = fetcher; this.now = now; this.id = id
@@ -15,7 +16,8 @@ export class CaptureHealthOutbox {
   }
   persist() {try {this.storage?.setItem(this.key, JSON.stringify(this.events))} catch { /* retain memory copy */ }}
   add(data) {
-    const event = {eventId: this.id(), occurredAt: this.now()}
+    const at = this.now()
+    const event = {eventId: this.id(), occurredAt: Number.isFinite(data.occurredAt) && Math.abs(data.occurredAt - at) < 86400000 ? data.occurredAt : at}
     for (const [key, value] of Object.entries(data)) {
       if (!fields.has(key)) continue
       if (typeof value === 'string') event[key] = value.slice(0, 400)

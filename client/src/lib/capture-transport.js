@@ -1,5 +1,6 @@
-export const CAPTURE_TRANSPORT_LIMITS = Object.freeze({version: 3, maximumInFlightMs: 4000,
+export const CAPTURE_TRANSPORT_LIMITS = Object.freeze({version: 4, maximumInFlightMs: 4000,
   acknowledgementMs: 4000, delayedAckMs: 1000, maximumBufferedBytes: 65536, maximumQueuedPackets: 64,
+  congestionMs: 2000, probeMs: 2000, unresponsiveMs: 10000,
   reportMs: 5000, reconnectMs: 8000, packetMs: 40, cumulativeAckMs: 100})
 
 export function socketTransportDetails(socket) {
@@ -20,6 +21,7 @@ export class CaptureTransport {
     this.pending = new Map(); this.audioMs = 0; this.sentPackets = 0; this.acknowledgedPackets = 0
     this.maxRttMs = 0; this.rttMs = 0; this.reportAt = now(); this.closed = false; this.blocked = false
     this.lastAckAt = null; this.serverNetworkAgeMs = null; this.serverAudioMs = null; this.serverAckDelayMs = null
+    this.createdAt = now(); this.lastSequence = 0; this.lastAckSequence = 0; this.expiredReceipts = 0
     this.receiveAck = ack => this.acknowledge(ack)
     socket.on('transcription:audio-ack', this.receiveAck)
   }
@@ -28,7 +30,7 @@ export class CaptureTransport {
     return {transportVersion: CAPTURE_TRANSPORT_LIMITS.version, ...socketTransportDetails(this.socket),
       inFlightPackets: this.pending.size, inFlightAudioMs: this.audioMs,
       oldestAckAgeMs: first ? Math.max(0, now - first.at) : 0,
-      lastAckAgeMs: this.lastAckAt === null ? 0 : Math.max(0, now - this.lastAckAt),
+      lastAckAgeMs: Math.max(0, now - (this.lastAckAt ?? this.createdAt)), expiredReceipts: this.expiredReceipts,
       serverNetworkAgeMs: this.serverNetworkAgeMs, serverAudioMs: this.serverAudioMs, serverAckDelayMs: this.serverAckDelayMs,
       rttMs: this.rttMs, maxRttMs: this.maxRttMs,
       sentPackets: this.sentPackets, acknowledgedPackets: this.acknowledgedPackets}
@@ -36,12 +38,25 @@ export class CaptureTransport {
   check() {
     if (this.closed || this.blocked) return false
     const now = this.now(), details = this.details(now)
-    const reason = !this.socket.connected ? 'capture_transport_disconnected'
-      : details.oldestAckAgeMs >= CAPTURE_TRANSPORT_LIMITS.acknowledgementMs ? 'capture_transport_timeout'
-        : details.engineQueuedPackets > CAPTURE_TRANSPORT_LIMITS.maximumQueuedPackets ||
-          details.engineQueuedBytes + details.webSocketBufferedBytes > CAPTURE_TRANSPORT_LIMITS.maximumBufferedBytes
-          ? 'capture_transport_backlog' : null
-    if (reason) return this.block(reason, details)
+    if (!this.socket.connected) return this.block('capture_transport_disconnected', details)
+    const congested = details.engineQueuedPackets >= CAPTURE_TRANSPORT_LIMITS.maximumQueuedPackets ||
+      details.engineQueuedBytes + details.webSocketBufferedBytes >= CAPTURE_TRANSPORT_LIMITS.maximumBufferedBytes
+    if (congested) {
+      if (this.congestedAt === undefined) {
+        this.congestedAt = now
+        this.onReport?.({reason: 'capture_transport_congested', ...details})
+      }
+      if (now - this.congestedAt >= CAPTURE_TRANSPORT_LIMITS.congestionMs)
+        return this.block('capture_transport_backlog', details)
+      return false
+    }
+    this.congestedAt = undefined
+    // Receipts are observations, not a credit window. Discard only old metadata;
+    // never stop fresh PCM because the return path is slow or loses a receipt.
+    for (const [sequence, record] of this.pending) {
+      if (now - record.at < CAPTURE_TRANSPORT_LIMITS.acknowledgementMs) break
+      this.pending.delete(sequence); this.audioMs -= record.durationMs; this.expiredReceipts++
+    }
     this.reportDelay(now)
     if (now - this.reportAt >= CAPTURE_TRANSPORT_LIMITS.reportMs) {
       this.reportAt = now; this.onReport?.({reason: 'capture_transport', ...details})
@@ -52,6 +67,7 @@ export class CaptureTransport {
     if (this.closed || this.blocked) return
     const details = this.details(now)
     const delayed = details.oldestAckAgeMs >= CAPTURE_TRANSPORT_LIMITS.delayedAckMs ||
+      (this.lastSequence > this.lastAckSequence && details.lastAckAgeMs >= CAPTURE_TRANSPORT_LIMITS.delayedAckMs) ||
       this.rttMs >= CAPTURE_TRANSPORT_LIMITS.delayedAckMs || this.serverNetworkAgeMs >= CAPTURE_TRANSPORT_LIMITS.delayedAckMs
     if (delayed === Boolean(this.delayed)) return
     if (delayed) this.delayedAt = now
@@ -69,33 +85,36 @@ export class CaptureTransport {
   send(packet) {
     if (!this.check()) return false
     const queue = this.details(), packetBytes = (packet.pcm?.byteLength || 0) + 1024
-    if (this.audioMs + packet.durationMs > CAPTURE_TRANSPORT_LIMITS.maximumInFlightMs)
-      return this.block('capture_receipt_window_full')
     if (queue.engineQueuedPackets >= CAPTURE_TRANSPORT_LIMITS.maximumQueuedPackets ||
       queue.engineQueuedBytes + queue.webSocketBufferedBytes + packetBytes > CAPTURE_TRANSPORT_LIMITS.maximumBufferedBytes)
-      return this.block('capture_transport_backlog')
+      return false
     this.captureId ??= packet.captureId
     const record = {at: this.now(), durationMs: packet.durationMs}
     this.pending.set(packet.sequence, record); this.audioMs += record.durationMs; this.sentPackets++
+    this.lastSequence = packet.sequence
     try {
       this.socket.emit('transcription:audio-pcm', packet)
     } catch { return this.block('capture_transport_rejected') }
     return true
   }
   acknowledge(ack) {
-    if (this.closed || !ack || ack.captureId !== this.captureId || !this.pending.has(ack.sequence)) return
+    if (this.closed || this.blocked || !ack || ack.captureId !== this.captureId ||
+      !Number.isSafeInteger(ack.sequence) || ack.sequence <= this.lastAckSequence || ack.sequence > this.lastSequence) return
     const record = this.pending.get(ack.sequence)
     for (const [sequence, packet] of this.pending) if (sequence <= ack.sequence) {
-      this.pending.delete(sequence); this.audioMs -= packet.durationMs; this.acknowledgedPackets++
+      this.pending.delete(sequence); this.audioMs -= packet.durationMs
     }
-    this.rttMs = Math.max(0, this.now() - record.at); this.maxRttMs = Math.max(this.maxRttMs, this.rttMs)
+    this.acknowledgedPackets += ack.sequence - this.lastAckSequence
+    this.lastAckSequence = ack.sequence
+    if (record) this.rttMs = Math.max(0, this.now() - record.at)
+    this.maxRttMs = Math.max(this.maxRttMs, this.rttMs)
     this.lastAckAt = this.now()
     if (Number.isFinite(ack.networkAgeMs)) this.serverNetworkAgeMs = Math.max(0, ack.networkAgeMs)
     if (Number.isFinite(ack.serverAudioMs)) this.serverAudioMs = Math.max(0, ack.serverAudioMs)
     if (Number.isFinite(ack.acknowledgedAt) && Number.isFinite(ack.receivedAt))
       this.serverAckDelayMs = Math.max(0, ack.acknowledgedAt - ack.receivedAt)
     this.onAck?.(ack)
-    if (ack.ok === false) this.block(ack.recoverable ? ack.recoveryReason || 'capture_transport_rejected' : 'capture_transport_rejected')
+    if (ack.ok === false) this.block(ack.recoveryReason || ack.reason || 'capture_transport_rejected')
     else this.reportDelay()
   }
   close() {

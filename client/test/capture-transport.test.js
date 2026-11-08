@@ -29,14 +29,17 @@ test('binary audio uses cumulative ACKs and remains bounded through forty minute
   assert.ok(f.reports.some(x => x.reason === 'capture_transport' && x.transportType === 'websocket'))
 })
 
-test('a network blackout stops PCM at the bounded receipt deadline; late ACKs cannot resume the obsolete clock', () => {
+test('missing receipts alone never stop PCM and receipt metadata stays bounded', () => {
   const f = fixture()
-  for (let i = 1; i <= 500; i++) {f.clock(i * 40); f.send(i)}
-  assert.equal(f.sent.length, L.maximumInFlightMs / 40)
-  assert.deepEqual(f.blocked, ['capture_transport_timeout'])
-  assert.equal(f.transport.details().inFlightAudioMs, L.maximumInFlightMs)
-  assert.equal(f.reports.at(-1).reason, 'capture_transport_blocked')
-  f.ack(25); assert.equal(f.send(501), false)
+  for (let i = 1; i <= 1000; i++) {f.clock(i * 40); assert.equal(f.send(i), true)}
+  assert.equal(f.sent.length, 1000)
+  assert.deepEqual(f.blocked, [])
+  assert.ok(f.transport.pending.size <= L.maximumInFlightMs / 40 + 1)
+  assert.ok(f.transport.expiredReceipts > 0)
+  // A cumulative receipt may refer to a record already evicted from metadata.
+  f.ack(500); assert.equal(f.transport.lastAckSequence, 500)
+  assert.equal(f.transport.acknowledgedPackets, 500)
+  assert.equal(f.send(1001), true)
 })
 
 test('the reported one-second receipt window does not disconnect audio already delivered to the server', () => {
@@ -63,17 +66,22 @@ test('the reported one-second receipt window does not disconnect audio already d
   assert.equal(f.transport.details().serverAckDelayMs, 50)
 })
 
-test('WebSocket/Engine queues, disconnection and missing receipts block before more PCM is enqueued', () => {
+test('real sender congestion drops unsent frames, then replaces only a persistently blocked transport', () => {
   for (const backlog of [f => {f.socket.io.engine.transport.ws.bufferedAmount = L.maximumBufferedBytes + 1},
     f => {f.socket.io.engine.writeBuffer = [{data: 'x'.repeat(L.maximumBufferedBytes + 1)}]},
-    f => {f.socket.io.engine.transport.ws.bufferedAmount = L.maximumBufferedBytes - 1},
     f => {f.socket.io.engine.writeBuffer = Array.from({length: 65}, () => ({data: ''}))}]) {
     const f = fixture(); backlog(f)
     assert.equal(f.send(1), false); assert.equal(f.sent.length, 0)
+    assert.deepEqual(f.blocked, [])
+    f.clock(L.congestionMs + 1); assert.equal(f.send(2), false)
     assert.deepEqual(f.blocked, ['capture_transport_backlog'])
+    f.ack(1); assert.equal(f.send(3), false)
   }
-  const f = fixture(); f.send(1); f.clock(L.acknowledgementMs)
-  assert.equal(f.transport.check(), false); assert.deepEqual(f.blocked, ['capture_transport_timeout'])
+  const recovered = fixture()
+  recovered.socket.io.engine.transport.ws.bufferedAmount = L.maximumBufferedBytes + 1
+  assert.equal(recovered.send(1), false)
+  recovered.clock(300); recovered.socket.io.engine.transport.ws.bufferedAmount = 0
+  assert.equal(recovered.send(2), true); assert.deepEqual(recovered.blocked, [])
   const offline = fixture(); offline.socket.connected = false
   assert.equal(offline.send(1), false); assert.deepEqual(offline.blocked, ['capture_transport_disconnected'])
 })

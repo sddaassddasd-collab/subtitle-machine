@@ -226,6 +226,7 @@ test('capture worklet emits 40 ms mono PCM frames with no missing samples', () =
   });
   vm.runInContext(fs.readFileSync(require.resolve('../../client/src/worklets/mic-capture-processor.js'), 'utf8'), context);
   const processor = new Processor();
+  processor.port.onmessage({data: {type: 'connect', port: {postMessage: data => packets.push(data), close() {}}}});
   for (let i = 0; i < 30; i += 1) {
     context.currentFrame = i * 128;
     processor.process([[new Float32Array(128).fill(0.25), new Float32Array(128).fill(0.75)]]);

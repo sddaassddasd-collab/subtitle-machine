@@ -16,6 +16,9 @@ test('capture transport snapshots retain queue and RTT evidence across recovery 
     recovery: {reason: 'capture_transport_backlog', attempt: 1, transport}});
   assert.equal(metadata.captureTransport.maximumInFlightMs, 1000);
   assert.deepEqual(metadata.recovery.transport, clean);
+  const long = captureTransportDetails({serverAudioMs: 10800000, sourceEndMs: 10800000});
+  assert.equal(long.serverAudioMs, 10800000); assert.equal(long.sourceEndMs, 10800000);
+  assert.equal(clientMetadata({captureGeneration: 1794120421300001}).captureGeneration, 1794120421300001);
 });
 
 test('decision windows retain pre/post samples, coalesce triggers and never duplicate sample IDs', () => {

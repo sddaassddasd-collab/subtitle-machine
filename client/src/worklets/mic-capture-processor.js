@@ -4,6 +4,11 @@ class MicCaptureProcessor extends AudioWorkletProcessor {
     this.pendingSamples = [];
     this.pendingSampleCount = 0;
     this.targetSampleCount = Math.max(1, Math.round(sampleRate * 0.04));
+    this.port.onmessage = ({data}) => {
+      this.outputPort?.close();
+      this.outputPort = data.type === 'connect' ? data.port : null;
+      this.pendingSamples = []; this.pendingSampleCount = 0;
+    };
   }
 
   process(inputs) {
@@ -47,7 +52,7 @@ class MicCaptureProcessor extends AudioWorkletProcessor {
           this.pendingSampleCount -= takeCount;
         }
         const endTime = (currentFrame + frameCount - this.pendingSampleCount) / sampleRate;
-        this.port.postMessage({samples: batch, endTime}, [batch.buffer]);
+        this.outputPort?.postMessage({samples: batch, endTime, postedAt: Date.now()}, [batch.buffer]);
       }
     }
     return true;

@@ -73,6 +73,7 @@ function transcriptDetails(text, options) {
     itemId: options.itemId ?? null, revisionId: options.revisionId ?? null, providerStreamId: options.streamId ?? null, order: options.order ?? null,
     isFinal: options.isFinal === true, speechFinal: options.speechFinal === true,
     audioStartMs: options.startMs ?? null, audioEndMs: options.endMs ?? null,
+    sourceStartMs: options.sourceStartMs ?? null, sourceEndMs: options.sourceEndMs ?? null,
     confidence: Number.isFinite(options.confidence) ? options.confidence : null,
     providerText: typeof options.providerText === 'string' ? options.providerText.slice(0, D.maxTranscriptChars) : null,
     wordsAvailable: Array.isArray(options.words), wordCount: words.length, wordsTruncated: words.length > D.maxWords,
@@ -89,8 +90,9 @@ function captureTransportDetails(value) {
     ...Object.fromEntries(['transportVersion', 'version', 'maximumInFlightMs', 'acknowledgementMs', 'maximumBufferedBytes',
       'maximumQueuedPackets', 'reportMs', 'reconnectMs', 'packetMs', 'cumulativeAckMs', 'inFlightPackets', 'inFlightAudioMs', 'oldestAckAgeMs',
       'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets',
-      'delayedAckMs', 'delayedForMs', 'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs']
-      .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(10000000, source[key]))]))};
+      'delayedAckMs', 'delayedForMs', 'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs',
+      'expiredReceipts', 'droppedInputMs', 'sourceStartMs', 'sourceEndMs', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs']
+      .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(604800000, source[key]))]))};
 }
 
 function clientMetadata(value) {
@@ -100,10 +102,11 @@ function clientMetadata(value) {
     userAgent: String(source.userAgent || '').slice(0, 400),
     captureId: typeof source.captureId === 'string' ? source.captureId.slice(0, 100) : '',
     captureClock: typeof source.captureClock === 'string' ? source.captureClock.slice(0, 80) : '',
+    sourceId: String(source.sourceId || '').slice(0, 100),
     audioChannel: String(source.audioChannel || '').slice(0, 80),
     captureOwnerId: String(source.captureOwnerId || '').slice(0, 100),
     controlSocketId: String(source.controlSocketId || '').slice(0, 100),
-    captureGeneration: Math.max(0, Math.min(10000000, Number(source.captureGeneration) || 0)),
+    captureGeneration: Number.isSafeInteger(source.captureGeneration) && source.captureGeneration >= 0 ? source.captureGeneration : 0,
     recovery: source.recovery ? {reason: String(source.recovery.reason || '').slice(0, 80),
       attempt: Math.max(0, Math.min(3, Number(source.recovery.attempt) || 0)),
       ...(source.recovery.transport ? {transport: captureTransportDetails(source.recovery.transport)} : {})} : null,

@@ -21,6 +21,7 @@ const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-ca
 const {CaptionPresentation} = require('./caption-presentation');
 const {OnsetReview} = require('./onset-review');
 const {TranscriptionHealth, TRANSPORT_SETTINGS} = require('./transcription-health');
+const {LiveAudioTimeline} = require('./live-audio-timeline');
 const {registerPcmCapture} = require('./pcm-capture');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
@@ -9720,6 +9721,12 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const before = trackerSnapshot(state.tracker, session.currentIndex);
   const receivedAt = Number.isFinite(options.receivedAt) ? options.receivedAt : Date.now();
   options = {...options, receivedAt, revisionId: crypto.randomUUID()};
+  if (stream?.captureGapFenceMs > 0 &&
+    (!Number.isFinite(options.startMs) || options.startMs < stream.captureGapFenceMs - 1)) {
+    autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before, after: before,
+      ignored: true, reason: 'audio_gap_fence'});
+    return;
+  }
   const alignmentStartedAt = Date.now();
   if ((options.language && normalizePerformanceLanguage(options.language) !== session.transcriptionLanguage) ||
     (options.streamId && stream?.liveTranslationStreamId && options.streamId !== stream.liveTranslationStreamId)) {
@@ -9980,6 +9987,8 @@ function getAutoFollowTranscriptOptions(stream, itemId, isFinal, timing = {}) {
     endMs: timing.endMs ?? stored.endMs,
     receivedAt: timing.receivedAt, words: timing.words, confidence: timing.confidence,
     speechFinal: timing.speechFinal, providerText: timing.providerText,
+    sourceStartMs: stream.captureTimeline?.sourceTime(timing.startMs ?? stored.startMs) ?? null,
+    sourceEndMs: stream.captureTimeline?.sourceTime(timing.endMs ?? stored.endMs) ?? null,
   };
 }
 
@@ -12554,7 +12563,13 @@ function startDeepgramTranscription({
     provider: 'deepgram',
     sessionId,
     socketId,
+    clientInfo,
     captureId: clientMetadata(clientInfo).captureId,
+    captureClock: clientMetadata(clientInfo).captureClock,
+    captureTimeline: new LiveAudioTimeline(clientMetadata(clientInfo).sourceId),
+    captureOwnerId: clientMetadata(clientInfo).captureOwnerId,
+    captureGeneration: clientMetadata(clientInfo).captureGeneration,
+    controlSocketId: clientMetadata(clientInfo).controlSocketId,
     socket,
     model: DEEPGRAM_MODEL,
     language: selectedLanguage,
@@ -12719,6 +12734,12 @@ function startDeepgramTranscription({
       selectedLanguage,
     );
     const start = Number.isFinite(Number(event.start)) ? Number(event.start) : 0;
+    if (stream.captureGapFenceMs > 0 && start * 1000 < stream.captureGapFenceMs - 1) {
+      autoFollowHistory.diagnostic(sessionId, 'text', 'audio_gap_fence', {
+        ...followHistoryClock(sessionId), startMs: start * 1000, fenceMs: stream.captureGapFenceMs,
+        message: '缺口之前或跨越缺口的辨識結果未套用'});
+      return;
+    }
     const itemId = `deepgram-${start.toFixed(3)}`;
     const timing = stream.autoFollowItems.get(itemId) || {order: ++stream.autoFollowOrder};
     stream.autoFollowItems.set(itemId, timing);
@@ -12900,6 +12921,10 @@ function startDeepgramTranscription({
     }
 
     semanticFollower.reset(stream, 'provider_closed');
+    if (typeof stream.startAcknowledge === 'function') {
+      stream.startAcknowledge({ok: false, reason: message, recoverable: code !== 1008});
+      stream.startAcknowledge = null;
+    }
     transcriptionStreams.delete(sessionId);
     applyTranscriptionError(sessionId, message);
   });
@@ -12942,8 +12967,14 @@ function startRealtimeTranscription({
   const stream = {
     provider: 'openai',
     captureId: clientMetadata(clientInfo).captureId,
+    captureClock: clientMetadata(clientInfo).captureClock,
+    captureTimeline: new LiveAudioTimeline(clientMetadata(clientInfo).sourceId),
+    captureOwnerId: clientMetadata(clientInfo).captureOwnerId,
+    captureGeneration: clientMetadata(clientInfo).captureGeneration,
+    controlSocketId: clientMetadata(clientInfo).controlSocketId,
     sessionId,
     socketId,
+    clientInfo,
     rt,
     wsModel: DEFAULT_REALTIME_WS_MODEL,
     sessionType: DEFAULT_REALTIME_SESSION_TYPE,
@@ -13195,6 +13226,8 @@ function startRealtimeTranscription({
   rt.on('conversation.item.input_audio_transcription.delta', (event) => {
     if (!isCurrent()) return;
     if (!event.item_id || typeof event.delta !== 'string') return;
+    const startMs = stream.autoFollowItems.get(event.item_id)?.startMs;
+    if (stream.captureGapFenceMs > 0 && (!Number.isFinite(startMs) || startMs < stream.captureGapFenceMs - 1)) return;
 
     const previous = stream.draftByItemId.get(event.item_id) || '';
     const merged = normalizeTranscriptionOutputText(
@@ -13212,6 +13245,8 @@ function startRealtimeTranscription({
   rt.on('conversation.item.input_audio_transcription.completed', (event) => {
     if (!isCurrent()) return;
     if (!event.item_id) return;
+    const startMs = stream.autoFollowItems.get(event.item_id)?.startMs;
+    if (stream.captureGapFenceMs > 0 && (!Number.isFinite(startMs) || startMs < stream.captureGapFenceMs - 1)) return;
 
     const provisionalTranslations = finalizeDraftTranslations(
       stream,
@@ -13781,7 +13816,31 @@ io.on('connection', (socket) => {
         .map(k => [k, Math.max(0, Math.min(600000, data[k]))]))});
   });
 
-  const receiveCaptureAudio = ({ sessionId, audio, durationMs, level, sequence, stale, quality, clientAgeMs, captureId, capturedAt, captureAgeMs }, ack) => {
+  socket.on('transcription:control-link', ({sessionId, captureId, controlSocketId} = {}) => {
+    const session = getOwnedSocketSession(sessionId, {normalize: false});
+    const stream = session && transcriptionStreams.get(session.id);
+    const control = io.sockets.sockets.get(controlSocketId);
+    const controlUser = control && resolveAuthFromCookieHeader(control.handshake.headers.cookie).user;
+    if (stream?.socketId === socket.id && stream.captureId === captureId && controlUser?.id === socketUser?.id) {
+      stream.controlSocketId = controlSocketId;
+      if (stream.clientInfo) stream.clientInfo.controlSocketId = controlSocketId;
+    }
+  });
+
+  socket.on('transcription:capture-probe', ({sessionId, captureId} = {}, ack) => {
+    if (typeof ack !== 'function') return;
+    const session = getOwnedSocketSession(sessionId, {normalize: false});
+    const stream = session && transcriptionStreams.get(session.id);
+    if (!stream || stream.socketId !== socket.id || stream.captureId !== captureId || stream.closing) {
+      ack({ok: false, reason: 'transcription_not_running'}); return;
+    }
+    ack({ok: true, captureId, sequence: stream.lastCaptureSequence || 0,
+      serverAudioMs: stream.autoFollowAudioMs || 0, dropped: stream.lastCaptureDropped === true,
+      queued: !stream.ready, receivedAt: Date.now(), acknowledgedAt: Date.now()});
+  });
+
+  const receiveCaptureAudio = ({ sessionId, audio, durationMs, level, sequence, stale, quality, clientAgeMs, captureId, capturedAt, captureAgeMs,
+    sourceId, sourceStartMs, sourceEndMs, droppedInputMs }, ack) => {
     const acknowledge =
       typeof ack === 'function'
         ? ack
@@ -13813,6 +13872,14 @@ io.on('connection', (socket) => {
     if (stream.captureId && stream.captureId !== captureId) {
       acknowledge({ok: true, ignored: true, reason: 'old_capture'}); return;
     }
+    if (Number.isSafeInteger(sequence)) {
+      if (sequence <= (stream.lastCaptureSequence || 0)) {
+        acknowledge({ok: true, ignored: true}); return;
+      }
+      stream.lastCaptureSequence = sequence;
+    }
+    const persistentCapture = stream.captureClock === 'audio-thread-v2';
+    stream.lastCaptureDropped = false;
     stream.health ||= new TranscriptionHealth();
     const networkAgeMs = stream.health.receive({capturedAt, captureAgeMs, durationMs: normalizedDurationMs});
     const network = stream.health.networkDecision(networkAgeMs);
@@ -13822,8 +13889,17 @@ io.on('connection', (socket) => {
       autoFollowHistory.event(session.id, 'capture_health', {...followHistoryClock(session.id),
         reason: 'network_delay_warning', ...network});
     }
-    if (stream.captureId && (stale === true || captureAgeMs > TRANSPORT_SETTINGS.maximumPacketAgeMs ||
-      network.stop)) {
+    const expired = persistentCapture
+      ? stale === true || captureAgeMs > 250 || networkAgeMs > 1500
+      : stale === true || captureAgeMs > TRANSPORT_SETTINGS.maximumPacketAgeMs || network.stop;
+    if (stream.captureId && expired) {
+      if (persistentCapture) {
+        stream.captureTimeline.drop(normalizedDurationMs); stream.lastCaptureDropped = true;
+        autoFollowHistory.captureDrop(session.id, 'expired_input');
+        acknowledge({ok: true, dropped: true, reason: 'expired_input', networkAgeMs,
+          serverAudioMs: stream.autoFollowAudioMs || 0});
+        return;
+      }
       const message = '收到過期音訊，正在重新建立收音時間軸。';
       autoFollowHistory.event(session.id, 'capture_health', {...followHistoryClock(session.id),
         reason: 'stale_capture', networkAgeMs, captureAgeMs, behindMs: network.behindMs});
@@ -13836,15 +13912,11 @@ io.on('connection', (socket) => {
     autoFollowHistory.capture(session.id, stream.historyStreamId, {sequence, stale: stale === true,
       level: normalizedLevel, queued: !stream.ready || (stream.provider === 'deepgram' && stream.socket?.readyState !== WebSocket.OPEN), quality, clientAgeMs});
 
-    if (Number.isSafeInteger(sequence)) {
-      if (sequence <= (stream.lastCaptureSequence || 0)) {
-        acknowledge({ ok: true, ignored: true });
-        return;
-      }
-      stream.lastCaptureSequence = sequence;
-    }
-
     if (!stream.ready) {
+      if (persistentCapture) {
+        stream.captureTimeline.drop(normalizedDurationMs); stream.lastCaptureDropped = true;
+        acknowledge({ok: true, queued: true, dropped: true, serverAudioMs: stream.autoFollowAudioMs || 0}); return;
+      }
       stream.pendingAudioChunks.push({
         audio,
         durationMs: normalizedDurationMs,
@@ -13871,6 +13943,10 @@ io.on('connection', (socket) => {
       stream.socket?.readyState !== WebSocket.OPEN
     ) {
       stream.ready = false;
+      if (persistentCapture) {
+        stream.captureTimeline.drop(normalizedDurationMs); stream.lastCaptureDropped = true;
+        acknowledge({ok: true, queued: true, dropped: true, serverAudioMs: stream.autoFollowAudioMs || 0}); return;
+      }
       stream.pendingAudioChunks.push({
         audio,
         durationMs: normalizedDurationMs,
@@ -13893,6 +13969,37 @@ io.on('connection', (socket) => {
     }
 
     try {
+      if (persistentCapture) {
+        const mapping = stream.captureTimeline.accept({sourceId, sourceStartMs, sourceEndMs, droppedInputMs,
+          durationMs: normalizedDurationMs}, stream.autoFollowAudioMs || 0);
+        if (!mapping) {
+          stream.lastCaptureDropped = true;
+          acknowledge({ok: false, reason: 'invalid_source_clock'}); return;
+        }
+        if (mapping.gapMs >= 2) {
+          const fenceMs = stream.autoFollowAudioMs || 0;
+          stream.captureGapFenceMs = fenceMs;
+          semanticFollower.reset(stream, 'capture_input_gap');
+          for (const itemId of stream.draftByItemId.keys()) {
+            if (stream.draftTranslationsByItemId && stream.draftTranslationWorkers && stream.draftTranslationVersions)
+              finalizeDraftTranslations(stream, itemId);
+            takeDraftLine(stream, itemId);
+          }
+          resetAutoFollowState(session.id, {tracker: createTracker({ignoreBeforeMs: fenceMs - 1}),
+            listening: true, status: AUTO_FOLLOW_STATUS.LISTENING,
+            message: '音訊有缺口，保留目前字幕並重新定位。'}, {preservePosition: true});
+          referenceRuntime.position(session, fenceMs, {reason: 'capture_input_gap', droppedInputAudioMs: mapping.gapMs});
+          // Finalize/commit separates the old utterance from new PCM while the
+          // source and transport keep running. Old asynchronous results are
+          // fenced above; provider time counts only PCM actually delivered.
+          if (fenceMs > 0) {
+            if (stream.provider === 'deepgram') stream.socket.send(JSON.stringify({type: 'Finalize'}));
+            else commitRealtimeAudioBuffer(stream, {allowSemanticFallback: true});
+          }
+          autoFollowHistory.event(session.id, 'audio_gap', {...followHistoryClock(session.id),
+            ...mapping, retainedIndex: session.currentIndex, captureId, sequence});
+        }
+      }
       if (stale !== true) {
         handleAutoFollowAudioLevel(session.id, normalizedLevel, normalizedDurationMs,
           (stream.autoFollowAudioMs || 0) + normalizedDurationMs);
@@ -13954,7 +14061,8 @@ io.on('connection', (socket) => {
     if (!session) return reply({ok: false, reason: '找不到節目'});
     if (!['script', 'live'].includes(mode)) return reply({ok: false, reason: '不支援此字幕模式'});
     const stream = transcriptionStreams.get(sessionId);
-    if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理，請先停止該端收音'});
+    if (stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id)
+      return reply({ok: false, reason: '收音由另一個控制端管理，請先停止該端收音'});
     if (mode === 'live' && language && !supportedLanguage(language)) return reply({ok: false, reason: '不支援此辨識語言'});
     if (session.automaticLive || getCaptionMode(session) !== mode || (mode === 'live' && language &&
       normalizePerformanceLanguage(language) !== session.transcriptionLanguage)) switchCaptionMode(session, mode, language);
@@ -13968,7 +14076,8 @@ io.on('connection', (socket) => {
     const session = getOwnedSocketSession(sessionId);
     if (!session) return reply({ok: false, reason: '找不到節目'});
     const stream = transcriptionStreams.get(sessionId);
-    if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理'});
+    if (stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id)
+      return reply({ok: false, reason: '收音由另一個控制端管理'});
     if (!settings || typeof settings !== 'object' || !Array.isArray(settings.overlapGroups) ||
       settings.overlapGroups.length > PERFORMANCE_SETTINGS.maximumGroups)
       return reply({ok: false, reason: '交疊段設定格式不正確'});
@@ -14006,7 +14115,8 @@ io.on('connection', (socket) => {
     if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO ||
       (action !== 'lock-script' && (!stream?.ready || stream.closing)))
       return reply({ok: false, reason: '請先啟用自動跟戲並開始收音'});
-    if (stream && stream.socketId !== socket.id) return reply({ok: false, reason: '收音由另一個控制端管理'});
+    if (stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id)
+      return reply({ok: false, reason: '收音由另一個控制端管理'});
     if (!['lock-live', 'lock-script', 'auto', 'start-overlap', 'cancel-overlap', 'pause', 'resume', 'faster', 'slower'].includes(action))
       return reply({ok: false, reason: '不支援的操作'});
     const performance = getPerformanceFollower(session);
@@ -14197,7 +14307,7 @@ io.on('connection', (socket) => {
     const nextMode = normalizeSubtitleControlMode(mode);
     const sourceChanged = getCaptionMode(session) === 'live';
     const stream = transcriptionStreams.get(sessionId);
-    if (sourceChanged && stream && stream.socketId !== socket.id) return;
+    if (sourceChanged && stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id) return;
     if (sourceChanged && session.automaticLive) {
       applyPerformanceAction(session, getPerformanceFollower(session).command('lock-script', session.currentIndex, stream?.autoFollowAudioMs || 0));
     } else if (sourceChanged) switchCaptionMode(session, 'script');
@@ -14343,7 +14453,7 @@ io.on('connection', (socket) => {
       return;
     }
     const stream = transcriptionStreams.get(sessionId);
-    if (stream && stream.socketId !== socket.id) return;
+    if (stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id) return;
 
     switchCaptionMode(session, nextDisplayMode === PROJECTOR_DISPLAY_MODES.TRANSCRIPTION ? 'live' : 'script');
     persistSession(session);
