@@ -5,7 +5,7 @@ const {alignedWords, freshSpeech, suffixSpeech, wordWindows} = require('./word-e
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
-const {prepareOpening, matchOpening, observeOpening} = require('./sequential-opening');
+const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
 const MAX_HEARD = T.maxHeard;
 const SEQUENCE_TTL_MS = T.sequenceTtlMs;
 const DIRECTION_SILENCE_MS = O.directionSilenceMs;
@@ -853,7 +853,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   if (plan?.fromIndex !== currentIndex) plan = null;
   if (!plan && script.entries[currentIndex]?.source.type === 'direction')
     plan = prepareOpening(script, currentIndex, {text: '', endMs: Math.max(0, tracker.ignoreBeforeMs)}, true);
-  const trigger = matchOpening(plan, script, event);
+  let trigger = matchOpening(plan, script, event);
   const result = locateTranscript(tracker, lines, currentIndex,
     {...event, prepareOnly: true, trustedCurrentIndex: tracker.prediction?.source === 'opening' &&
       normalizeText(event.text) === script.entries[currentIndex]?.text ? currentIndex : selectedStartIndex}, script);
@@ -863,6 +863,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
     tracker.openingPlan = plan;
     restoreOpeningPreparation(tracker);
     return result;
+  }
+  if (!trigger && (!Number.isInteger(result.index) || result.index === currentIndex)) {
+    const batch = completedBatchOpening(script, currentIndex, event);
+    if (batch) {plan = batch.plan; trigger = batch.trigger;}
   }
   const accepted = Number.isInteger(result.index);
   const repeatedCurrent = accepted && result.index === currentIndex && result.completed &&
@@ -888,7 +892,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
       evidence: {startMs: trigger.startMs, endMs: trigger.endMs},
       candidate: {index: trigger.index, offset: trigger.characters, length: script.entries[trigger.index].length,
         confidence: 1, evidence: trigger.characters, heard: trigger.text, locationOnly: true, shortOpening: true},
-      message: '已依下一格短開頭顯示字幕，等待現有配對標準核對後再準備下一格。'};
+      message: plan.completed ? '目前格已說完，已依新增語音先顯示下一格，持續核對內容。'
+        : '已依下一格短開頭顯示字幕，等待現有配對標準核對後再準備下一格。'};
   }
   if (accepted) {
     const span = result.spans?.find(s => s.index === result.index);
@@ -900,7 +905,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
       result.evidence = {startMs: speech.startMs, endMs: speech.endMs};
     }
     tracker.selectedStartIndex = null;
-    tracker.openingPlan = prepareOpening(script, result.index, event);
+    tracker.openingPlan = prepareOpening(script, result.index, {...event, completed: result.completed});
   } else {
     tracker.openingPlan = plan;
     if (plan) observeOpening(plan, event);

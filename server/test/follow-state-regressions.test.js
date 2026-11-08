@@ -63,7 +63,7 @@ test('a fresh opening clears the old mismatch and still permits same-cue semanti
   const f = setup(t, ['旋律聽起來都好奇怪', '讓人心裡悶悶的', '我以為自己休息一下就好']);
   let resolve;
   f.enableSemantic(() => new Promise(done => {resolve = done}));
-  f.say('旋律聽起來都好奇怪', 'anchor', 0, 1000);
+  f.say('旋律聽起來', 'anchor', 0, 1000);
   f.say('今天還有別的事情需要考慮', 'unmatched', 1100, 3000);
   // The first request is irrelevant to the prepared opening; finish it before
   // testing a fresh request close to the mismatch deadline.
@@ -202,7 +202,7 @@ test('a stable short paraphrase can verify the prepared next cue, without semant
   let calls = 0;
   f.enableSemantic(async () => {calls++; return {choices: [{message: {content: JSON.stringify({ambiguous: false,
     matches: [{index: 1, matchConfidence: .95, firstWordId: 0, lastWordId: 0}]})}}]}});
-  f.say('你們的論點', 'anchor', 0, 1000);
+  f.say('你們的論', 'anchor', 0, 1000);
   f.say('其實對的', 'paraphrase', 1500, 2500, 2500,
     {words: [{word: '其實對的', startMs: 1500, endMs: 2500}]}); await flush();
   assert.equal(calls, 1);
@@ -223,7 +223,7 @@ test('short semantic assistance cannot use negation changes, generic fragments, 
     const f = setup(t, ['你們的論點', '既是對的', '又是錯的']);
     f.enableSemantic(async () => ({choices: [{message: {content: JSON.stringify({ambiguous: false,
       matches: [{index, matchConfidence: .99, firstWordId: words ? 0 : null, lastWordId: words ? 0 : null}]})}}]}));
-    f.say('你們的論點', 'anchor', 0, 1000);
+    f.say('你們的論', 'anchor', 0, 1000);
     f.say(text, 'negative', 1500, 2500, 2500, {words: words ? [{word: text, startMs: 1500, endMs: 2500}] : undefined});
     await flush();
     assert.equal(f.session.currentIndex, 0, text);

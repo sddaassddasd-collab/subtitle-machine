@@ -186,7 +186,7 @@ test('server offers the distant literal relocation to semantic recovery instead 
     return {choices: [{message: {content: JSON.stringify({matches: [], ambiguous: true})}}]};
   });
   f.stream.autoFollowAudioMs = 1000;
-  f.transcript(texts[0], {streamId: 's', itemId: 'anchor', startMs: 0, endMs: 1000, isFinal: true});
+  f.transcript('國王緊急召開', {streamId: 's', itemId: 'anchor', startMs: 0, endMs: 1000, isFinal: true});
   f.stream.autoFollowAudioMs = 5000;
   f.transcript('如果你有看過我的論文', {streamId: 's', itemId: 'recovery', startMs: 2000, endMs: 5000,
     isFinal: false, words: [{word: '如果你有看過我的論文', start: 2, end: 5}]});

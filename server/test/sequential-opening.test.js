@@ -150,3 +150,63 @@ test('semantic recovery prepares the next short opening while music remains an e
     {text: '（配樂）', type: 'direction', music: true}, '接著我們繼續說下去']);
   assert.equal(stage.say('接').shortOpening, undefined);
 });
+
+test('completed cue advances on fresh speech that does not match the expected opening, then verifies afterwards', () => {
+  const s = show(['目前這句已經說完了', '你還記得我們的約定', '接下來一起出發']);
+  const complete = s.say(s.lines[0].text);
+  assert.equal(complete.completed, true);
+  const next = s.say('欸', {itemId: 'b', startMs: 1100, endMs: 1200});
+  assert.equal(next.index, 1);
+  assert.equal(next.shortOpening.text, '欸');
+  assert.equal(next.completed, false);
+  assert.equal(s.tracker.preparedIndex, null);
+  assert.equal(s.say('隨便', {itemId: 'c', startMs: 1300, endMs: 1400}).index, undefined);
+  assert.equal(s.say(s.lines[1].text, {itemId: 'd', startMs: 1500, endMs: 2500}).completed, true);
+  assert.equal(s.say('嗯', {itemId: 'e', startMs: 2600, endMs: 2700}).index, 2);
+});
+
+test('a direction starts on any new spoken text; unfinished dialogue cannot advance on unrelated speech', () => {
+  const s = show([{type: 'direction', text: '空白舞台'}, '從前從前有個國王']);
+  assert.equal(s.say('嗯', {itemId: 'start', startMs: 100, endMs: 200}).index, 1);
+  const partial = show(['先把這件事情說清楚', '你怎麼會在這裡']);
+  partial.say('先把這件');
+  assert.equal(partial.say('事情', {itemId: 'b', startMs: 1100, endMs: 1200}).shortOpening, undefined);
+});
+
+test('completed cue requires new source speech, not duplicate text or retimed old words', () => {
+  const s = show(['目前這句已經說完了', '你還記得我們的約定']);
+  s.say(s.lines[0].text);
+  assert.equal(s.say(s.lines[0].text, {isFinal: true}).shortOpening, undefined);
+  const stale = s.say('改寫之前文字', {itemId: 'b', startMs: 0, endMs: 1200,
+    words: [{word: '改寫之前文字', start: 0, end: 1}]});
+  assert.equal(stale.shortOpening, undefined);
+});
+
+test('completed same-item speech advances on extra words regardless of their content', () => {
+  const s = show(['目前這句已經說完了', '接下來的劇本台詞']);
+  s.say(s.lines[0].text);
+  const result = s.say(s.lines[0].text + '欸等等', {endMs: 1300,
+    words: [{word: s.lines[0].text, start: 0, end: 1}, {word: '欸等等', start: 1.1, end: 1.3}]});
+  assert.equal(result.index, 1);
+  assert.equal(result.shortOpening.text, '欸等');
+  assert.equal(result.evidence.startMs, 1100);
+});
+
+test('an expectation triggered by unrelated speech can be corrected by a later verified location', () => {
+  const s = show(['目前這句已經說完了', '這是預期的下一格內容', '演員實際跳到這句很清楚的台詞']);
+  s.say(s.lines[0].text);
+  assert.equal(s.say('嗯', {itemId: 'b', startMs: 1100, endMs: 1200}).index, 1);
+  const correction = s.say(s.lines[2].text, {itemId: 'c', startMs: 1300, endMs: 2500, isFinal: true});
+  assert.equal(correction.index, 2);
+  assert.equal(correction.shortOpening, undefined);
+  assert.equal(s.tracker.prediction, null);
+});
+
+test('a single timed batch can complete the current cue and trigger its unrelated next speech', () => {
+  const s = show(['目前這句已經說完了', '接下來的劇本台詞']);
+  const result = s.say(s.lines[0].text + '欸等等', {endMs: 1300,
+    words: [{word: s.lines[0].text, start: 0, end: 1}, {word: '欸等等', start: 1.1, end: 1.3}]});
+  assert.equal(result.index, 1);
+  assert.equal(result.shortOpening.text, '欸等');
+  assert.equal(result.evidence.startMs, 1100);
+});

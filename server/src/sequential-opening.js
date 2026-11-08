@@ -8,7 +8,7 @@ function prepareOpening(script, index, event, direction = false) {
   if (!current || current.source.music || !entry?.text || entry.source.music ||
     (!direction && current.source.type === 'direction')) return null;
   if (script.entries.slice(index, next + 1).some(e => e.source.music)) return null;
-  return {fromIndex: index, index: next, direction, observed: {
+  return {fromIndex: index, index: next, direction, completed: direction || event.completed === true, observed: {
     itemId: event.itemId ?? null, text: normalizeText(event.text), endMs: event.endMs,
   }};
 }
@@ -31,7 +31,11 @@ function matchOpening(plan, script, event) {
   const speech = newOpeningSpeech(plan, event), entry = script.entries[plan.index];
   const heard = Array.from(normalizeText(speech?.text));
   const count = Math.min(T.triggerOpeningCharacters, heard.length, entry.length);
-  if (!count || heard.slice(0, count).join('') !== Array.from(entry.text).slice(0, count).join('')) return null;
+  // A completed cue owns the boundary: new speech triggers the expected next
+  // display before its content is verified. Partial cues still need a matching
+  // next opening, so ordinary continuation cannot spend this preparation.
+  if (!count || (!plan.completed &&
+    heard.slice(0, count).join('') !== Array.from(entry.text).slice(0, count).join(''))) return null;
   // Use the actual containing word range. Never invent a clock inside a
   // provider word just because only its first one or two characters trigger.
   const words = alignedWords(speech);
@@ -46,6 +50,23 @@ function matchOpening(plan, script, event) {
     firstWordId: proof.firstWordId, lastWordId: proof.lastWordId, estimated: speech.estimated === true};
 }
 
+// One ASR batch may contain the completed cue and the start of the next.
+// Split only at a real word boundary, never estimate inside a provider word.
+function completedBatchOpening(script, index, event) {
+  const target = script.entries[index]?.text;
+  if (!target || !normalizeText(event.text).startsWith(target)) return null;
+  let prefix = '';
+  for (const word of alignedWords(event)) {
+    prefix += normalizeText(word.text);
+    if (!target.startsWith(prefix)) return null;
+    if (prefix !== target) continue;
+    const plan = prepareOpening(script, index, {...event, text: target, endMs: word.endMs, completed: true});
+    const trigger = matchOpening(plan, script, event);
+    return trigger ? {plan, trigger} : null;
+  }
+  return null;
+}
+
 function observeOpening(plan, event) {
   const text = normalizeText(event.text), previous = plan.observed;
   // A shortened revision does not make previously consumed audio fresh again.
@@ -53,4 +74,4 @@ function observeOpening(plan, event) {
   plan.observed = {itemId: event.itemId, text, endMs: Math.max(previous.endMs, event.endMs)};
 }
 
-module.exports = {prepareOpening, matchOpening, observeOpening};
+module.exports = {prepareOpening, matchOpening, observeOpening, completedBatchOpening};

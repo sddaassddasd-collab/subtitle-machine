@@ -30,7 +30,7 @@ test('automatic live keeps the stream, performance language, recording and scrip
   assert.equal(f.session.automaticLive, true);
   assert.equal(f.session.captionMode, 'script'); assert.equal(f.session.subtitleControlMode, 'auto');
   assert.equal(f.stream.closing, false); assert.equal(f.stream.ready, true); assert.equal(f.stream.socket.readyState, 1);
-  assert.equal(f.session.currentIndex, 0); assert.equal(f.session.transcriptionLanguage, 'zh-TW');
+  assert.equal(f.session.currentIndex, 1); assert.equal(f.session.transcriptionLanguage, 'zh-TW');
   for (const out of [f.viewer(), f.projector()]) {
     assert.equal(out.source, 'transcription'); assert.match(out.text, /帶了傘/); assert.ok(!out.text.includes(texts[0]));
   }
@@ -54,7 +54,7 @@ test('locked live continues background location, then can return after unlock; l
   const f = setup(t); f.begin();
   assert.equal(f.event('performance:action', {action: 'lock-live'}).ok, true);
   f.say(texts[3], 'a', 12000, 14000, 14000);
-  assert.equal(f.session.automaticLive, true); assert.equal(f.session.currentIndex, 0);
+  assert.equal(f.session.automaticLive, true); assert.equal(f.session.currentIndex, 1);
   assert.equal(f.event('performance:action', {action: 'auto'}).ok, true);
   f.say(texts[4], 'b', 15000, 17000, Date.now() + 5000);
   assert.equal(f.session.automaticLive, false); assert.equal(f.session.currentIndex, 4);
@@ -130,7 +130,7 @@ test('a retained script prefix in a growing ASR item cannot bring live output ba
   const text = texts[0] + '這是演員突然即興插入的新發言';
   f.say(text, 'anchor', 0, 14000, 14000, {words: [
     {word: texts[0], start: 0, end: 1}, {word: '這是演員突然即興插入的新發言', start: 12, end: 14}]});
-  assert.equal(f.session.automaticLive, true); assert.equal(f.session.currentIndex, 0);
+  assert.equal(f.session.automaticLive, true); assert.equal(f.session.currentIndex, 1);
   assert.ok(!f.viewer().text.includes(texts[0]));
 });
 
@@ -237,7 +237,7 @@ test('caption correction updates output only, skips concurrent jobs, and retains
   assert.match(f.viewer().text, /其實更核心的問題應該是這樣吧/);
   assert.match(f.projector().text, /其實更核心/);
   assert.match(f.follower().buffer.find(e => e.itemId === 'caption').text, /其實跟核心/);
-  assert.equal(f.session.currentIndex, 0); assert.equal(f.session.automaticLive, true);
+  assert.equal(f.session.currentIndex, 1); assert.equal(f.session.automaticLive, true);
   assert.ok(f.events.some(e => e.type === 'caption_correction' && e.displayOnly === true));
 });
 
