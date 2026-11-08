@@ -1,6 +1,6 @@
 import {encodeAudioPacket} from './capture-wire.mjs'
 
-export const CAPTURE_TRANSPORT_LIMITS = Object.freeze({version: 6, maximumInFlightMs: 4000,
+export const CAPTURE_TRANSPORT_LIMITS = Object.freeze({version: 7, maximumAdaptiveOutstandingMs: 12000, progressStallMs: 20000, maximumInFlightMs: 4000,
   acknowledgementMs: 4000, delayedAckMs: 1000, maximumBufferedBytes: 65536, maximumQueuedPackets: 64,
   congestionMs: 2000, probeMs: 2000, probeThresholdMs: 2000, maximumOutstandingAudioMs: 4000, unresponsiveMs: 10000,
   reportMs: 5000, reconnectMs: 8000, packetMs: 40, cumulativeAckMs: 100})
@@ -25,6 +25,7 @@ export class CaptureTransport {
     this.lastAckAt = null; this.serverNetworkAgeMs = null; this.serverAudioMs = null; this.serverAckDelayMs = null
     this.createdAt = now(); this.lastSequence = 0; this.lastAckSequence = 0; this.expiredReceipts = 0
     this.totalAudioMs = 0; this.acknowledgedAudioMs = 0; this.wireBytes = 0; this.pcmBytes = 0
+    this.uploadWindowMs = CAPTURE_TRANSPORT_LIMITS.maximumOutstandingAudioMs
     this.creditEnds = new Map()
     this.receiveAck = ack => this.acknowledge(ack)
     socket.on('transcription:audio-ack', this.receiveAck)
@@ -38,7 +39,7 @@ export class CaptureTransport {
       serverNetworkAgeMs: this.serverNetworkAgeMs, serverAudioMs: this.serverAudioMs, serverAckDelayMs: this.serverAckDelayMs,
       rttMs: this.rttMs, maxRttMs: this.maxRttMs,
       sentPackets: this.sentPackets, acknowledgedPackets: this.acknowledgedPackets,
-      sentAudioMs: this.totalAudioMs, receivedAudioMs: this.receivedAudioMs,
+      uploadWindowMs: this.uploadWindowMs, sentAudioMs: this.totalAudioMs, receivedAudioMs: this.receivedAudioMs,
       providerSubmittedAudioMs: this.providerSubmittedAudioMs, recognizedAudioMs: this.recognizedAudioMs,
       outstandingAudioMs: Math.max(0, this.totalAudioMs - this.acknowledgedAudioMs), wireBytes: this.wireBytes, pcmBytes: this.pcmBytes}
   }
@@ -53,7 +54,8 @@ export class CaptureTransport {
         this.congestedAt = now
         this.onReport?.({reason: 'capture_transport_congested', ...details})
       }
-      if (now - this.congestedAt >= CAPTURE_TRANSPORT_LIMITS.congestionMs)
+      if (now - this.congestedAt >= CAPTURE_TRANSPORT_LIMITS.congestionMs &&
+        now - (this.lastAckAt ?? this.firstSentAt ?? this.createdAt) >= CAPTURE_TRANSPORT_LIMITS.progressStallMs)
         return this.block('capture_transport_backlog', details)
       return false
     }
@@ -96,7 +98,7 @@ export class CaptureTransport {
     if (!this.check()) return false
     // Receipt history may expire, but end-to-end upload credit never does. This
     // bounds PCM hidden in OS/TCP/proxy buffers that bufferedAmount cannot see.
-    if (this.totalAudioMs - this.acknowledgedAudioMs + packet.durationMs > CAPTURE_TRANSPORT_LIMITS.maximumOutstandingAudioMs) {
+    if (this.totalAudioMs - this.acknowledgedAudioMs + packet.durationMs > this.uploadWindowMs) {
       if (!this.flowControlled) {this.flowControlled = true; this.onReport?.({reason: 'capture_flow_control', ...this.details()})}
       return false
     }
@@ -125,6 +127,13 @@ export class CaptureTransport {
       !Number.isSafeInteger(ack.sequence) || ack.sequence <= this.lastAckSequence || ack.sequence > this.lastSequence) return
     const record = this.pending.get(ack.sequence)
     const timingRecord = record || this.creditEnds.get(ack.sequence)
+    // Delayed receipts must not cap throughput below real time. Keep a bounded
+    // window large enough for measured round trips, including expired samples.
+    if (timingRecord && ack.ok === true) {
+      const latencyMs = Math.max(0, this.now() - timingRecord.at)
+      this.uploadWindowMs = Math.max(this.uploadWindowMs, Math.min(CAPTURE_TRANSPORT_LIMITS.maximumAdaptiveOutstandingMs,
+        Math.ceil(latencyMs * 1.5 + 1000)))
+    }
     const credit = this.creditEnds.get(ack.sequence)
     if (credit !== undefined) this.acknowledgedAudioMs = credit.audioEndMs
     for (const sequence of this.creditEnds.keys()) if (sequence <= ack.sequence) this.creditEnds.delete(sequence)
@@ -151,7 +160,7 @@ export class CaptureTransport {
       const clock = Number.isFinite(received) && Number.isFinite(replied)
         ? {clockOffsetMs: ((received - record.at) + (replied - finishedAt)) / 2,
           clockUncertaintyMs: Math.max(0, (finishedAt - record.at - (replied - received)) / 2)} : {}
-      this.onReport?.({reason: 'capture_packet_timing', sequence: ack.sequence, streamId: ack.streamId, providerStreamId: ack.providerStreamId,
+      this.onReport?.({reason: 'capture_packet_timing', packetSequence: ack.sequence, sequence: ack.sequence, streamId: ack.streamId, providerStreamId: ack.providerStreamId,
         sourceStartMs: record.sourceStartMs, sourceEndMs: record.sourceEndMs,
         clientAckReceivedAt: finishedAt, generatedAt: record.generatedAt, queuedAt: record.queuedAt, sentAt: record.at,
         queueWaitMs: Math.max(0, record.at - (record.queuedAt ?? record.at)), ...clock,

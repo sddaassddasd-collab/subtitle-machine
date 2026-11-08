@@ -95,7 +95,7 @@ function captureTransportDetails(value) {
       .concat(['outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs',
         'queuedAudioMs', 'oldestQueuedAgeMs'])
       .concat(['maximumAgeMs', 'maximumQueuedMs', 'overflowRetainMs', 'startupRetainMs', 'backlogMs', 'backlogRecoveryMs', 'retryBaseMs', 'retryMaxMs', 'sampleGapMs'])
-      .concat(['clientAckReceivedAt', 'generatedAt', 'queuedAt', 'sentAt', 'serverReceivedAt', 'providerSubmittedAt', 'acknowledgedAt', 'clockOffsetMs', 'clockUncertaintyMs', 'generatedAudioMs', 'sentAudioMs', 'receivedAudioMs', 'providerSubmittedAudioMs', 'recognizedAudioMs', 'droppedAudioMs', 'retainedAudioMs', 'recoveryElapsedMs', 'recoveryAt', 'queueWaitMs'])
+      .concat(['clientAckReceivedAt', 'uploadWindowMs', 'maximumAdaptiveOutstandingMs', 'progressStallMs', 'packetSequence', 'generatedAt', 'queuedAt', 'sentAt', 'serverReceivedAt', 'providerSubmittedAt', 'acknowledgedAt', 'clockOffsetMs', 'clockUncertaintyMs', 'generatedAudioMs', 'sentAudioMs', 'receivedAudioMs', 'providerSubmittedAudioMs', 'recognizedAudioMs', 'droppedAudioMs', 'retainedAudioMs', 'recoveryElapsedMs', 'recoveryAt', 'queueWaitMs'])
       .filter(key => Number.isFinite(source[key])).map(key => [key, (key.endsWith('At') || key === 'clockOffsetMs' ? source[key] : Math.max(0, Math.min(604800000, source[key])))]))};
 }
 

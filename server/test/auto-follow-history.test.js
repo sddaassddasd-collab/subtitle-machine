@@ -502,3 +502,19 @@ test('replacement capture diagnostics persist without an active stream and keep 
   await h.flush(s.id);
   assert.equal((await h.read(s.id, runId)).events.some(e => e.clientEventId === 'old-event'), false);
 });
+
+test('packet identity survives global history sequencing and export on both ends', async () => {
+  const {session: s, history: h} = fixture('packet-identity');
+  const id = await h.start(s);
+  h.event(s.id, 'audio_progress', {captureId: 'capture', packetSequence: 4567, sequence: 4567});
+  await h.clientHealth(s.id, [{eventId: 'packet-ack', reason: 'capture_packet_timing',
+    captureId: 'capture', packetSequence: 4567, sequence: 4567, uploadWindowMs: 12000}]);
+  const report = historyReport(await h.read(s.id, id));
+  const received = report.events.find(e => e.type === 'audio_progress');
+  const ack = report.events.find(e => e.reason === 'capture_packet_timing');
+  assert.equal(received.packetSequence, 4567);
+  assert.equal(ack.packetSequence, 4567);
+  assert.notEqual(received.sequence, ack.sequence);
+  assert.equal(ack.uploadWindowMs, 12000);
+  await h.end(s.id);
+});

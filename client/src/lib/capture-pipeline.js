@@ -2,9 +2,9 @@ import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket} f
 import {signalMetrics} from './audio-signal.js'
 import {AUDIO_WIRE} from './capture-wire.mjs'
 
-export const PIPELINE_SETTINGS = Object.freeze({version: 3, sampleRate: 24000, maximumAgeMs: 10000,
-  maximumQueuedMs: 8000, overflowRetainMs: 1000, startupRetainMs: 1000,
-  backlogMs: 4000, backlogRecoveryMs: 3000, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
+export const PIPELINE_SETTINGS = Object.freeze({version: 4, sampleRate: 24000, maximumAgeMs: 10000,
+  maximumQueuedMs: 8000, overflowRetainMs: 1000,
+  backlogMs: 4000, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
 
 // Keep the fractional sample position across batches (including 44.1 kHz input).
 // Input time and provider time are distinct; dropped input is never counted as
@@ -113,7 +113,8 @@ export class CapturePipeline {
           }
           if (ack.ok && !ack.dropped && !ack.queued && !ack.ignored && !this.firstReceipt) {
             this.firstReceipt = true; this.stableAt = this.now()
-            this.state('running', '收音與辨識已連線。')
+            this.state(this.queuedMs >= PIPELINE_SETTINGS.backlogMs ? 'delayed' : 'running',
+              this.queuedMs >= PIPELINE_SETTINGS.backlogMs ? '音訊持續傳送，正在消化積壓。' : '收音與辨識已連線。')
             this.report('capture_client_ready', {attempt: this.attempt})
           }
         },
@@ -136,9 +137,9 @@ export class CapturePipeline {
       this.ready = true; this.connecting = false
       if (result.audioWire === AUDIO_WIRE) this.transport.packedEpoch = this.generation
       this.report('capture_transport_ready', {...this.transport.details()})
-      // Keep the last second of startup speech. During an established stream,
-      // retain continuous PCM through ordinary receipt/transport jitter.
-      this.trimQueue(PIPELINE_SETTINGS.startupRetainMs, 'reconnect_trim')
+      // Retain the bounded outage queue; drain discards only actually expired
+      // packets. Reconnection must not apply a second one-second crop.
+      this.trimQueue(PIPELINE_SETTINGS.maximumQueuedMs, 'reconnect_trim')
       this.recoveryReadyAt = this.now(); this.recoverySnapshots = new Set()
       this.report('capture_recovery_ready', {recoveryAt: this.recoveryAt || 0, retainedAudioMs: this.queuedMs, droppedAudioMs: this.droppedAudioMs})
       this.drain()
@@ -263,17 +264,21 @@ export class CapturePipeline {
     }
     if (!this.ready || !this.transport || !this.socket?.connected) return
     this.transport.check(); this.drain()
-    // ACKs can keep arriving while upload throughput remains below real time.
-    // A successful probe alone cannot repair that growing queue.
+    // A growing queue alone cannot distinguish slow receipts from a failed
+    // connection. Keep the epoch while cumulative reception is advancing.
     if (this.queuedMs >= PIPELINE_SETTINGS.backlogMs) {
-      this.backlogSince ??= now
-      if (now - this.backlogSince >= PIPELINE_SETTINGS.backlogRecoveryMs) {
-        this.report('capture_backlog_recovery', {queuedAudioMs: this.queuedMs,
-          ...this.transport.details()})
-        this.recover('capture_transport_backlog', 'transport')
-        return
+      if (this.backlogSince === null) {
+        this.report('capture_backlog_waiting', {queuedAudioMs: this.queuedMs, ...this.transport.details()})
+        this.state('delayed', '音訊傳輸落後，持續傳送並等待接收進度。')
       }
+      this.backlogSince ??= now
     } else this.backlogSince = null
+    const reception = this.transport.details()
+    if (reception.outstandingAudioMs > 0 && reception.lastAckAgeMs >= T.progressStallMs) {
+      this.report('capture_reception_stalled', {queuedAudioMs: this.queuedMs, ...reception})
+      this.recover('capture_transport_unresponsive', 'transport')
+      return
+    }
     if (!this.ready || now < this.probeAt || this.probePending) return
     const progress = this.transport.details()
     if (progress.lastAckAgeMs < T.acknowledgementMs && progress.outstandingAudioMs < T.probeThresholdMs) return
@@ -286,7 +291,7 @@ export class CapturePipeline {
       if (!this.desired || epoch !== this.epoch) return
       if (error) {
         this.failedProbes++
-        if (this.failedProbes >= 2 && this.transport.details().lastAckAgeMs >= T.unresponsiveMs)
+        if (this.failedProbes >= 2 && this.transport.details().lastAckAgeMs >= T.progressStallMs)
           this.recover('capture_transport_unresponsive', 'transport')
       } else if (!data?.ok) this.recover('provider_not_running', 'provider')
       else {

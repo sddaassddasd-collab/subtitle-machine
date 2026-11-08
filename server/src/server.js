@@ -13883,7 +13883,7 @@ io.on('connection', (socket) => {
         autoFollowHistory.event(sessionId, data.dropped ? 'capture_drop_range' : 'audio_progress', {
           ...details, acknowledgedAt: undefined, handlerCompletedAt: details.acknowledgedAt,
           streamId: stream.historyStreamId, providerStreamId: stream.liveTranslationStreamId,
-          captureId, sequence, sourceId, sourceStartMs, sourceEndMs,
+          captureId, sequence, packetSequence: sequence, sourceId, sourceStartMs, sourceEndMs,
           generatedAt: capturedAt, clientSendAgeMs: captureAgeMs,
           droppedInputMs: data.dropped ? normalizedDurationMs : 0,
           cause: data.reason || (data.dropped ? 'provider_not_ready' : null),

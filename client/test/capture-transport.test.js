@@ -82,7 +82,7 @@ test('real sender congestion drops unsent frames, then replaces only a persisten
     const f = fixture(); backlog(f)
     assert.equal(f.send(1), false); assert.equal(f.sent.length, 0)
     assert.deepEqual(f.blocked, [])
-    f.clock(L.congestionMs + 1); assert.equal(f.send(2), false)
+    f.clock(L.progressStallMs + 1); assert.equal(f.send(2), false)
     assert.deepEqual(f.blocked, ['capture_transport_backlog'])
     f.ack(1); assert.equal(f.send(3), false)
   }
@@ -141,4 +141,17 @@ test('packet timing joins source and server clocks with signed offset and explic
   assert.equal(chain.clockUncertaintyMs, 90)
   assert.equal(chain.streamId, 'asr')
   assert.equal(chain.recognizedAudioMs, 0)
+})
+
+test('visible send buffers stay bounded without reconnecting while cumulative receipts advance', () => {
+  const f = fixture()
+  for (let i = 1; i <= 30; i++) {
+    f.clock(i * 1000); f.socket.io.engine.writeBuffer = []
+    f.send(i)
+    f.socket.io.engine.writeBuffer = Array.from({length: L.maximumQueuedPackets}, () => ({data: 'queued'}))
+    f.clock(i * 1000 + 100); f.ack(i)
+    assert.equal(f.transport.check(), false)
+  }
+  assert.deepEqual(f.blocked, [])
+  f.transport.close()
 })

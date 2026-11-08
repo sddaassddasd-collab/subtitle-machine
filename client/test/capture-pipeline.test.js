@@ -4,7 +4,7 @@ import {setImmediate} from 'node:timers'
 import {CapturePipeline, PcmResampler, PIPELINE_SETTINGS as S} from '../src/lib/capture-pipeline.js'
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture({receipt = true, dropped = false, receiptDelay = 0} = {}) {
+function fixture({receipt = true, dropped = false, receiptDelay = 0, probeProgress = true} = {}) {
   let now = 0, network = true, provider = true
   const sockets = [], events = [], stats = {frames: 0, starts: 0, stops: 0, probes: 0}
   const timers = {setInterval: () => 1, clearInterval() {}}
@@ -34,7 +34,7 @@ function fixture({receipt = true, dropped = false, receiptDelay = 0} = {}) {
         }
         if (name === 'transcription:capture-probe') {
           stats.probes++
-          const response = {ok: true, captureId: this.captureId, sequence: this.received, serverAudioMs: this.audioMs}
+          const response = {ok: true, captureId: this.captureId, sequence: probeProgress ? this.received : 0, serverAudioMs: probeProgress ? this.audioMs : 0}
           later(() => ack(null, response))
         }
       }}
@@ -85,8 +85,8 @@ test('a provider failure changes only the provider epoch on the existing audio t
   f.provider(true); f.pipeline.tick(); await flush(); f.frame(1240)
   assert.notEqual(f.pipeline.captureId, oldId); assert.equal(f.stats.starts, 2)
   assert.equal(f.sockets.length, 1); assert.equal(f.stats.last.sourceId, 'microphone')
-  assert.equal(f.stats.last.sourceEndMs, 1240); assert.equal(f.stats.last.sequence, 26)
-  assert.equal(f.sockets[0].audioMs, 1040, 'one second of retained startup speech precedes the new frame')
+  assert.equal(f.stats.last.sourceEndMs, 1240); assert.equal(f.stats.last.sequence, 29)
+  assert.equal(f.sockets[0].audioMs, 1160, 'the bounded provider outage queue is retained without a second crop')
   f.pipeline.stop()
 })
 
@@ -199,16 +199,18 @@ test('a sustained outage overflows in bounded blocks and the next second of spee
 })
 
 
-test('sustained slow receipts rebuild transport even while progress probes succeed', async () => {
-  const f = fixture({receiptDelay: 6000}); await flush()
-  for (let i = 1; i <= 750; i++) {
-    f.frame(i * 40); f.pipeline.tick(); await flush()
-  }
-  assert.ok(f.events.some(e => e.reason === 'capture_backlog_recovery'))
-  assert.ok(f.stats.starts > 1)
-  assert.ok(f.sockets.length > 1)
+for (const receiptDelay of [5000, 10000, 11000]) test(`sustained ${receiptDelay} ms receipts catch up without reconnecting or losing audio`, async () => {
+  const f = fixture({receiptDelay}); await flush()
+  for (let i = 1; i <= 2000; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  // Stop producing while delayed receipts drain the last packets.
+  for (let i = 1; i <= 15; i++) {f.clock(80000 + i * 1000); f.pipeline.tick(); await flush()}
+  assert.equal(f.stats.starts, 1)
+  assert.equal(f.sockets.length, 1)
+  assert.equal(f.pipeline.droppedAudioMs, 0)
+  assert.equal(f.sockets[0].audioMs, 80000)
+  assert.equal(f.pipeline.queuedMs, 0)
+  assert.ok(f.pipeline.transport.uploadWindowMs <= 12000)
   assert.equal(f.pipeline.desired, true)
-  assert.ok(f.pipeline.queuedMs <= S.maximumQueuedMs)
   f.pipeline.stop()
 })
 
@@ -229,5 +231,28 @@ test('drop ranges and recovery snapshots retain the source timeline and cumulati
   f.clock(11000); f.pipeline.tick()
   assert.ok(f.events.some(e => e.reason === 'capture_recovery_after' && e.recoveryElapsedMs === 10000))
   assert.ok(f.events.some(e => e.reason === 'capture_progress' && e.generatedAudioMs === 160))
+  f.pipeline.stop()
+})
+
+test('successful probes with no advancing receipt do not hide a stalled upload', async () => {
+  const f = fixture({receipt: false, probeProgress: false}); await flush()
+  for (let i = 1; i <= 550; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  assert.ok(f.events.some(e => e.reason === 'capture_reception_stalled'))
+  assert.ok(f.stats.starts > 1)
+  assert.equal(f.pipeline.desired, true)
+  f.pipeline.stop()
+})
+
+test('a brief real disconnection retains all queued speech through transport replacement', async () => {
+  const f = fixture(); await flush(); f.frame(40)
+  f.network(false); f.sockets[0].disconnect()
+  for (let i = 2; i <= 100; i++) {
+    if (i === 25) f.network(true)
+    f.frame(i * 40); f.pipeline.tick(); await flush()
+  }
+  assert.equal(f.stats.starts, 2)
+  assert.equal(f.pipeline.droppedAudioMs, 0)
+  assert.equal(f.pipeline.queuedMs, 0)
+  assert.equal(f.sockets.reduce((sum, socket) => sum + (socket.audioMs || 0), 0), 4000)
   f.pipeline.stop()
 })
