@@ -35,12 +35,13 @@ export class CapturePipeline {
     this.createSocket = createSocket; this.notify = notify; this.now = now; this.timers = timers
     this.queue = []; this.queuedMs = 0; this.attempt = 0; this.epoch = 0; this.ready = false
   }
-  report(reason, data = {}) {this.notify?.({type: 'report', reason, captureId: this.captureId || '', occurredAt: this.now(), ...data})}
+  report(reason, data = {}) {this.notify?.({type: 'report', reason, captureId: this.captureId || '', sourceId: this.config?.sourceId || '', occurredAt: this.now(), ...data})}
   state(status, message = '') {this.notify?.({type: 'state', status, message, captureId: this.captureId || ''})}
   start(config) {
-    this.config = config; this.desired = true; this.clock = config.clock
+    this.config = config; this.report('capture_pipeline_settings', PIPELINE_SETTINGS); this.desired = true; this.clock = config.clock
     this.resampler = new PcmResampler(config.inputRate)
     this.generation = config.clientInfo.captureGeneration
+    this.generatedAudioMs = 0; this.droppedAudioMs = 0; this.nextProgressAt = 0
     this.lastSampleAt = this.now(); this.nextReportAt = 0
     this.timer = this.timers.setInterval(() => this.tick(), 100)
     void this.connect(true)
@@ -137,7 +138,9 @@ export class CapturePipeline {
       this.report('capture_transport_ready', {...this.transport.details()})
       // Keep the last second of startup speech. During an established stream,
       // retain continuous PCM through ordinary receipt/transport jitter.
-      this.trimQueue(PIPELINE_SETTINGS.startupRetainMs)
+      this.trimQueue(PIPELINE_SETTINGS.startupRetainMs, 'reconnect_trim')
+      this.recoveryReadyAt = this.now(); this.recoverySnapshots = new Set()
+      this.report('capture_recovery_ready', {recoveryAt: this.recoveryAt || 0, retainedAudioMs: this.queuedMs, droppedAudioMs: this.droppedAudioMs})
       this.drain()
     } catch (error) {
       if (!this.desired || epoch !== this.epoch) return
@@ -150,6 +153,9 @@ export class CapturePipeline {
     if (!this.desired || this.retryAt) return
     // A provider may be reconnecting itself; its control snapshot is not a
     // request to rebuild the microphone or its transport.
+    this.recoveryAt = this.now()
+    this.report('capture_recovery_before', {cause: reason, stage: scope, queuedAudioMs: this.queuedMs,
+      generatedAudioMs: this.generatedAudioMs, droppedAudioMs: this.droppedAudioMs, ...this.transport?.details()})
     this.epoch++; this.connecting = false; this.ready = false; this.transport?.close()
     this.schedule(reason, scope)
   }
@@ -170,6 +176,7 @@ export class CapturePipeline {
     // a hardware sample clock's long-run drift or suspension as stale audio.
     const generatedAt = Number.isFinite(frame.postedAt) ? frame.postedAt
       : this.clock.wallTime + (frame.endTime - this.clock.contextTime) * 1000
+    this.generatedAudioMs += durationMs
     const ageMs = Math.max(0, now - generatedAt)
     const metrics = signalMetrics(frame.samples)
     if (now >= this.nextReportAt) {
@@ -177,24 +184,33 @@ export class CapturePipeline {
       this.notify?.({type: 'level', level: metrics.level, captureAgeMs: ageMs, at: now})
     }
     if (ageMs > PIPELINE_SETTINGS.maximumAgeMs) {
-      this.droppedMs = (this.droppedMs || 0) + durationMs
+      this.recordDrop({sourceStartMs: frame.endTime * 1000 - durationMs, sourceEndMs: frame.endTime * 1000, durationMs}, 'source_expired')
       return
     }
     const packet = {sessionId: this.config.request.sessionId, pcm: pcm.buffer, durationMs, level: metrics.level,
       sourceId: this.config.sourceId, sourceStartMs: frame.endTime * 1000 - frame.samples.length / this.config.inputRate * 1000,
-      sourceEndMs: frame.endTime * 1000, capturedAt: now - ageMs, captureAgeMs: ageMs, quality: metrics}
+      sourceEndMs: frame.endTime * 1000, queuedAt: now, capturedAt: now - ageMs, captureAgeMs: ageMs, quality: metrics}
     this.queue.push(packet); this.queuedMs += durationMs
     // If a prolonged outage exceeds the finite buffer, skip one old block and
     // resume a coherent stretch. Dropping 40 ms on every ACK destroyed speech.
     if (this.queuedMs > PIPELINE_SETTINGS.maximumQueuedMs)
-      this.trimQueue(PIPELINE_SETTINGS.overflowRetainMs)
+      this.trimQueue(PIPELINE_SETTINGS.overflowRetainMs, 'queue_overflow')
     this.drain()
   }
-  trimQueue(retainMs) {
+  recordDrop(packet, cause) {
+    this.droppedMs = (this.droppedMs || 0) + packet.durationMs
+    this.droppedAudioMs = (this.droppedAudioMs || 0) + packet.durationMs
+    this.report('capture_drop_range', {cause, sourceId: this.config.sourceId,
+      sourceStartMs: packet.sourceStartMs, sourceEndMs: packet.sourceEndMs,
+      droppedInputMs: packet.durationMs, droppedAudioMs: this.droppedAudioMs})
+  }
+  trimQueue(retainMs, cause = 'queue_trim') {
+    let first, last, durationMs = 0
     while (this.queuedMs > retainMs && this.queue.length) {
       const dropped = this.queue.shift(); this.queuedMs -= dropped.durationMs
-      this.droppedMs = (this.droppedMs || 0) + dropped.durationMs
+      first ??= dropped; last = dropped; durationMs += dropped.durationMs
     }
+    if (first) this.recordDrop({sourceStartMs: first.sourceStartMs, sourceEndMs: last.sourceEndMs, durationMs}, cause)
   }
   drain() {
     if (!this.ready || !this.desired || !this.transport) return
@@ -202,7 +218,7 @@ export class CapturePipeline {
       let packet = this.queue[0], count = 1
       const age = this.now() - packet.capturedAt
       if (age > PIPELINE_SETTINGS.maximumAgeMs) {
-        this.queue.shift(); this.queuedMs -= packet.durationMs; this.droppedMs = (this.droppedMs || 0) + packet.durationMs; continue
+        this.queue.shift(); this.queuedMs -= packet.durationMs; this.recordDrop(packet, 'queue_expired'); continue
       }
       if (this.transport.packedEpoch !== undefined) {
         const next = this.queue[1]
@@ -223,6 +239,19 @@ export class CapturePipeline {
   tick() {
     if (!this.desired) return
     const now = this.now()
+    if (now >= this.nextProgressAt) {
+      this.nextProgressAt = now + 1000
+      this.report('capture_progress', {generatedAudioMs: this.generatedAudioMs, droppedAudioMs: this.droppedAudioMs,
+        queuedAudioMs: this.queuedMs, ...this.transport?.details()})
+    }
+    if (this.ready && this.recoveryReadyAt !== undefined) for (const seconds of [5, 10]) {
+      if (now - this.recoveryReadyAt >= seconds * 1000 && !this.recoverySnapshots.has(seconds)) {
+        this.recoverySnapshots.add(seconds)
+        this.report('capture_recovery_after', {recoveryAt: this.recoveryAt || 0, recoveryElapsedMs: seconds * 1000,
+          generatedAudioMs: this.generatedAudioMs, droppedAudioMs: this.droppedAudioMs,
+          queuedAudioMs: this.queuedMs, ...this.transport?.details()})
+      }
+    }
     if (this.retryAt && now >= this.retryAt) {
       const transport = this.retryScope === 'transport'; this.retryAt = 0
       void this.connect(transport)

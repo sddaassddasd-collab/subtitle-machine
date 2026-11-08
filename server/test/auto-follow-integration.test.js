@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates } = require('../src/auto-follow');
 const {freshSpeech} = require('../src/word-evidence');
 const {trackerSnapshot} = require('../src/follow-trace');
-const {ACOUSTIC_SETTINGS} = require('../src/follow-settings');
+const {ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS} = require('../src/follow-settings');
 const {SemanticFollower} = require('../src/semantic-follow');
 const performanceFollow = require('../src/performance-follow');
 const performanceLanguage = require('../src/performance-language');
@@ -29,7 +29,7 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS,
+    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
     ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview,
     TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },

@@ -124,3 +124,21 @@ test('a hung setup stage terminates and reports its exact phase', async () => {
   await assert.rejects(captureStage(new Promise(() => {}), 'permission', 10, e => reports.push(e)), /permission/)
   assert.deepEqual(reports.map(e => e.status), ['started', 'failed'])
 })
+
+test('packet timing joins source and server clocks with signed offset and explicit uncertainty', () => {
+  const f = fixture()
+  f.clock(1000)
+  f.transport.send({captureId: 'capture', sequence: 1, durationMs: 40, pcm: new ArrayBuffer(1920),
+    capturedAt: 800, queuedAt: 900, sourceStartMs: 0, sourceEndMs: 40})
+  f.clock(1200)
+  f.ack(1, {serverReceivedAt: 600, acknowledgedAt: 620, providerSubmittedAt: 610,
+    streamId: 'asr', receivedAudioMs: 40, providerSubmittedAudioMs: 40, recognizedAudioMs: 0})
+  const chain = f.reports.find(r => r.reason === 'capture_packet_timing')
+  assert.equal(chain.generatedAt, 800)
+  assert.equal(chain.sentAt, 1000)
+  assert.equal(chain.queueWaitMs, 100)
+  assert.equal(chain.clockOffsetMs, -490)
+  assert.equal(chain.clockUncertaintyMs, 90)
+  assert.equal(chain.streamId, 'asr')
+  assert.equal(chain.recognizedAudioMs, 0)
+})

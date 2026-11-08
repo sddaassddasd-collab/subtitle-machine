@@ -94,7 +94,9 @@ function captureTransportDetails(value) {
       'expiredReceipts', 'droppedInputMs', 'sourceStartMs', 'sourceEndMs', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs']
       .concat(['outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs',
         'queuedAudioMs', 'oldestQueuedAgeMs'])
-      .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(604800000, source[key]))]))};
+      .concat(['maximumAgeMs', 'maximumQueuedMs', 'overflowRetainMs', 'startupRetainMs', 'backlogMs', 'backlogRecoveryMs', 'retryBaseMs', 'retryMaxMs', 'sampleGapMs'])
+      .concat(['clientAckReceivedAt', 'generatedAt', 'queuedAt', 'sentAt', 'serverReceivedAt', 'providerSubmittedAt', 'acknowledgedAt', 'clockOffsetMs', 'clockUncertaintyMs', 'generatedAudioMs', 'sentAudioMs', 'receivedAudioMs', 'providerSubmittedAudioMs', 'recognizedAudioMs', 'droppedAudioMs', 'retainedAudioMs', 'recoveryElapsedMs', 'recoveryAt', 'queueWaitMs'])
+      .filter(key => Number.isFinite(source[key])).map(key => [key, (key.endsWith('At') || key === 'clockOffsetMs' ? source[key] : Math.max(0, Math.min(604800000, source[key])))]))};
 }
 
 function clientMetadata(value) {

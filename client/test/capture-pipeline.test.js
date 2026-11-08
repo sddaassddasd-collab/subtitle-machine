@@ -211,3 +211,23 @@ test('sustained slow receipts rebuild transport even while progress probes succe
   assert.ok(f.pipeline.queuedMs <= S.maximumQueuedMs)
   f.pipeline.stop()
 })
+
+test('drop ranges and recovery snapshots retain the source timeline and cumulative progress', async () => {
+  const f = fixture(); await flush()
+  f.frame(40); f.frame(80)
+  f.pipeline.ready = false
+  f.frame(120); f.frame(160)
+  f.pipeline.trimQueue(40, 'reconnect_trim')
+  const drop = f.events.find(e => e.reason === 'capture_drop_range')
+  assert.equal(drop.cause, 'reconnect_trim')
+  assert.equal(drop.sourceStartMs, 80)
+  assert.equal(drop.sourceEndMs, 120)
+  assert.equal(drop.droppedInputMs, 40)
+  f.pipeline.ready = true
+  f.clock(6000); f.pipeline.tick()
+  assert.ok(f.events.some(e => e.reason === 'capture_recovery_after' && e.recoveryElapsedMs === 5000))
+  f.clock(11000); f.pipeline.tick()
+  assert.ok(f.events.some(e => e.reason === 'capture_recovery_after' && e.recoveryElapsedMs === 10000))
+  assert.ok(f.events.some(e => e.reason === 'capture_progress' && e.generatedAudioMs === 160))
+  f.pipeline.stop()
+})

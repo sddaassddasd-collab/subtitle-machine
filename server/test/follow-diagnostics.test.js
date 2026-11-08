@@ -103,3 +103,17 @@ test('ignored recognition has specific reasons and a stable snapshot without lea
   assert.equal(snapshot.progress, 1); assert.equal(FOLLOW_SETTINGS.acoustic.minimumConfidence, 0.8);
   assert.ok(Object.isFrozen(FOLLOW_SETTINGS.acoustic));
 });
+
+test('diagnostic sanitization preserves epoch timestamps and signed clock offsets', () => {
+  const clean = captureTransportDetails({sentAt: 1794139146049, serverReceivedAt: 1794139146120,
+    clockOffsetMs: -1234, clockUncertaintyMs: 71, generatedAudioMs: 3600000, recognizedAudioMs: 3590000,
+    maximumQueuedMs: 8000, apiKey: 'secret'});
+  assert.equal(clean.sentAt, 1794139146049);
+  assert.equal(clean.clockOffsetMs, -1234);
+  assert.equal(clean.recognizedAudioMs, 3590000);
+  assert.equal(clean.maximumQueuedMs, 8000);
+  assert.equal(clean.apiKey, undefined);
+  const {serverDiagnosticMetadata} = require('../src/server-diagnostics');
+  assert.ok(serverDiagnosticMetadata().node);
+  assert.equal(serverDiagnosticMetadata().diagnosticsVersion, 1);
+});

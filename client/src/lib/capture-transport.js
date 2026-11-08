@@ -38,6 +38,8 @@ export class CaptureTransport {
       serverNetworkAgeMs: this.serverNetworkAgeMs, serverAudioMs: this.serverAudioMs, serverAckDelayMs: this.serverAckDelayMs,
       rttMs: this.rttMs, maxRttMs: this.maxRttMs,
       sentPackets: this.sentPackets, acknowledgedPackets: this.acknowledgedPackets,
+      sentAudioMs: this.totalAudioMs, receivedAudioMs: this.receivedAudioMs,
+      providerSubmittedAudioMs: this.providerSubmittedAudioMs, recognizedAudioMs: this.recognizedAudioMs,
       outstandingAudioMs: Math.max(0, this.totalAudioMs - this.acknowledgedAudioMs), wireBytes: this.wireBytes, pcmBytes: this.pcmBytes}
   }
   check() {
@@ -106,8 +108,8 @@ export class CaptureTransport {
       return false
     this.captureId ??= packet.captureId
     this.totalAudioMs += packet.durationMs
-    const record = {at: this.now(), durationMs: packet.durationMs, audioEndMs: this.totalAudioMs}
-    this.creditEnds.set(packet.sequence, this.totalAudioMs)
+    const record = {sourceStartMs: packet.sourceStartMs, sourceEndMs: packet.sourceEndMs, generatedAt: packet.capturedAt, queuedAt: packet.queuedAt, at: this.now(), durationMs: packet.durationMs, audioEndMs: this.totalAudioMs}
+    this.creditEnds.set(packet.sequence, record)
     this.pending.set(packet.sequence, record); this.audioMs += record.durationMs; this.sentPackets++
     this.firstSentAt ??= this.now()
     this.lastSequence = packet.sequence
@@ -122,8 +124,9 @@ export class CaptureTransport {
     if (this.closed || this.blocked || !ack || ack.captureId !== this.captureId ||
       !Number.isSafeInteger(ack.sequence) || ack.sequence <= this.lastAckSequence || ack.sequence > this.lastSequence) return
     const record = this.pending.get(ack.sequence)
+    const timingRecord = record || this.creditEnds.get(ack.sequence)
     const credit = this.creditEnds.get(ack.sequence)
-    if (credit !== undefined) this.acknowledgedAudioMs = credit
+    if (credit !== undefined) this.acknowledgedAudioMs = credit.audioEndMs
     for (const sequence of this.creditEnds.keys()) if (sequence <= ack.sequence) this.creditEnds.delete(sequence)
     for (const [sequence, packet] of this.pending) if (sequence <= ack.sequence) {
       this.pending.delete(sequence); this.audioMs -= packet.durationMs
@@ -136,14 +139,37 @@ export class CaptureTransport {
     if (Number.isFinite(ack.networkAgeMs)) {
       this.serverNetworkAgeMs = Math.max(0, ack.networkAgeMs); this.networkSampleAt = this.now()
     }
+    for (const field of ['receivedAudioMs', 'providerSubmittedAudioMs', 'recognizedAudioMs'])
+      if (Number.isFinite(ack[field])) this[field] = Math.max(0, ack[field])
     if (Number.isFinite(ack.serverAudioMs)) this.serverAudioMs = Math.max(0, ack.serverAudioMs)
     if (Number.isFinite(ack.acknowledgedAt) && Number.isFinite(ack.receivedAt))
       this.serverAckDelayMs = Math.max(0, ack.acknowledgedAt - ack.receivedAt)
+    if (timingRecord && this.now() >= (this.nextChainAt || 0)) {
+      const record = timingRecord
+      this.nextChainAt = this.now() + 1000
+      const finishedAt = this.now(), received = ack.serverReceivedAt, replied = ack.acknowledgedAt
+      const clock = Number.isFinite(received) && Number.isFinite(replied)
+        ? {clockOffsetMs: ((received - record.at) + (replied - finishedAt)) / 2,
+          clockUncertaintyMs: Math.max(0, (finishedAt - record.at - (replied - received)) / 2)} : {}
+      this.onReport?.({reason: 'capture_packet_timing', sequence: ack.sequence, streamId: ack.streamId, providerStreamId: ack.providerStreamId,
+        sourceStartMs: record.sourceStartMs, sourceEndMs: record.sourceEndMs,
+        clientAckReceivedAt: finishedAt, generatedAt: record.generatedAt, queuedAt: record.queuedAt, sentAt: record.at,
+        queueWaitMs: Math.max(0, record.at - (record.queuedAt ?? record.at)), ...clock,
+        serverReceivedAt: ack.serverReceivedAt, providerSubmittedAt: ack.providerSubmittedAt,
+        acknowledgedAt: ack.acknowledgedAt, receivedAudioMs: ack.receivedAudioMs,
+        providerSubmittedAudioMs: ack.providerSubmittedAudioMs, recognizedAudioMs: ack.recognizedAudioMs})
+    }
     this.onAck?.(ack)
     if (ack.ok === false) this.block(ack.recoveryReason || ack.reason || 'capture_transport_rejected')
     else this.reportDelay()
   }
   close() {
+    if (!this.closed && this.creditEnds.size) {
+      const records = [...this.creditEnds.values()]
+      this.onReport?.({reason: 'capture_unacknowledged_range', cause: 'connection_closed',
+        sourceStartMs: records[0].sourceStartMs, sourceEndMs: records.at(-1).sourceEndMs,
+        outstandingAudioMs: this.totalAudioMs - this.acknowledgedAudioMs})
+    }
     this.closed = true; this.pending.clear(); this.creditEnds.clear(); this.audioMs = 0
     this.socket.off('transcription:audio-ack', this.receiveAck)
   }

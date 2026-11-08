@@ -15,7 +15,8 @@ const { createTracker, prepareScript, normalizeText, followTranscript, followAud
 const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
 const {recoveryCandidateEnd} = require('./semantic-candidates');
 const {trackerSnapshot, clientMetadata, captureTransportDetails} = require('./follow-trace');
-const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS} = require('./follow-settings');
+const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS} = require('./follow-settings');
+const {serverDiagnosticMetadata} = require('./server-diagnostics');
 const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
 const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
@@ -9717,6 +9718,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const session = getSessionRecord(sessionId);
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const stream = transcriptionStreams.get(sessionId);
+  if (stream && Number.isFinite(options.endMs)) stream.recognizedAudioMs = Math.max(stream.recognizedAudioMs || 0, options.endMs);
   const followingLines = getFollowingLines(session);
   const state = getAutoFollowState(sessionId);
   const performance = getPerformanceFollower(session);
@@ -9768,6 +9770,10 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   if (!result.ignored && !result.shortOpening && result.candidate && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(result.reason))
     referenceRuntime.hint?.(session, result.candidate, options.endMs);
   autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, alignmentStartedAt, alignmentMs: state.lastAlignmentMs,
+    searchDiagnostics: {textSettings: FOLLOW_SETTINGS.text, semanticSettings: SEMANTIC_SETTINGS,
+      currentIndex: session.currentIndex, localFrom: Math.max(0, session.currentIndex - FOLLOW_SETTINGS.text.nearbyBehind),
+      localTo: Math.min(followingLines.length - 1, session.currentIndex + FOLLOW_SETTINGS.text.nearbyAhead),
+      rejectionReason: result.reason || null},
     normalizedText: normalizeText(transcript).slice(-120), before, after: trackerSnapshot(state.tracker, session.currentIndex),
     reason: result.reason || result.status || 'ignored_result', ignored: result.ignored === true,
     accepted: !session.automaticLive && Number.isInteger(result.index), targetIndex: result.index ?? null,
@@ -12647,6 +12653,7 @@ function startDeepgramTranscription({
     autoFollowHistory.transport(sessionId, 'connecting', {streamId: stream.historyStreamId, provider: stream.provider});
     autoFollowHistory.event(sessionId, 'stream_configuration', {streamId: stream.historyStreamId,
       providerStreamId: stream.liveTranslationStreamId, provider: stream.provider, model: stream.model, language: stream.language,
+      server: serverDiagnosticMetadata(), effectiveSettings: {follow: FOLLOW_SETTINGS, transport: TRANSPORT_SETTINGS},
       frontend: clientMetadata(clientInfo), audioSampleRate: AUDIO_PCM_SAMPLE_RATE,
       transcriptionContext: stream.transcriptionContext?.slice(0, 2000) || '', contextTruncated: (stream.transcriptionContext?.length || 0) > 2000,
       providerSettings: {semanticSegmentationEnabled: stream.semanticSegmentationEnabled, dualChannelEnabled: stream.dualChannelEnabled,
@@ -12748,6 +12755,8 @@ function startDeepgramTranscription({
     }
     if (event?.type !== 'Results') return;
     const receivedAt = Date.now();
+    stream.recognizedAudioMs = Math.max(stream.recognizedAudioMs || 0,
+      (Number(event.start) + Number(event.duration)) * 1000 || 0);
     const alternative = event.channel?.alternatives?.[0];
     let transcript = normalizeTranscriptionOutputText(
       alternative?.transcript || '',
@@ -13067,6 +13076,7 @@ function startRealtimeTranscription({
     autoFollowHistory.transport(sessionId, 'connecting', {streamId: stream.historyStreamId, provider: stream.provider});
     autoFollowHistory.event(sessionId, 'stream_configuration', {streamId: stream.historyStreamId,
       providerStreamId: stream.liveTranslationStreamId, provider: stream.provider, model: stream.model, language: stream.language,
+      server: serverDiagnosticMetadata(), effectiveSettings: {follow: FOLLOW_SETTINGS, transport: TRANSPORT_SETTINGS},
       frontend: clientMetadata(clientInfo), audioSampleRate: AUDIO_PCM_SAMPLE_RATE,
       transcriptionContext: stream.transcriptionContext?.slice(0, 2000) || '', contextTruncated: (stream.transcriptionContext?.length || 0) > 2000,
       providerSettings: {semanticSegmentationEnabled: stream.semanticSegmentationEnabled, dualChannelEnabled: stream.dualChannelEnabled,
@@ -13859,10 +13869,30 @@ io.on('connection', (socket) => {
 
   const receiveCaptureAudio = ({ sessionId, audio, durationMs, level, sequence, stale, quality, clientAgeMs, captureId, capturedAt, captureAgeMs,
     sourceId, sourceStartMs, sourceEndMs, droppedInputMs }, ack) => {
-    const acknowledge =
-      typeof ack === 'function'
-        ? ack
-        : () => {};
+    const serverReceivedAt = Date.now();
+    let diagnosticStream, providerSubmittedAt = null;
+    const acknowledge = data => {
+      const stream = diagnosticStream;
+      const details = {serverReceivedAt, acknowledgedAt: Date.now(), providerSubmittedAt,
+        streamId: stream?.historyStreamId, providerStreamId: stream?.liveTranslationStreamId,
+        receivedAudioMs: stream?.receivedAudioMs || 0,
+        providerSubmittedAudioMs: stream?.autoFollowAudioMs || 0,
+        recognizedAudioMs: stream?.recognizedAudioMs || 0};
+      if (stream && (data.dropped || serverReceivedAt >= (stream.nextDiagnosticAt || 0))) {
+        stream.nextDiagnosticAt = serverReceivedAt + 1000;
+        autoFollowHistory.event(sessionId, data.dropped ? 'capture_drop_range' : 'audio_progress', {
+          ...details, acknowledgedAt: undefined, handlerCompletedAt: details.acknowledgedAt,
+          streamId: stream.historyStreamId, providerStreamId: stream.liveTranslationStreamId,
+          captureId, sequence, sourceId, sourceStartMs, sourceEndMs,
+          generatedAt: capturedAt, clientSendAgeMs: captureAgeMs,
+          droppedInputMs: data.dropped ? normalizedDurationMs : 0,
+          cause: data.reason || (data.dropped ? 'provider_not_ready' : null),
+          providerSubmissionStatus: providerSubmittedAt === null ? 'not_submitted' : 'submitted',
+          recognitionProgressKind: 'provider_result_audio_end', clockDomain: 'server_epoch_ms',
+        });
+      }
+      if (typeof ack === 'function') ack({...data, ...details});
+    };
     if (!sessionId) {
       acknowledge({ ok: false, reason: 'missing_session' });
       return;
@@ -13896,6 +13926,8 @@ io.on('connection', (socket) => {
       }
       stream.lastCaptureSequence = sequence;
     }
+    diagnosticStream = stream;
+    stream.receivedAudioMs = (stream.receivedAudioMs || 0) + normalizedDurationMs;
     const persistentCapture = stream.captureClock === 'audio-thread-v2';
     stream.lastCaptureDropped = false;
     stream.health ||= new TranscriptionHealth();
@@ -14026,6 +14058,7 @@ io.on('connection', (socket) => {
         normalizedDurationMs,
         normalizedLevel,
       );
+      providerSubmittedAt = Date.now();
       if (stale !== true) {
       autoFollowHistory.audio(session.id, stream.historyStreamId, stream.autoFollowAudioMs);
       referenceRuntime.feed(session, stream, audio, stream.autoFollowAudioMs);

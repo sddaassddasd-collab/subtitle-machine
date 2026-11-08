@@ -34,3 +34,15 @@ test('unacknowledged health events stay bounded and do not disappear after a fai
   assert.equal(box.events.length, 256)
   assert.equal(box.events.at(-1).rttMs, 299)
 })
+
+test('offline health storage retains packet joins and signed clocks without PCM', async () => {
+  const box = new CaptureHealthOutbox('session', {now: () => 1794139146049,
+    fetcher: async () => {throw new Error('offline')}, id: () => 'timing-1'})
+  box.add({reason: 'capture_packet_timing', streamId: 'asr', sentAt: 1794139146049,
+    clockOffsetMs: -1500, clockUncertaintyMs: 40, pcm: 'never'})
+  await flush()
+  assert.equal(box.events[0].sentAt, 1794139146049)
+  assert.equal(box.events[0].clockOffsetMs, -1500)
+  assert.equal(box.events[0].streamId, 'asr')
+  assert.equal(box.events[0].pcm, undefined)
+})

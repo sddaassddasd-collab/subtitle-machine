@@ -97,3 +97,27 @@ test('replacement starts atomically supersede the same controller and old starts
   const other = f.connect(undefined, 'another-controller');
   assert.equal(other.event('transcription:start', {...options, clientInfo: {...options.clientInfo, captureOwnerId: 'other'}}).ok, false);
 });
+
+test('server records sampled receive/submission progress and every rejected source interval', t => {
+  const f = createFixture({lineCount: 3}); t.after(() => f.dispose());
+  const events = [];
+  f.history.event = (_sessionId, type, data) => events.push({type, ...data});
+  Object.assign(f.stream, {captureId: 'capture', captureClock: 'audio-thread-v2',
+    captureTimeline: new LiveAudioTimeline('mic'), historyStreamId: 'asr-epoch'});
+  f.event('transcription:audio-pcm', packet(1, {sourceId: 'mic', sourceStartMs: 0, sourceEndMs: 40,
+    level: .1, capturedAt: Date.now(), captureAgeMs: 0}));
+  const progress = events.find(e => e.type === 'audio_progress');
+  assert.equal(progress.sequence, 1);
+  assert.equal(progress.streamId, 'asr-epoch');
+  assert.equal(progress.receivedAudioMs, 40);
+  assert.equal(progress.providerSubmittedAudioMs, 40);
+  assert.equal(progress.recognizedAudioMs, 0);
+  assert.ok(progress.providerSubmittedAt >= progress.serverReceivedAt);
+  f.event('transcription:audio-pcm', packet(2, {sourceId: 'mic', sourceStartMs: 40, sourceEndMs: 80,
+    stale: true, capturedAt: Date.now(), captureAgeMs: 0}));
+  const drop = events.find(e => e.type === 'capture_drop_range');
+  assert.equal(drop.sourceStartMs, 40);
+  assert.equal(drop.sourceEndMs, 80);
+  assert.equal(drop.cause, 'expired_input');
+  assert.equal(drop.providerSubmissionStatus, 'not_submitted');
+});

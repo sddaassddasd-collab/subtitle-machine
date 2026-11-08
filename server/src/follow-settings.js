@@ -70,7 +70,7 @@ const SEMANTIC_SETTINGS = Object.freeze({
   sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 12, onset: 3, acoustic: 4, diagnostics: 19, semantic: 9, performance: 7, captionCorrection: 1, captionPresentation: 4}),
+  versions: Object.freeze({text: 12, onset: 3, acoustic: 4, diagnostics: 20, semantic: 9, performance: 7, captionCorrection: 1, captionPresentation: 4}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,
