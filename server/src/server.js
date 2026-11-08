@@ -22,6 +22,7 @@ const {CaptionPresentation} = require('./caption-presentation');
 const {OnsetReview} = require('./onset-review');
 const {TranscriptionHealth, TRANSPORT_SETTINGS} = require('./transcription-health');
 const {LiveAudioTimeline} = require('./live-audio-timeline');
+const {AUDIO_WIRE} = require('./capture-wire.mjs');
 const {registerPcmCapture} = require('./pcm-capture');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
@@ -13652,7 +13653,7 @@ io.on('connection', (socket) => {
       autoFollow,
       clientInfo,
     }, startAck) => {
-      const acknowledge = typeof startAck === 'function' ? startAck : () => {};
+      const acknowledge = typeof startAck === 'function' ? result => startAck({...result, audioWire: AUDIO_WIRE}) : () => {};
       if (!sessionId) {
         acknowledge({ ok: false, reason: 'missing_session' });
         return;
@@ -13697,7 +13698,8 @@ io.on('connection', (socket) => {
         });
         return;
       }
-      socket.data.capture = {sessionId, captureId: clientMetadata(clientInfo).captureId};
+      socket.data.capture = {sessionId, captureId: metadata.captureId, sourceId: metadata.sourceId,
+        captureGeneration: metadata.captureGeneration};
 
       if (active && (active.socketId === socket.id || sameOwner)) {
         if (preserveTextOnRestart === true) {
@@ -13890,7 +13892,7 @@ io.on('connection', (socket) => {
         reason: 'network_delay_warning', ...network});
     }
     const expired = persistentCapture
-      ? stale === true || captureAgeMs > 250 || networkAgeMs > 1500
+      ? stale === true || captureAgeMs > 250
       : stale === true || captureAgeMs > TRANSPORT_SETTINGS.maximumPacketAgeMs || network.stop;
     if (stream.captureId && expired) {
       if (persistentCapture) {

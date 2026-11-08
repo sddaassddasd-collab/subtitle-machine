@@ -7,7 +7,8 @@ const fields = new Set(['runId', 'captureId', 'reason', 'cause', 'stage', 'statu
   'oldestAckAgeMs', 'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes',
   'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets', 'delayedAckMs', 'delayedForMs',
   'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs',
-  'sourceId', 'sourceStartMs', 'sourceEndMs', 'droppedInputMs', 'expiredReceipts', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs'])
+  'sourceId', 'sourceStartMs', 'sourceEndMs', 'droppedInputMs', 'expiredReceipts', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs',
+  'outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs'])
 export class CaptureHealthOutbox {
   constructor(sessionId, {storage, fetcher = (...args) => globalThis.fetch(...args), now = Date.now, id = () => crypto.randomUUID()} = {}) {
     this.sessionId = sessionId; this.storage = storage; this.fetcher = fetcher; this.now = now; this.id = id

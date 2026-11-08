@@ -61,8 +61,8 @@ test('a real 1.2-second ACK delay never disconnects otherwise fresh PCM', {timeo
   t.after(() => transport.close());
   const pcm = new Int16Array(960).fill(10);
   for (let sequence = 1; sequence <= 65; sequence++) {
-    assert.equal(transport.send({sessionId: f.session.id, captureId: 'delayed-receipts', sequence, durationMs: 40,
-      pcm: pcm.buffer, level: .001, capturedAt: Date.now(), captureAgeMs: 0}), true);
+    await until(() => transport.send({sessionId: f.session.id, captureId: 'delayed-receipts', sequence, durationMs: 40,
+      pcm: pcm.buffer, level: .001, capturedAt: Date.now(), captureAgeMs: 0}));
     await wait(40);
   }
   await until(() => transport.acknowledgedPackets === 65);

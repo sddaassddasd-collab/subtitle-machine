@@ -2,6 +2,8 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {EventEmitter} = require('node:events');
 const {registerPcmCapture} = require('../src/pcm-capture');
+const {encodeAudioPacket} = require('../src/capture-wire.mjs');
+const {LiveAudioTimeline} = require('../src/live-audio-timeline');
 const createFixture = require('./helpers/audio-server-fixture');
 const packet = (sequence, extra = {}) => ({sequence, captureId: 'capture', pcm: Buffer.alloc(1920), durationMs: 40, ...extra});
 
@@ -32,6 +34,35 @@ test('closing an old PCM socket cannot leak a queued receipt into another captur
   socket.emit('transcription:audio-pcm', packet(1)); socket.emit('transcription:audio-pcm', packet(2));
   socket.emit('disconnect'); t.mock.timers.tick(1000);
   assert.equal(receipts.length, 1);
+});
+
+test('packed audio uses the authenticated capture binding and stale epochs cannot enter a new stream', () => {
+  const socket = new EventEmitter(), received = [];
+  socket.data = {capture: {sessionId: 'show', captureId: 'new', sourceId: 'mic', captureGeneration: 12345}};
+  registerPcmCapture(socket, (data, ack) => {received.push(data); ack({ok: true});});
+  const pcm = Int16Array.from({length: 1920}, (_, i) => Math.round(655 * Math.sin(i * Math.PI / 65)));
+  const payload = {pcm: pcm.buffer, sequence: 1, capturedAt: 10000, sourceEndMs: 80, captureAgeMs: 40};
+  socket.emit('transcription:audio-packed', Buffer.from(encodeAudioPacket(payload, 12344)));
+  assert.equal(received.length, 0);
+  socket.emit('transcription:audio-packed', Buffer.from(encodeAudioPacket(payload, 12345)));
+  assert.equal(received.length, 1); assert.equal(received[0].captureId, 'new'); assert.equal(received[0].sessionId, 'show');
+  assert.equal(received[0].sourceId, 'mic'); assert.equal(received[0].durationMs, 80);
+  assert.deepEqual(received[0].pcm, Buffer.from(pcm.buffer)); socket.emit('disconnect');
+});
+
+test('the real authorized packed handler preserves PCM and provider time without rebuilding the script', t => {
+  const f = createFixture({lineCount: 1000}); t.after(() => f.dispose());
+  Object.assign(f.stream, {captureId: 'packed', captureClock: 'audio-thread-v2', captureTimeline: new LiveAudioTimeline('mic')});
+  const binding = {sessionId: f.session.id, captureId: 'packed', sourceId: 'mic', captureGeneration: 12345};
+  f.send.socketData.capture = binding;
+  const pcm = Int16Array.from({length: 1920}, (_, i) => Math.round(655 * Math.sin(i * Math.PI / 65)));
+  const wire = Buffer.from(encodeAudioPacket({pcm: pcm.buffer, sequence: 1, capturedAt: Date.now(), sourceEndMs: 80}, 12345));
+  f.event('transcription:audio-packed', wire);
+  assert.equal(f.stream.autoFollowAudioMs, 80); assert.deepEqual(f.sent[0], Buffer.from(pcm.buffer));
+  assert.deepEqual(f.counts(), {structures: 0, lines: 0});
+  const stranger = f.connect('not-authorized'); stranger.socketData.capture = binding;
+  stranger.event('transcription:audio-packed', wire);
+  assert.equal(f.sent.length, 1);
 });
 
 test('real authenticated server handler forwards binary PCM without rebuilding the script or its clock', t => {

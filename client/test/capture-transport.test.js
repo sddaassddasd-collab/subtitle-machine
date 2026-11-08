@@ -29,41 +29,34 @@ test('binary audio uses cumulative ACKs and remains bounded through forty minute
   assert.ok(f.reports.some(x => x.reason === 'capture_transport' && x.transportType === 'websocket'))
 })
 
-test('missing receipts alone never stop PCM and receipt metadata stays bounded', () => {
+test('missing receipts pause only upload credit and keep the source intent alive with bounded end-to-end audio', () => {
   const f = fixture()
-  for (let i = 1; i <= 1000; i++) {f.clock(i * 40); assert.equal(f.send(i), true)}
-  assert.equal(f.sent.length, 1000)
+  let next = 1
+  for (let i = 1; i <= 1000; i++) {f.clock(i * 40); if (f.send(next)) next++}
+  assert.equal(f.sent.length, L.maximumOutstandingAudioMs / 40)
   assert.deepEqual(f.blocked, [])
-  assert.ok(f.transport.pending.size <= L.maximumInFlightMs / 40 + 1)
+  assert.equal(f.transport.details().outstandingAudioMs, L.maximumOutstandingAudioMs)
+  assert.ok(f.transport.creditEnds.size <= L.maximumOutstandingAudioMs / 40)
   assert.ok(f.transport.expiredReceipts > 0)
-  // A cumulative receipt may refer to a record already evicted from metadata.
-  f.ack(500); assert.equal(f.transport.lastAckSequence, 500)
-  assert.equal(f.transport.acknowledgedPackets, 500)
-  assert.equal(f.send(1001), true)
+  f.ack(next - 1)
+  assert.equal(f.transport.details().outstandingAudioMs, 0)
+  assert.equal(f.send(next), true)
+  assert.ok(f.reports.some(e => e.reason === 'capture_flow_control'))
+  assert.ok(f.reports.some(e => e.reason === 'capture_flow_resumed'))
 })
 
-test('the reported one-second receipt window does not disconnect audio already delivered to the server', () => {
+test('delayed receipts release credit without replacing the connection or allowing unlimited upload', () => {
   const f = fixture(), queue = []
-  let lastDue = 0
+  let next = 1
   for (let i = 1; i <= 400; i++) {
-    const now = i * 40
-    f.clock(now)
-    while (queue[0]?.due <= now) {
-      const ack = queue.shift()
-      f.ack(ack.sequence, {networkAgeMs: 0, serverAudioMs: ack.sequence * 40,
-        receivedAt: ack.sentAt + 50, acknowledgedAt: ack.sentAt + 100})
-    }
-    assert.equal(f.send(i), true, `packet ${i} must survive slow receipts`)
-    lastDue = Math.max(lastDue, now + (i <= 250 ? 1300 : 150))
-    queue.push({sequence: i, sentAt: now, due: lastDue})
-    f.sent.length = 0
+    const now = i * 40; f.clock(now)
+    while (queue[0]?.due <= now) f.ack(queue.shift().sequence, {networkAgeMs: 0})
+    if (f.send(next)) {queue.push({sequence: next, due: now + 1300}); next++}
+    assert.ok(f.transport.details().outstandingAudioMs <= L.maximumOutstandingAudioMs)
   }
   assert.deepEqual(f.blocked, [])
-  assert.equal(f.transport.sentPackets, 400)
-  assert.ok(f.reports.some(e => e.reason === 'capture_transport_delayed' && e.engineQueuedBytes === 0))
-  assert.equal(f.transport.serverNetworkAgeMs, 0)
-  assert.ok(f.reports.some(e => e.reason === 'capture_transport_recovered'))
-  assert.equal(f.transport.details().serverAckDelayMs, 50)
+  assert.ok(f.transport.sentPackets > 300)
+  assert.ok(f.reports.some(e => e.reason === 'capture_flow_control'))
 })
 
 test('real sender congestion drops unsent frames, then replaces only a persistently blocked transport', () => {

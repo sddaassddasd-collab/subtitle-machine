@@ -1,7 +1,8 @@
 import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket} from './capture-transport.js'
 import {signalMetrics} from './audio-signal.js'
+import {AUDIO_WIRE} from './capture-wire.mjs'
 
-export const PIPELINE_SETTINGS = Object.freeze({version: 1, sampleRate: 24000, maximumAgeMs: 250,
+export const PIPELINE_SETTINGS = Object.freeze({version: 2, sampleRate: 24000, maximumAgeMs: 250,
   maximumQueuedMs: 200, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
 
 // Keep the fractional sample position across batches (including 44.1 kHz input).
@@ -78,7 +79,7 @@ export class CapturePipeline {
       this.transport = new CaptureTransport(socket, {
         now: this.now,
         onBlocked: reason => {
-          if (['invalid_pcm_packet', 'invalid_source_clock', 'session_not_allowed', 'missing_session'].includes(reason)) {
+          if (['invalid_pcm_packet', 'invalid_source_clock', 'invalid_audio_wire', 'session_not_allowed', 'missing_session'].includes(reason)) {
             this.state('fatal', '音訊輸入格式或授權無效，請重新整理後檢查設定。'); this.stop(); return
           }
           this.recover(reason, reason.startsWith('capture_transport') ? 'transport' : 'provider')
@@ -91,7 +92,6 @@ export class CapturePipeline {
               this.state('delayed', '音訊抵達過晚，已略過過期片段；本機持續收音，字幕保留。')
               this.report('capture_input_discarding', {serverNetworkAgeMs: ack.networkAgeMs})
             }
-            if (this.now() - this.droppedSince >= 5000) this.recover('capture_transport_stale_input', 'transport')
           } else if (ack.ok && !ack.queued && !ack.ignored) {
             if (this.droppedSince !== null) {
               this.report('capture_input_recovered', {delayedForMs: this.now() - this.droppedSince})
@@ -113,6 +113,7 @@ export class CapturePipeline {
       const result = await new Promise((resolve, reject) => socket.timeout(10000).emit('transcription:start', {
         ...this.config.request, preserveTextOnRestart: this.config.request.preserveTextOnRestart || this.generation > this.config.clientInfo.captureGeneration + 1,
         clientInfo: {...this.config.clientInfo, captureId: this.captureId, captureGeneration: this.generation,
+          audioWire: AUDIO_WIRE,
           sourceId: this.config.sourceId, audioChannel: 'worker-binary-v2', captureClock: 'audio-thread-v2',
           captureTransport: {...T, ...this.transport.details()}},
       }, (error, response) => error ? reject(new Error('辨識服務連線逾時')) : resolve(response)))
@@ -125,6 +126,7 @@ export class CapturePipeline {
         throw new Error(result?.reason || '辨識服務尚未就緒')
       }
       this.ready = true; this.connecting = false
+      if (result.audioWire === AUDIO_WIRE) this.transport.packedEpoch = this.generation
       this.report('capture_transport_ready', {...this.transport.details()})
       // Startup audio remains in a tiny latest-only queue. Do not burst an old
       // permission/connect backlog into a new ASR clock.
@@ -183,13 +185,24 @@ export class CapturePipeline {
   drain() {
     if (!this.ready || !this.desired || !this.transport) return
     while (this.queue.length) {
-      const packet = this.queue[0], age = this.now() - packet.capturedAt
+      let packet = this.queue[0], count = 1
+      const age = this.now() - packet.capturedAt
       if (age > PIPELINE_SETTINGS.maximumAgeMs) {
         this.queue.shift(); this.queuedMs -= packet.durationMs; this.droppedMs = (this.droppedMs || 0) + packet.durationMs; continue
       }
+      if (this.transport.packedEpoch !== undefined) {
+        const next = this.queue[1]
+        if (!next && age < 80) return
+        if (next && Math.abs(next.sourceStartMs - packet.sourceEndMs) < 1 && packet.durationMs + next.durationMs <= 100) {
+          const pcm = new Uint8Array(packet.pcm.byteLength + next.pcm.byteLength)
+          pcm.set(new Uint8Array(packet.pcm)); pcm.set(new Uint8Array(next.pcm), packet.pcm.byteLength)
+          packet = {...packet, pcm: pcm.buffer, durationMs: packet.durationMs + next.durationMs, sourceEndMs: next.sourceEndMs}
+          count = 2
+        }
+      }
       if (!this.transport.send({...packet, sequence: this.sequence + 1, captureId: this.captureId,
         captureAgeMs: Math.max(packet.captureAgeMs, age), droppedInputMs: this.droppedMs || 0})) return
-      this.sequence++; this.queue.shift(); this.queuedMs -= packet.durationMs
+      this.sequence++; this.queue.splice(0, count); this.queuedMs -= packet.durationMs
       if (this.droppedMs) {this.report('capture_input_gap', {droppedInputMs: this.droppedMs, sourceStartMs: packet.sourceStartMs}); this.droppedMs = 0}
     }
   }
@@ -208,9 +221,10 @@ export class CapturePipeline {
     if (!this.ready || !this.transport || !this.socket?.connected) return
     this.transport.check(); this.drain()
     if (!this.ready || now < this.probeAt) return
-    if (this.transport.details().lastAckAgeMs < T.acknowledgementMs) return
+    const progress = this.transport.details()
+    if (progress.lastAckAgeMs < T.acknowledgementMs && progress.outstandingAudioMs < T.probeThresholdMs) return
     this.probeAt = now + T.probeMs; const epoch = this.epoch
-    this.socket.timeout(T.probeMs).emit('transcription:capture-probe', {
+    this.socket.timeout(2000).emit('transcription:capture-probe', {
       sessionId: this.config.request.sessionId, captureId: this.captureId,
     }, (error, data) => {
       if (!this.desired || epoch !== this.epoch) return

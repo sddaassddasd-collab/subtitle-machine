@@ -1,6 +1,8 @@
-export const CAPTURE_TRANSPORT_LIMITS = Object.freeze({version: 4, maximumInFlightMs: 4000,
+import {encodeAudioPacket} from './capture-wire.mjs'
+
+export const CAPTURE_TRANSPORT_LIMITS = Object.freeze({version: 5, maximumInFlightMs: 4000,
   acknowledgementMs: 4000, delayedAckMs: 1000, maximumBufferedBytes: 65536, maximumQueuedPackets: 64,
-  congestionMs: 2000, probeMs: 2000, unresponsiveMs: 10000,
+  congestionMs: 2000, probeMs: 500, probeThresholdMs: 400, maximumOutstandingAudioMs: 1200, unresponsiveMs: 10000,
   reportMs: 5000, reconnectMs: 8000, packetMs: 40, cumulativeAckMs: 100})
 
 export function socketTransportDetails(socket) {
@@ -22,6 +24,8 @@ export class CaptureTransport {
     this.maxRttMs = 0; this.rttMs = 0; this.reportAt = now(); this.closed = false; this.blocked = false
     this.lastAckAt = null; this.serverNetworkAgeMs = null; this.serverAudioMs = null; this.serverAckDelayMs = null
     this.createdAt = now(); this.lastSequence = 0; this.lastAckSequence = 0; this.expiredReceipts = 0
+    this.totalAudioMs = 0; this.acknowledgedAudioMs = 0; this.wireBytes = 0; this.pcmBytes = 0
+    this.creditEnds = new Map()
     this.receiveAck = ack => this.acknowledge(ack)
     socket.on('transcription:audio-ack', this.receiveAck)
   }
@@ -33,7 +37,8 @@ export class CaptureTransport {
       lastAckAgeMs: Math.max(0, now - (this.lastAckAt ?? this.createdAt)), expiredReceipts: this.expiredReceipts,
       serverNetworkAgeMs: this.serverNetworkAgeMs, serverAudioMs: this.serverAudioMs, serverAckDelayMs: this.serverAckDelayMs,
       rttMs: this.rttMs, maxRttMs: this.maxRttMs,
-      sentPackets: this.sentPackets, acknowledgedPackets: this.acknowledgedPackets}
+      sentPackets: this.sentPackets, acknowledgedPackets: this.acknowledgedPackets,
+      outstandingAudioMs: Math.max(0, this.totalAudioMs - this.acknowledgedAudioMs), wireBytes: this.wireBytes, pcmBytes: this.pcmBytes}
   }
   check() {
     if (this.closed || this.blocked) return false
@@ -51,8 +56,8 @@ export class CaptureTransport {
       return false
     }
     this.congestedAt = undefined
-    // Receipts are observations, not a credit window. Discard only old metadata;
-    // never stop fresh PCM because the return path is slow or loses a receipt.
+    // Expiring diagnostic observations does not restart capture. Outstanding
+    // upload credit remains accounted separately until reception is confirmed.
     for (const [sequence, record] of this.pending) {
       if (now - record.at < CAPTURE_TRANSPORT_LIMITS.acknowledgementMs) break
       this.pending.delete(sequence); this.audioMs -= record.durationMs; this.expiredReceipts++
@@ -84,16 +89,28 @@ export class CaptureTransport {
   }
   send(packet) {
     if (!this.check()) return false
-    const queue = this.details(), packetBytes = (packet.pcm?.byteLength || 0) + 1024
+    // Receipt history may expire, but end-to-end upload credit never does. This
+    // bounds PCM hidden in OS/TCP/proxy buffers that bufferedAmount cannot see.
+    if (this.totalAudioMs - this.acknowledgedAudioMs + packet.durationMs > CAPTURE_TRANSPORT_LIMITS.maximumOutstandingAudioMs) {
+      if (!this.flowControlled) {this.flowControlled = true; this.onReport?.({reason: 'capture_flow_control', ...this.details()})}
+      return false
+    }
+    if (this.flowControlled) {this.flowControlled = false; this.onReport?.({reason: 'capture_flow_resumed', ...this.details()})}
+    const wire = this.packedEpoch !== undefined ? encodeAudioPacket(packet, this.packedEpoch) : null
+    const queue = this.details(), packetBytes = wire ? wire.byteLength + 96 : (packet.pcm?.byteLength || 0) + 1024
     if (queue.engineQueuedPackets >= CAPTURE_TRANSPORT_LIMITS.maximumQueuedPackets ||
       queue.engineQueuedBytes + queue.webSocketBufferedBytes + packetBytes > CAPTURE_TRANSPORT_LIMITS.maximumBufferedBytes)
       return false
     this.captureId ??= packet.captureId
-    const record = {at: this.now(), durationMs: packet.durationMs}
+    this.totalAudioMs += packet.durationMs
+    const record = {at: this.now(), durationMs: packet.durationMs, audioEndMs: this.totalAudioMs}
+    this.creditEnds.set(packet.sequence, this.totalAudioMs)
     this.pending.set(packet.sequence, record); this.audioMs += record.durationMs; this.sentPackets++
     this.lastSequence = packet.sequence
+    this.pcmBytes += packet.pcm?.byteLength || 0; this.wireBytes += wire ? wire.byteLength : packet.pcm?.byteLength || 0
     try {
-      this.socket.emit('transcription:audio-pcm', packet)
+      if (wire) this.socket.emit('transcription:audio-packed', wire)
+      else this.socket.emit('transcription:audio-pcm', packet)
     } catch { return this.block('capture_transport_rejected') }
     return true
   }
@@ -101,6 +118,9 @@ export class CaptureTransport {
     if (this.closed || this.blocked || !ack || ack.captureId !== this.captureId ||
       !Number.isSafeInteger(ack.sequence) || ack.sequence <= this.lastAckSequence || ack.sequence > this.lastSequence) return
     const record = this.pending.get(ack.sequence)
+    const credit = this.creditEnds.get(ack.sequence)
+    if (credit !== undefined) this.acknowledgedAudioMs = credit
+    for (const sequence of this.creditEnds.keys()) if (sequence <= ack.sequence) this.creditEnds.delete(sequence)
     for (const [sequence, packet] of this.pending) if (sequence <= ack.sequence) {
       this.pending.delete(sequence); this.audioMs -= packet.durationMs
     }
@@ -118,7 +138,7 @@ export class CaptureTransport {
     else this.reportDelay()
   }
   close() {
-    this.closed = true; this.pending.clear(); this.audioMs = 0
+    this.closed = true; this.pending.clear(); this.creditEnds.clear(); this.audioMs = 0
     this.socket.off('transcription:audio-ack', this.receiveAck)
   }
 }

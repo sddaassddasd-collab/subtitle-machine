@@ -92,6 +92,7 @@ function captureTransportDetails(value) {
       'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets',
       'delayedAckMs', 'delayedForMs', 'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs',
       'expiredReceipts', 'droppedInputMs', 'sourceStartMs', 'sourceEndMs', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs']
+      .concat(['outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs'])
       .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(604800000, source[key]))]))};
 }
 
@@ -103,6 +104,7 @@ function clientMetadata(value) {
     captureId: typeof source.captureId === 'string' ? source.captureId.slice(0, 100) : '',
     captureClock: typeof source.captureClock === 'string' ? source.captureClock.slice(0, 80) : '',
     sourceId: String(source.sourceId || '').slice(0, 100),
+    audioWire: String(source.audioWire || '').slice(0, 80),
     audioChannel: String(source.audioChannel || '').slice(0, 80),
     captureOwnerId: String(source.captureOwnerId || '').slice(0, 100),
     controlSocketId: String(source.controlSocketId || '').slice(0, 100),

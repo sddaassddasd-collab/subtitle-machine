@@ -51,7 +51,7 @@ test('the associated control connection can operate the follower while an indepe
   assert.equal(f.connect(undefined, 'another-controller').event('performance:action', {action: 'lock-script'}).ok, false);
 });
 
-test('late network input is discarded until fresh source time arrives without closing the stream', t => {
+test('the reported receive lag does not discard ordered audio or restart recognition', t => {
   const f = createFixture({lineCount: 3}); t.after(() => f.dispose());
   let now = 100000; t.mock.method(Date, 'now', () => now);
   Object.assign(f.stream, {captureId: 'current', captureClock: 'audio-thread-v2', captureTimeline: new LiveAudioTimeline('mic')});
@@ -59,9 +59,26 @@ test('late network input is discarded until fresh source time arrives without cl
     sourceStartMs, sourceEndMs: sourceStartMs + 40, sequence, capturedAt, captureAgeMs: 0,
     audio: Buffer.alloc(1920).toString('base64'), durationMs: 40, level: .001});
   assert.equal(send(1, 0, 100000).ok, true);
-  now = 103040; assert.equal(send(2, 40, 100040).dropped, true);
-  assert.equal(f.stream.closing, false); assert.equal(f.stream.autoFollowAudioMs, 40);
-  now = 103080; assert.equal(send(3, 3080, 103080).ok, true);
+  now = 103040; assert.equal(send(2, 40, 100040).dropped, undefined);
   assert.equal(f.stream.closing, false); assert.equal(f.stream.autoFollowAudioMs, 80);
-  assert.equal(f.stream.captureTimeline.sourceTime(40), 3080);
+  now = 103080; assert.equal(send(3, 3080, 103080).ok, true);
+  assert.equal(f.stream.closing, false); assert.equal(f.stream.autoFollowAudioMs, 120);
+  assert.equal(f.stream.captureTimeline.sourceTime(80), 3080);
+});
+
+test('119bcbbc receive-delay pattern keeps ordered PCM continuous instead of dropping and reconnecting', t => {
+  const f = createFixture({lineCount: 3}); t.after(() => f.dispose());
+  let now = 100000; t.mock.method(Date, 'now', () => now);
+  Object.assign(f.stream, {captureId: 'current', captureClock: 'audio-thread-v2', captureTimeline: new LiveAudioTimeline('mic')});
+  const events = []; f.history.event = (_id, type, data) => events.push({type, ...data});
+  const delays = [0, 1831, 2577, 5598, 5640, 6938, 9293];
+  for (let i = 0; i < delays.length; i++) {
+    now = 100000 + i * 40 + delays[i];
+    const reply = f.send({sessionId: f.session.id, captureId: 'current', sourceId: 'mic', sequence: i + 1,
+      capturedAt: 100000 + i * 40, captureAgeMs: 1, sourceStartMs: i * 40, sourceEndMs: i * 40 + 40,
+      audio: Buffer.alloc(1920).toString('base64'), durationMs: 40, level: .001});
+    assert.equal(reply.ok, true); assert.notEqual(reply.dropped, true);
+  }
+  assert.equal(f.stream.closing, false); assert.equal(f.stream.autoFollowAudioMs, delays.length * 40);
+  assert.equal(f.sent.length, delays.length); assert.equal(events.filter(e => e.type === 'audio_gap').length, 0);
 });

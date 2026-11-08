@@ -4,7 +4,7 @@ import {setImmediate} from 'node:timers'
 import {CapturePipeline, PcmResampler, PIPELINE_SETTINGS as S} from '../src/lib/capture-pipeline.js'
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture({receipt = true} = {}) {
+function fixture({receipt = true, dropped = false} = {}) {
   let now = 0, network = true, provider = true
   const sockets = [], events = [], stats = {frames: 0, starts: 0, stops: 0, probes: 0}
   const timers = {setInterval: () => 1, clearInterval() {}}
@@ -22,7 +22,7 @@ function fixture({receipt = true} = {}) {
         if (name === 'transcription:audio-pcm') {
           stats.frames++; stats.last = data; this.received = data.sequence; this.audioMs += data.durationMs
           if (receipt) this.server('transcription:audio-ack', {captureId: data.captureId, sequence: data.sequence,
-            ok: provider, serverAudioMs: this.audioMs, reason: provider ? '' : 'provider_backpressure'})
+            ok: provider, dropped, serverAudioMs: this.audioMs, reason: provider ? '' : 'provider_backpressure'})
         }
         if (name === 'transcription:capture-probe') {
           stats.probes++; ack(null, {ok: true, captureId: this.captureId, sequence: this.received, serverAudioMs: this.audioMs})
@@ -55,6 +55,14 @@ test('receipts lost for more than four seconds are confirmed by a separate progr
   assert.equal(f.stats.frames, 300); assert.ok(f.stats.probes > 0)
   assert.equal(f.stats.starts, 1); assert.equal(f.sockets.length, 1)
   assert.ok(f.pipeline.transport.pending.size <= 101); f.pipeline.stop()
+})
+
+test('discard receipts lasting beyond five seconds never trigger a stale-input reconnect loop', async () => {
+  const f = fixture({dropped: true}); await flush()
+  for (let i = 1; i <= 500; i++) {f.frame(i * 40); f.pipeline.tick()}
+  assert.equal(f.stats.starts, 1); assert.equal(f.sockets.length, 1)
+  assert.equal(f.pipeline.desired, true); assert.equal(f.stats.frames, 500)
+  f.pipeline.stop()
 })
 
 test('a provider failure changes only the provider epoch on the existing audio transport', async () => {
