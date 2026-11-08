@@ -33,7 +33,10 @@ class ProviderAudioQueue {
     }
     if (!this.queue.length || this.bufferedBytes() >= PROVIDER_QUEUE_SETTINGS.highWaterBytes || now < this.nextSendAt) return;
     const packet = this.queue.shift(); this.queuedMs -= packet.durationMs;
-    this.nextSendAt = now + packet.durationMs / PROVIDER_QUEUE_SETTINGS.catchUpRate;
+    // Carry sub-tick remainder forward. Rounding every 32 ms interval to a
+    // 20 ms timer would otherwise reduce 1.25x catch-up back to 1x.
+    const scheduledAt = this.nextSendAt >= now - PROVIDER_QUEUE_SETTINGS.tickMs ? this.nextSendAt : now;
+    this.nextSendAt = scheduledAt + packet.durationMs / PROVIDER_QUEUE_SETTINGS.catchUpRate;
     this.lastProgressAt = now;
     this.submit(packet);
     if (!this.queue.length && !this.closed) {
