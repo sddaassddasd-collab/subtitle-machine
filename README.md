@@ -439,7 +439,7 @@ python3 server/scripts/transcribe-performance.py --audio clip.wav --model small 
 恢復流程另記 `recovery_scheduled`、`recovery_attempt`、`recovery_ready`、`recovery_failed`、`recovery_timeout`、`recovery_cancelled` 與 `recovery_exhausted`，停止串流後原控制端仍可回報最後階段。啟動時同一 captureId 的 running 狀態也可確認準備完成，避免 start ACK 延遲讓已有聲音的收音端一直等待。恢復尚未完成時收到的新錯誤會保留，完成後再有限次重試。
 恢復中的麥克風／音訊啟動最多等待十二秒，逾時使舊請求失效，再依剩餘次數重試；舊請求晚到不能完成或覆蓋新嘗試。穩定三十秒後的重試額度只重置一次，連續失敗仍最多三次。
 
-控制頁在交給 Socket.IO 前限制待確認音訊：最多一秒音訊、最舊確認等待最多 1.5 秒，並檢查 Engine.IO 佇列及原生 WebSocket 待傳量（最多 64 KiB 或 64 個 Engine.IO 封包）。正常時逐批立即傳送，不額外等候湊批；超限會停止舊時間軸並進入有限次恢復，不丟掉部分聲音後假裝時間軸仍連續。傳輸積壓、確認逾時、採集過期或 `stale_capture` 恢復會關閉舊音訊連線，再建立新的獨立音訊連線、採集與辨識；音訊連線不加入控制房間，控制連線保持原狀。自動重建不取消操作意圖，手動停止仍可使尚未完成的重建失效。
+控制頁分開限制回覆等待與真正的待傳資料：未確認的序號／時長追蹤最多四秒，最舊確認超過一秒先記延遲警示，四秒仍未確認才要求恢復；Engine.IO 與原生 WebSocket 的實際待傳上限仍是 64 KiB 或 64 個 Engine.IO 封包。追蹤表只保存序號、時間與時長，不保存 PCM，不能把尚未收到確認當成資料仍排在瀏覽器裡。正常時逐批立即傳送，不額外等候湊批；超限會停止舊時間軸並進入有限次恢復，不丟掉部分聲音後假裝時間軸仍連續。傳輸積壓、確認逾時、採集過期或 `stale_capture` 恢復會關閉舊音訊連線，再建立新的獨立音訊連線、採集與辨識；音訊連線不加入控制房間，控制連線保持原狀。自動重建不取消操作意圖，手動停止仍可使尚未完成的重建失效。
 
 `capture_health` 的 `capture_transport`、`capture_transport_blocked`、`capture_transport_ready` 保存連線類型、待確認封包／音訊量、最舊確認年齡、Engine.IO 與 WebSocket 佇列、確認 RTT 及最大 RTT。若舊連線塞住而無法送出診斷，最近的快照也會跟著下一次 `stream_configuration.frontend.recovery.transport` 保存；`frontend.captureTransport` 保存當時的傳輸上限。這些指標可區分採集積壓、傳送積壓與後端接收落後。
 
@@ -450,7 +450,7 @@ python3 server/scripts/transcribe-performance.py --audio clip.wav --model small 
 
 新版現場收音透過獨立的 Socket.IO WebSocket 連線傳送二進位 PCM（單聲道 24 kHz、PCM16；worklet 每批 40 ms），不加入控制頁資料廣播房間。伺服器每約 100 ms 回傳累積序號確認，錯誤立即回傳；不再為每個音訊包建立確認 callback，也不在瀏覽器進行 Base64 編碼。Deepgram 直接接收二進位 PCM，OpenAI 所需 Base64 僅在後端轉換；舊版音訊事件仍相容。
 
-未確認音訊最多 1000 ms、最舊確認等待最多 1500 ms，並檢查 Engine.IO／WebSocket 排隊量。超過限制停止舊串流並建立新音訊連線，保留字幕位置；「最多一秒」是資料量限制，不保證網路一秒內送達。每頁有獨立控制者 ID 和遞增收音代次，較舊的啟動、停止、封包及確認不能終止新串流。正常網路抖動仍依既有持續延遲規則判斷，不提高過期門檻。
+確認等待超過 1000 ms 時保留連線並記錄延遲；未確認序號追蹤及最舊確認的硬上限均為 4000 ms。實際 Engine.IO／WebSocket 待傳上限仍維持 64 KiB／64 個封包，送出節奏不刻意等候確認；只有達到硬上限、真正送出積壓或後端判定過期時才重建串流，保留字幕位置。這不是把 PCM 暫存在本機四秒才送出。每頁有獨立控制者 ID 和遞增收音代次，較舊的啟動、停止、封包及確認不能終止新串流。正常網路抖動仍依既有持續延遲規則判斷，不提高過期門檻。
 
 健康紀錄透過經過節目擁有者驗證的 HTTP 請求傳送，無須已有辨識串流。瀏覽器 sessionStorage 暫存最多 256 筆、保留一天；連線恢復後補送，後端確認保存後才移除。只保存階段、錯誤及傳輸統計，不保存音訊、API 金鑰或逐字稿。JSON 的 `capture_health` 區分 `occurredAt`（瀏覽器發生時間）與 `receivedAt`／`recordedAt`（伺服器收到／處理時間），並記錄 `transport_connect`、`microphone_permission`、`audio_context`、`provider_start`、`first_audio_receipt` 各階段結果。已指定其他歷程 ID 的舊事件不會補進新歷程。
 
@@ -459,3 +459,6 @@ python3 server/scripts/transcribe-performance.py --audio clip.wav --model small 
 語意 JSON 保留 `rawMatches`，分開記錄 `invalid_word_span`、`word_span_too_short`、`missing_word_spans`、`overlapping_word_spans`、`cue_order_reversed` 與 `cue_step_too_large`。具有強語意評分的順序、不重疊詞區間最多可提出四格跨度候選，仍須原有獨立文字／語意佐證才採用，不以模型評分直接換格。
 
 `server/test/pcm-network.test.js` 使用本機真實 WebSocket 驗證二進位、累積確認、音訊斷線與新時間軸，控制連線保持可用。傳輸測試另外模擬四十分鐘計數與確認停滯；這些驗證不呼叫付費辨識 API，不代表實際網路長時間運作或戲劇辨識率已驗收。
+
+
+2026-11-08 的確認延遲修正：舊版在一秒未確認量即立即重建，可能在後端仍正常收音、尚未符合過期條件時反覆重啟。新增 `capture_transport_delayed`／`capture_transport_recovered`、`lastAckAgeMs`、`serverNetworkAgeMs`、`serverAckDelayMs` 與 `serverAudioMs`，區分回覆較晚、音訊抵達較晚與後端累積的音訊位置；尚未取得後端回覆的值不假造為零。網路類失敗的重試間隔為 3／6／12 秒，最多三次，仍可立即人工停止；啟動、授權及音訊本身的期限繼續生效。本機真實 WebSocket 測試會延遲確認 1.2 秒、保留新鮮音訊上傳，驗證不中斷；原有後端持續延遲與過期判斷門檻未放寬。

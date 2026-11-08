@@ -1,5 +1,5 @@
 export const CAPTURE_LIMITS = Object.freeze({maximumAgeMs: 250, sampleGapMs: 3000, ackGapMs: 5000,
-  maximumAttempts: 3, stableMs: 30000, setupTimeoutMs: 12000})
+  maximumAttempts: 3, stableMs: 30000, setupTimeoutMs: 12000, networkRetryBaseMs: 3000, networkRetryMaxMs: 12000})
 
 // endTime is measured by the audio thread, before a busy UI receives its message.
 export function captureAgeMs(contextTime, endTime) {
@@ -15,6 +15,7 @@ export class CaptureRecovery {
     this.desired = false; this.pending = false; this.inFlight = false; this.exhausted = false
     this.afterFlightReason = null; this.generation = (this.generation || 0) + 1
     this.reconnecting = false
+    this.noticeAt = 0
   }
   arm(options) {
     this.cancel('new_capture_intent'); this.desired = true; this.options = options; this.attempts = 0; this.stableAt = 0
@@ -28,8 +29,13 @@ export class CaptureRecovery {
       this.desired = false; this.exhausted = true
       this.report?.({reason: 'recovery_exhausted', cause: reason, attempt: this.attempts}); return false
     }
-    this.reason = reason; this.pending = true; this.retryAt = now + Math.min(500 * 2 ** this.attempts, 4000)
-    this.report?.({reason: 'recovery_scheduled', cause: reason, attempt: this.attempts + 1})
+    const network = ['stale_capture', 'audio_ack_timeout', 'provider_backpressure', 'capture_receipt_window_full'].includes(reason) ||
+      String(reason).startsWith('capture_transport_')
+    this.retryAfterMs = network
+      ? Math.min(CAPTURE_LIMITS.networkRetryBaseMs * 2 ** this.attempts, CAPTURE_LIMITS.networkRetryMaxMs)
+      : Math.min(500 * 2 ** this.attempts, 4000)
+    this.reason = reason; this.pending = true; this.retryAt = now + this.retryAfterMs
+    this.report?.({reason: 'recovery_scheduled', cause: reason, attempt: this.attempts + 1, retryAfterMs: this.retryAfterMs})
     return true
   }
   take(_connected, now = Date.now()) {

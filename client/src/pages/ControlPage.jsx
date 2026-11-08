@@ -2681,6 +2681,10 @@ const ControlPage = () => {
         onReport: details => {
           captureRecovery.lastTransport = details
           report(details)
+          if (details.reason === 'capture_transport_delayed')
+            setStatus({kind: 'info', message: '收音連線延遲較高，字幕可能稍晚。'})
+          else if (details.reason === 'capture_transport_recovered')
+            setStatus({kind: 'info', message: '收音連線已恢復正常。'})
         },
         onAck: (ack) => {
           if (attemptId !== transcriptionAttemptRef.current) return
@@ -2930,7 +2934,8 @@ const ControlPage = () => {
       // Provider readiness alone is not a successful recovery: require a real
       // receipt from the replacement PCM stream before declaring it healthy.
       pendingAudioPackets.length = 0
-      if (options.recovering) await captureStage(firstAudioReceipt, 'first_audio_receipt', 3000, report)
+      if (options.recovering) await captureStage(firstAudioReceipt, 'first_audio_receipt',
+        CAPTURE_TRANSPORT_LIMITS.acknowledgementMs + CAPTURE_TRANSPORT_LIMITS.cumulativeAckMs, report)
       if (canceled()) {discardPendingCapture(); return false}
       captureRecovery.captureId = captureId
       report({reason: 'capture_transport_ready', ...audioTransport.details()})
@@ -3005,7 +3010,13 @@ const ControlPage = () => {
           setStatus({kind: 'info', message: '收音傳輸停滯，正在恢復；目前字幕保留。'})
       }
       const options = captureRecovery.take(socketRef.current?.connected, now)
-      if (!options) return
+      if (!options) {
+        if (captureRecovery.desired && captureRecovery.pending && captureRecovery.noticeAt !== captureRecovery.retryAt) {
+          captureRecovery.noticeAt = captureRecovery.retryAt
+          setStatus({kind: 'info', message: `收音連線正在恢復，約 ${Math.max(1, Math.ceil((captureRecovery.retryAt - now) / 1000))} 秒後重試（${captureRecovery.attempts + 1}／${CAPTURE_LIMITS.maximumAttempts}），目前字幕保留。`})
+        }
+        return
+      }
       captureRecovery.report?.({reason: options.recovery.reason, captureId: state.captureId || '',
         sampleAgeMs: now - (state.lastSampleAt || now), ackAgeMs: now - (state.lastAckAt || now), captureAgeMs: state.lastCaptureAgeMs || 0})
       setStatus({kind: 'info', message: `正在恢復收音（${options.recovery.attempt}／${CAPTURE_LIMITS.maximumAttempts}），目前字幕保留。`})

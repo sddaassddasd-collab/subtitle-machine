@@ -29,14 +29,38 @@ test('binary audio uses cumulative ACKs and remains bounded through forty minute
   assert.ok(f.reports.some(x => x.reason === 'capture_transport' && x.transportType === 'websocket'))
 })
 
-test('a network blackout stops new PCM within one second; late ACKs cannot resume the obsolete clock', () => {
+test('a network blackout stops PCM at the bounded receipt deadline; late ACKs cannot resume the obsolete clock', () => {
   const f = fixture()
   for (let i = 1; i <= 500; i++) {f.clock(i * 40); f.send(i)}
   assert.equal(f.sent.length, L.maximumInFlightMs / 40)
-  assert.deepEqual(f.blocked, ['capture_transport_backlog'])
+  assert.deepEqual(f.blocked, ['capture_transport_timeout'])
   assert.equal(f.transport.details().inFlightAudioMs, L.maximumInFlightMs)
   assert.equal(f.reports.at(-1).reason, 'capture_transport_blocked')
   f.ack(25); assert.equal(f.send(501), false)
+})
+
+test('the reported one-second receipt window does not disconnect audio already delivered to the server', () => {
+  const f = fixture(), queue = []
+  let lastDue = 0
+  for (let i = 1; i <= 400; i++) {
+    const now = i * 40
+    f.clock(now)
+    while (queue[0]?.due <= now) {
+      const ack = queue.shift()
+      f.ack(ack.sequence, {networkAgeMs: 0, serverAudioMs: ack.sequence * 40,
+        receivedAt: ack.sentAt + 50, acknowledgedAt: ack.sentAt + 100})
+    }
+    assert.equal(f.send(i), true, `packet ${i} must survive slow receipts`)
+    lastDue = Math.max(lastDue, now + (i <= 250 ? 1300 : 150))
+    queue.push({sequence: i, sentAt: now, due: lastDue})
+    f.sent.length = 0
+  }
+  assert.deepEqual(f.blocked, [])
+  assert.equal(f.transport.sentPackets, 400)
+  assert.ok(f.reports.some(e => e.reason === 'capture_transport_delayed' && e.engineQueuedBytes === 0))
+  assert.equal(f.transport.serverNetworkAgeMs, 0)
+  assert.ok(f.reports.some(e => e.reason === 'capture_transport_recovered'))
+  assert.equal(f.transport.details().serverAckDelayMs, 50)
 })
 
 test('WebSocket/Engine queues, disconnection and missing receipts block before more PCM is enqueued', () => {

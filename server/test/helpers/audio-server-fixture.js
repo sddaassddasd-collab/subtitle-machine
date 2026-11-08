@@ -93,6 +93,15 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           transcriptionStreams.set(session.id, stream);
         },
         closeConnections: () => io.close(),
+        delayPcmReceipts: (socketId, delayMs) => {
+          const socket = io.sockets.sockets.get(socketId), emit = socket.emit, timers = new Set();
+          socket.emit = function (name, ...args) {
+            if (name !== 'transcription:audio-ack') return emit.call(this, name, ...args);
+            const timer = setTimeout(() => {timers.delete(timer); if (socket.connected) emit.call(socket, name, ...args);}, delayMs);
+            timers.add(timer); return this;
+          };
+          return () => {socket.emit = emit; for (const timer of timers) clearTimeout(timer);};
+        },
         currentStream: () => transcriptionStreams.get(session.id),
         mockProviderStart: () => {
           startDeepgramTranscription = options => {

@@ -1,4 +1,4 @@
-const PCM_CAPTURE_SETTINGS = Object.freeze({version: 2, sampleRate: 24000, packetMs: 40, acknowledgementMs: 100});
+const PCM_CAPTURE_SETTINGS = Object.freeze({version: 3, sampleRate: 24000, packetMs: 40, acknowledgementMs: 100});
 
 // Socket.IO transports Buffer as binary. Only a cumulative receipt is returned;
 // an error is reported immediately and never hidden behind the ACK timer.
@@ -6,13 +6,14 @@ function registerPcmCapture(socket, receive) {
   let pending, timer, acknowledgedAt = 0;
   const flush = () => {
     clearTimeout(timer); timer = null;
-    if (pending) {socket.emit('transcription:audio-ack', pending); pending = null; acknowledgedAt = Date.now();}
+    if (pending) {socket.emit('transcription:audio-ack', {...pending, acknowledgedAt: Date.now()}); pending = null; acknowledgedAt = Date.now();}
   };
   socket.on('transcription:audio-pcm', (data = {}) => {
     if (!data || typeof data !== 'object') return;
     const {pcm, durationMs, sequence, captureId} = data;
+    const receivedAt = Date.now();
     const reply = result => {
-      pending = {...result, sequence, captureId};
+      pending = {...result, sequence, captureId, receivedAt};
       if (result.ok !== true || Date.now() - acknowledgedAt >= PCM_CAPTURE_SETTINGS.acknowledgementMs) flush();
       else if (!timer) {
         timer = setTimeout(flush, PCM_CAPTURE_SETTINGS.acknowledgementMs - (Date.now() - acknowledgedAt));

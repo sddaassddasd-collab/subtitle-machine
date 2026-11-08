@@ -16,6 +16,7 @@ test('PCM receipts are cumulative and failures are immediate', async t => {
   assert.deepEqual(receipts.map(r => r.sequence), [1]);
   t.mock.timers.tick(100);
   assert.deepEqual(receipts.map(r => r.sequence), [1, 3]);
+  assert.equal(receipts[1].receivedAt, 10000); assert.equal(receipts[1].acknowledgedAt, 10100);
   assert.equal(received[2].audio.byteLength, 1920);
   socket.emit('transcription:audio-pcm', packet(4, {durationMs: 1000}));
   assert.equal(receipts.at(-1).ok, false); assert.equal(receipts.at(-1).reason, 'invalid_pcm_packet');

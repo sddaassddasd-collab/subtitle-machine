@@ -13910,6 +13910,7 @@ io.on('connection', (socket) => {
       acknowledge({
         ok: true,
         provider: stream.provider,
+        networkAgeMs, serverAudioMs: stream.autoFollowAudioMs,
         receivedAt: Date.now(),
         level: Number(normalizedLevel.toFixed(4)),
       });

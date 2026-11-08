@@ -43,3 +43,34 @@ test('real isolated WebSocket PCM survives an audio disconnect while control rem
   assert.equal(old.send(packet('first', 9)), false, 'old samples cannot enter the replacement connection');
   assert.equal(control.connected, true); fresh.close();
 });
+
+test('a real 1.2-second ACK delay never disconnects otherwise fresh PCM', {timeout: 15000}, async t => {
+  const f = createFixture({lineCount: 1000}); f.allowSettings();
+  let socket, restoreReceipts;
+  t.after(() => {restoreReceipts?.(); socket?.disconnect(); f.closeConnections(); f.dispose();});
+  await new Promise((resolve, reject) => {f.server.once('error', reject); f.server.listen(0, '127.0.0.1', resolve);});
+  socket = io(`http://127.0.0.1:${f.server.address().port}`, {forceNew: true, autoConnect: false,
+    transports: ['websocket'], reconnection: false, extraHeaders: {Cookie: f.cookie}});
+  await new Promise((resolve, reject) => {socket.once('connect', resolve); socket.once('connect_error', reject); socket.connect();});
+  f.attachCapture(socket.id, 'delayed-receipts');
+  restoreReceipts = f.delayPcmReceipts(socket.id, 1200);
+  const {CaptureTransport} = await import('../../client/src/lib/capture-transport.js');
+  const blocked = [], reports = [], transport = new CaptureTransport(socket, {
+    onBlocked: reason => blocked.push(reason), onReport: report => reports.push(report),
+  });
+  t.after(() => transport.close());
+  const pcm = new Int16Array(960).fill(10);
+  for (let sequence = 1; sequence <= 65; sequence++) {
+    assert.equal(transport.send({sessionId: f.session.id, captureId: 'delayed-receipts', sequence, durationMs: 40,
+      pcm: pcm.buffer, level: .001, capturedAt: Date.now(), captureAgeMs: 0}), true);
+    await wait(40);
+  }
+  await until(() => transport.acknowledgedPackets === 65);
+  assert.deepEqual(blocked, []); assert.equal(f.stream.closing, false);
+  assert.equal(f.stream.autoFollowAudioMs, 2600);
+  assert.equal(f.sent.length, 65);
+  assert.ok(reports.some(r => r.reason === 'capture_transport_delayed'));
+  assert.ok(transport.rttMs >= 1200);
+  assert.ok(Number.isFinite(transport.serverNetworkAgeMs));
+  assert.ok(transport.serverNetworkAgeMs < 1000, 'delayed receipts must not be confused with stale uploaded audio');
+});

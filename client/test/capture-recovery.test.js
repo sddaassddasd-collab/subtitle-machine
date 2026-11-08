@@ -49,7 +49,7 @@ test('an error received before a restart completes is retried and each recovery 
   r.complete(attempt.generation, true, 2200)
   assert.equal(r.pending, true)
   assert.equal(r.reason, 'provider_backpressure')
-  assert.equal(r.take(true, 4000).recovery.attempt, 2)
+  assert.equal(r.take(true, 9000).recovery.attempt, 2)
   r.cancel('manual_stop')
   assert.ok(events.some(e => e.reason === 'recovery_scheduled'))
   assert.ok(events.some(e => e.reason === 'recovery_attempt'))
@@ -80,10 +80,23 @@ test('a stable-period budget reset applies once and subsequent failed attempts s
 
 test('a disconnected retry cannot remain pending outside the setup deadline', () => {
   const r = new CaptureRecovery(); r.arm({autoFollow: true}); r.request('capture_transport_backlog', 1000)
-  const first = r.take(false, 2000); assert.ok(first)
-  r.complete(first.generation, false, 2100)
+  const first = r.take(false, 4000); assert.ok(first)
+  r.complete(first.generation, false, 4100)
   const second = r.take(false, 15000); assert.ok(second)
   assert.equal(r.expire(27000), true)
   const third = r.take(false, 30000); assert.ok(third)
   assert.equal(r.expire(42000), true); assert.equal(r.exhausted, true)
+})
+
+test('persistent network trouble backs off instead of immediately spending all three retries', () => {
+  const r = new CaptureRecovery(), events = []; r.report = e => events.push(e)
+  r.arm({autoFollow: true}); r.request('capture_transport_timeout', 0)
+  for (const [attempt, at, delay] of [[1, 3000, 3000], [2, 9000, 6000], [3, 21000, 12000]]) {
+    assert.equal(r.take(false, at - 1), null)
+    const next = r.take(false, at)
+    assert.equal(next.recovery.attempt, attempt)
+    assert.ok(events.some(e => e.reason === 'recovery_scheduled' && e.attempt === attempt && e.retryAfterMs === delay))
+    r.complete(next.generation, false, at)
+  }
+  assert.equal(r.exhausted, true)
 })

@@ -88,7 +88,8 @@ function captureTransportDetails(value) {
   return {transportType: ['websocket', 'polling', 'webtransport'].includes(source.transportType) ? source.transportType : 'unknown',
     ...Object.fromEntries(['transportVersion', 'version', 'maximumInFlightMs', 'acknowledgementMs', 'maximumBufferedBytes',
       'maximumQueuedPackets', 'reportMs', 'reconnectMs', 'packetMs', 'cumulativeAckMs', 'inFlightPackets', 'inFlightAudioMs', 'oldestAckAgeMs',
-      'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets']
+      'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets',
+      'delayedAckMs', 'delayedForMs', 'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs']
       .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(10000000, source[key]))]))};
 }
 
