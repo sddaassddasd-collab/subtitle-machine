@@ -641,8 +641,11 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     }
     candidates = [...byIndex.values()].sort((a, b) => b.rank - a.rank);
   }
-  const currentSuffix = candidates[0]?.index > currentIndex + 1 ? align(text, script, currentIndex, currentIndex)[0] : null;
-  let suffixConflict = isCurrentSuffix(script, currentIndex, text, candidates[0], currentSuffix);
+  const suffixAnchor = recoveryAnchor(tracker, currentIndex);
+  const protectContinuation = Boolean(suffixAnchor && event.endMs >= suffixAnchor.atMs &&
+    event.endMs - suffixAnchor.atMs <= T.recoveryTtlMs);
+  const currentSuffix = candidates[0]?.index > currentIndex + 1 ? align(text, script, currentIndex, currentIndex, {local: protectContinuation})[0] : null;
+  let suffixConflict = isCurrentSuffix(script, currentIndex, text, candidates[0], currentSuffix, protectContinuation);
   if (suffixConflict && currentSuffix) candidates = [{...currentSuffix, rank: currentSuffix.confidence}];
   const pathCandidate = observeScriptPath(tracker, script, currentIndex, candidates, event);
   const weakPathCandidate = observeWeakScriptPath(tracker, script, currentIndex, candidates, {...event, text});
@@ -684,8 +687,8 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   // winner so a remembered path cannot turn this cue's ending into a later
   // cue's opening (for example, jumping over a short intervening line).
   if (best?.index > currentIndex + 1) {
-    const suffix = align(text, script, currentIndex, currentIndex)[0];
-    if (isCurrentSuffix(script, currentIndex, text, best, suffix)) {
+    const suffix = align(text, script, currentIndex, currentIndex, {local: protectContinuation})[0];
+    if (isCurrentSuffix(script, currentIndex, text, best, suffix, protectContinuation)) {
       suffixConflict = true;
       best = {...suffix, rank: suffix.confidence}; candidates = [best];
       tracker.path.hypotheses = tracker.path.hypotheses.filter(h => h.index <= currentIndex || h.endMs !== event.endMs);

@@ -25,3 +25,5 @@
 伺服器診斷版本 22：Deepgram 的 audio-thread-v2 串流遇到供應商送出緩衝達 48,000 bytes（約 1 秒 PCM）時，改在伺服器排隊，最多保留 12 秒。等待期間不確認為已提交；探測只回報已送交的封包序號。恢復後以不超過 1.25 倍即時速度追趕，避免一次灌入整批積壓。佇列 20 秒沒有提交進度或超出容量時才停止該串流並回報恢復需求。實際送出錯誤、斷線仍沿用既有處理；這些上限不能保證頻寬長期不足時不丟音。
 
 `provider_queue_waiting`、`provider_queue_drained`、`provider_queue_stalled`、`provider_queue_full` 位於 transport_health。`providerQueuedAudioMs`／`providerQueueAgeMs` 記錄伺服器待提交量／最老等待時間，與 WebSocket 的 `providerBufferedBytes` 分開。關閉有待提交音訊的串流時，`provider_queue_abandoned` 保存來源範圍與首尾封包序號。供應商是否真正接收、處理，仍需搭配辨識結果進度判斷。有效參數保存於 stream_configuration.effectiveSettings.providerQueue。
+
+文字規則版本 14：近期已建立的目前格，其短尾句若因插入詞而與遠處重複台詞更相似，會先核對目前格的局部句尾。容錯保護要求句尾一致、足夠字面證據、文字短於目前整句，並沿用位置證據的有效期限；不以單次尾句相似就跳到遠處重複格。完整且明確的遠處台詞仍可走正常重新定位流程。此規則不改變音訊傳輸、語意模型或即時字幕切換策略。

@@ -40,12 +40,14 @@ function observeScriptPath(tracker, script, currentIndex, candidates, event) {
   return candidate ? {...candidate, pathConfirmed: true, pathSteps: best.steps} : null;
 }
 
-function isCurrentSuffix(script, currentIndex, text, best, currentCandidate) {
+function isCurrentSuffix(script, currentIndex, text, best, currentCandidate, allowColloquial = false) {
   const current = script.entries[currentIndex]?.text;
   return Boolean(best && best.index > currentIndex + 1 && current && text.length >= 3 &&
     current !== text && (current.endsWith(text) || (text.length >= 6 && text.length <= current.length + 2 &&
       text.endsWith(current.slice(-3)) &&
-      currentCandidate && currentCandidate.offset === currentCandidate.length && currentCandidate.confidence >= T.strongConfidence)));
+      currentCandidate && currentCandidate.offset === currentCandidate.length && (currentCandidate.confidence >= T.strongConfidence ||
+        (allowColloquial && text.length < current.length && currentCandidate.confidence >= T.minimumConfidence &&
+          currentCandidate.matchedCharacters >= T.recoveryMinimumEvidence)))));
 }
 
 // Weaker evidence has its own lane: it must not out-rank or erase the normal
