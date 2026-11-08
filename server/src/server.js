@@ -21,6 +21,7 @@ const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-ca
 const {CaptionPresentation} = require('./caption-presentation');
 const {OnsetReview} = require('./onset-review');
 const {TranscriptionHealth, TRANSPORT_SETTINGS} = require('./transcription-health');
+const {registerPcmCapture} = require('./pcm-capture');
 const { normalizeRecordings, refreshMappings, publicRecording, isUsableSegment } = require('./recordings');
 const { RecordingRuntime } = require('./recording-runtime');
 const { registerRecordingRoutes } = require('./recording-routes');
@@ -7934,6 +7935,7 @@ function ensureRealtimeForceCommitTimer(stream) {
 }
 
 function sendRealtimeAudioChunk(stream, audio, durationMs = 0, level = 0) {
+  if (Buffer.isBuffer(audio)) audio = audio.toString('base64');
   stream.rt.send({
     type: 'input_audio_buffer.append',
     audio,
@@ -7947,7 +7949,7 @@ function sendDeepgramAudioChunk(stream, audio, durationMs = 0, level = 0) {
   if (!stream?.socket || stream.socket.readyState !== WebSocket.OPEN) {
     throw new Error('Deepgram 辨識串流尚未就緒');
   }
-  const pcm = Buffer.from(audio, 'base64');
+  const pcm = Buffer.isBuffer(audio) ? audio : Buffer.from(audio, 'base64');
   if (pcm.length === 0) return;
   stream.socket.send(pcm, { binary: true });
   trackRealtimeInputLevel(stream, level, durationMs);
@@ -9774,6 +9776,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   if (held.holding(session.currentIndex, session.selectedCellId)) held.revise({...options, text: transcript},
     {index: result.index, candidate: result.candidate});
   const wasLive = session.automaticLive === true;
+  if (result.shortOpening) performance.opening(result.index, result.shortOpening.startMs, receivedAt);
   const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs},
     performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
   recordFallbackDecision(sessionId, performance, receivedAt);
@@ -13643,8 +13646,13 @@ io.on('connection', (socket) => {
         return;
       }
 
+      const metadata = clientMetadata(clientInfo);
       const active = transcriptionStreams.get(sessionId);
-      if (active && active.socketId !== socket.id) {
+      const sameOwner = active && metadata.captureOwnerId && active.captureOwnerId === metadata.captureOwnerId;
+      if (sameOwner && metadata.captureGeneration <= (active.captureGeneration || 0)) {
+        acknowledge({ok: false, reason: 'stale_capture_start'}); return;
+      }
+      if (active && active.socketId !== socket.id && !sameOwner) {
         acknowledge({
           ok: false,
           reason: '此節目已有其他控制端在進行語音辨識',
@@ -13656,7 +13664,7 @@ io.on('connection', (socket) => {
       }
       socket.data.capture = {sessionId, captureId: clientMetadata(clientInfo).captureId};
 
-      if (active && active.socketId === socket.id) {
+      if (active && (active.socketId === socket.id || sameOwner)) {
         if (preserveTextOnRestart === true) {
           const completedHistory = getTranscriptionDisplayParts(active).historyLines;
           updateTranscriptionState(sessionId, {
@@ -13730,7 +13738,7 @@ io.on('connection', (socket) => {
           selectedProvider === 'deepgram'
             ? startDeepgramTranscription
             : startRealtimeTranscription;
-        start({
+        const started = start({
           sessionId,
           socketId: socket.id,
           apiKey: trimmedApiKey,
@@ -13745,8 +13753,10 @@ io.on('connection', (socket) => {
           speakerRecognitionEnabled,
           transcriptionContext,
           startAcknowledge: acknowledge,
-          clientInfo: clientMetadata(clientInfo),
+          clientInfo: metadata,
         });
+        if (started) Object.assign(started, {captureOwnerId: metadata.captureOwnerId,
+          captureGeneration: metadata.captureGeneration, controlSocketId: metadata.controlSocketId});
       } catch (error) {
         const message =
           sanitizeLineText(error?.message || '') || '啟動語音辨識失敗';
@@ -13771,7 +13781,7 @@ io.on('connection', (socket) => {
         .map(k => [k, Math.max(0, Math.min(600000, data[k]))]))});
   });
 
-  socket.on('transcription:audio', ({ sessionId, audio, durationMs, level, sequence, stale, quality, clientAgeMs, captureId, capturedAt, captureAgeMs }, ack) => {
+  const receiveCaptureAudio = ({ sessionId, audio, durationMs, level, sequence, stale, quality, clientAgeMs, captureId, capturedAt, captureAgeMs }, ack) => {
     const acknowledge =
       typeof ack === 'function'
         ? ack
@@ -13780,7 +13790,7 @@ io.on('connection', (socket) => {
       acknowledge({ ok: false, reason: 'missing_session' });
       return;
     }
-    if (typeof audio !== 'string' || !audio) {
+    if (!(typeof audio === 'string' && audio) && !(Buffer.isBuffer(audio) && audio.length)) {
       acknowledge({ ok: false, reason: 'missing_audio' });
       return;
     }
@@ -13916,15 +13926,18 @@ io.on('connection', (socket) => {
         recoveryReason: error?.recoveryReason || '',
       });
     }
-  });
+  };
+  socket.on('transcription:audio', receiveCaptureAudio);
+  registerPcmCapture(socket, receiveCaptureAudio);
 
-  socket.on('transcription:stop', ({ sessionId, preserveText }) => {
+  socket.on('transcription:stop', ({ sessionId, preserveText, captureId }) => {
     if (!sessionId) return;
     const session = getOwnedSocketSession(sessionId);
     if (!session) return;
 
     const stream = transcriptionStreams.get(sessionId);
-    if (!stream || stream.socketId !== socket.id) {
+    if (!stream || (stream.socketId !== socket.id && stream.controlSocketId !== socket.id) ||
+      (captureId && stream.captureId !== captureId)) {
       return;
     }
 
@@ -15236,8 +15249,8 @@ io.on('connection', (socket) => {
 
     ownedSessions.forEach((sessionId) => {
       stopTranscriptionStream(sessionId, {
-        keepText: false,
-        reason: 'control socket disconnected',
+        keepText: Boolean(transcriptionStreams.get(sessionId)?.captureOwnerId),
+        reason: transcriptionStreams.get(sessionId)?.captureOwnerId ? 'audio socket disconnected' : 'control socket disconnected',
       });
     });
   });

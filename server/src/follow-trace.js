@@ -87,7 +87,7 @@ function captureTransportDetails(value) {
   const source = value && typeof value === 'object' ? value : {};
   return {transportType: ['websocket', 'polling', 'webtransport'].includes(source.transportType) ? source.transportType : 'unknown',
     ...Object.fromEntries(['transportVersion', 'version', 'maximumInFlightMs', 'acknowledgementMs', 'maximumBufferedBytes',
-      'maximumQueuedPackets', 'reportMs', 'reconnectMs', 'inFlightPackets', 'inFlightAudioMs', 'oldestAckAgeMs',
+      'maximumQueuedPackets', 'reportMs', 'reconnectMs', 'packetMs', 'cumulativeAckMs', 'inFlightPackets', 'inFlightAudioMs', 'oldestAckAgeMs',
       'engineQueuedPackets', 'engineQueuedBytes', 'webSocketBufferedBytes', 'rttMs', 'maxRttMs', 'sentPackets', 'acknowledgedPackets']
       .filter(key => Number.isFinite(source[key])).map(key => [key, Math.max(0, Math.min(10000000, source[key]))]))};
 }
@@ -99,6 +99,10 @@ function clientMetadata(value) {
     userAgent: String(source.userAgent || '').slice(0, 400),
     captureId: typeof source.captureId === 'string' ? source.captureId.slice(0, 100) : '',
     captureClock: typeof source.captureClock === 'string' ? source.captureClock.slice(0, 80) : '',
+    audioChannel: String(source.audioChannel || '').slice(0, 80),
+    captureOwnerId: String(source.captureOwnerId || '').slice(0, 100),
+    controlSocketId: String(source.controlSocketId || '').slice(0, 100),
+    captureGeneration: Math.max(0, Math.min(10000000, Number(source.captureGeneration) || 0)),
     recovery: source.recovery ? {reason: String(source.recovery.reason || '').slice(0, 80),
       attempt: Math.max(0, Math.min(3, Number(source.recovery.attempt) || 0)),
       ...(source.recovery.transport ? {transport: captureTransportDetails(source.recovery.transport)} : {})} : null,

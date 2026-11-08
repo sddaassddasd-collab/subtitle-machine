@@ -61,7 +61,7 @@ test('invented, reversed, overlapping or missing word spans cannot fabricate ind
     const h = harness(async () => answer(...matches));
     await h.f.observe(h.stream, observation(), h.h);
     assert.equal(h.accepted.length, 0);
-    assert.ok(h.records.some(r => ['invalid_word_span', 'unordered_word_spans'].includes(r.reason)));
+    assert.ok(h.records.some(r => ['invalid_word_span', 'missing_word_spans', 'overlapping_word_spans', 'cue_order_reversed'].includes(r.reason)));
   }
 });
 test('medium-confidence proposals wait for independent text; two model answers do not suffice', async () => {
@@ -135,4 +135,27 @@ test('moving timestamps of the same words cannot turn an old prefix into a new s
     words: [{word: '第一個改寫句子', start: 1, end: 2}, {word: '接著新內容', start: 2, end: 4}]}), h.h);
   assert.equal(h.accepted.length, 0);
   assert.equal(h.records.filter(r => r.reason === 'independent_semantic').length, 0);
+});
+
+test('span validation distinguishes overlap, cue order, short spans and excessive cue steps', () => {
+  const event = observation(), memory = new SemanticTranscript(), revision = memory.remember(event, 0);
+  const cases = [
+    [answer(match(1, 0, 3), match(2, 3, 6)), 'overlapping_word_spans'],
+    [answer(match(2, 0, 2), match(1, 3, 6)), 'cue_order_reversed'],
+    [answer(match(1, 1, 1)), 'word_span_too_short'],
+    [answer(match(0, 0, 2, .85), match(4, 3, 6, .85)), 'cue_step_too_large'],
+  ];
+  for (const [response, reason] of cases) assert.equal(selectMatches(response, event, revision).reason, reason);
+  const forwardSkip = selectMatches(answer(match(0, 0, 2), match(3, 3, 6)), event, revision);
+  assert.equal(forwardSkip.reason, null);
+  assert.equal(forwardSkip.matches.at(-1).index, 3, 'a strong ordered proposal is still subject to corroboration');
+});
+
+test('rejected model answers retain raw word IDs for diagnosis', async () => {
+  const response = answer(match(1, 0, 3), match(2, 3, 6));
+  const h = harness(async () => response);
+  await h.f.observe(h.stream, observation(), h.h);
+  const rejected = h.records.find(r => r.reason === 'overlapping_word_spans');
+  assert.deepEqual(rejected.rawMatches, response.matches);
+  assert.deepEqual(rejected.matches, []); assert.equal(h.accepted.length, 0);
 });

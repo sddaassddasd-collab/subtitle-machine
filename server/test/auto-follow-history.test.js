@@ -312,7 +312,7 @@ test('packet diagnostics aggregate instead of queuing each packet and flush the 
   assert.ok(summaries.length <= 5);
   assert.equal(summaries.reduce((sum, event) => sum + event.packets, 0), 1000);
   assert.equal(summaries.reduce((sum, event) => sum + event.stalePackets, 0), 10);
-  assert.ok(!JSON.stringify(report).includes('pcm'));
+  assert.ok(!JSON.stringify(report).includes('"pcm":'));
   await h.end(s.id);
 });
 
@@ -485,4 +485,20 @@ test('explicit deletion is not undone by a stale writer and its late batch canno
   assert.equal((await store.listFollowRuns(a.session.id)).length, 1);
   assert.equal(b.history.status(b.session.id).runId, null);
   await a.history.end(a.session.id);
+});
+
+test('replacement capture diagnostics persist without an active stream and keep source and receive clocks', async () => {
+  const {session: s, history: h, advance} = fixture('capture-outbox');
+  const runId = await h.start(s), occurredAt = h.now(); advance(15000);
+  const event = {eventId: 'capture-event-1', runId, occurredAt, captureId: 'not-yet-started',
+    reason: 'capture_setup', stage: 'transport_connect', status: 'failed', message: 'offline'};
+  assert.deepEqual(await h.clientHealth(s.id, [event]), [event.eventId]);
+  assert.deepEqual(await h.clientHealth(s.id, [event]), [event.eventId]);
+  await h.flush(s.id);
+  const report = await h.read(s.id, runId), events = report.events.filter(e => e.clientEventId === event.eventId);
+  assert.equal(events.length, 1); assert.equal(events[0].at, occurredAt);
+  assert.equal(events[0].receivedAt, occurredAt + 15000); assert.equal(events[0].stage, 'transport_connect');
+  assert.deepEqual(await h.clientHealth(s.id, [{...event, eventId: 'old-event', runId: 'old-run'}]), ['old-event']);
+  await h.flush(s.id);
+  assert.equal((await h.read(s.id, runId)).events.some(e => e.clientEventId === 'old-event'), false);
 });

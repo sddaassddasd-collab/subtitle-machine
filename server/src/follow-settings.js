@@ -69,12 +69,13 @@ const SEMANTIC_SETTINGS = Object.freeze({model: 'gpt-4o-mini', timeoutMs: 2500, 
   sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 11, onset: 3, acoustic: 4, diagnostics: 15, semantic: 8, performance: 6, captionCorrection: 1, captionPresentation: 4}),
+  versions: Object.freeze({text: 12, onset: 3, acoustic: 4, diagnostics: 16, semantic: 9, performance: 7, captionCorrection: 1, captionPresentation: 4}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,
   captionCorrection: require('./script-caption-correction').CAPTION_CORRECTION_SETTINGS,
   captionPresentation: require('./caption-presentation').CAPTION_PRESENTATION_SETTINGS,
   transport: require('./transcription-health').TRANSPORT_SETTINGS,
+  pcmTransport: require('./pcm-capture').PCM_CAPTURE_SETTINGS,
 });
 module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS};

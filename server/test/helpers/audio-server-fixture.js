@@ -58,7 +58,9 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         socket: transport, rt: {
           socket: transport, send: data => sent.push(data), close: () => transport.close(),
         },
-        pendingAudioChunks: [], autoFollowAudioMs: 0, audioBytesSent: 0,
+        pendingAudioChunks: [], completedFragments: [], draftByItemId: new Map(),
+        fragmentByItemId: new Map(), finalizedLineByItemId: new Map(), mergedLineOverrides: new Map(),
+        autoFollowAudioMs: 0, audioBytesSent: 0,
         trailingSilenceMs: 0, pendingAppendCount: 0, pendingAudioMs: 0,
       };
       transcriptionStreams.set(session.id, stream);
@@ -83,6 +85,23 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
       const send = connect();
       return {
         server, session, stream, user, sent, connect, send, event: send.event, cueChanges, history: autoFollowHistory,
+        cookie: AUTH_COOKIE_NAME + '=' + token,
+        attachCapture: (socketId, captureId) => {
+          Object.assign(stream, {socketId, captureId, captureOwnerId: 'network-test', closing: false,
+            ready: true, autoFollowAudioMs: 0, lastCaptureSequence: 0});
+          stream.health = new TranscriptionHealth(); transport.readyState = WebSocket.OPEN;
+          transcriptionStreams.set(session.id, stream);
+        },
+        closeConnections: () => io.close(),
+        currentStream: () => transcriptionStreams.get(session.id),
+        mockProviderStart: () => {
+          startDeepgramTranscription = options => {
+            const replacement = {...stream, socketId: options.socketId, captureId: options.clientInfo.captureId,
+              closing: false, ready: true, historyStreamId: 'mock-provider', liveTranslationStreamId: 'mock-asr'};
+            transcriptionStreams.set(session.id, replacement);
+            options.startAcknowledge({ok: true}); return replacement;
+          };
+        },
         allowSettings: () => { persistSession = () => {}; },
         storage: () => serializeSessionForStorage(session),
         follower: () => getPerformanceFollower(session),

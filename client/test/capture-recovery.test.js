@@ -12,19 +12,18 @@ test('queued worklet batches retain their original sample clock, including parti
   vm.runInContext(fs.readFileSync(new URL('../src/worklets/mic-capture-processor.js', import.meta.url), 'utf8'), context)
   const processor = new Processor()
   for (let i = 0; i < 750; i++) { context.currentFrame = i * 128; processor.process([[new Float32Array(128)]]) }
-  assert.equal(sent.length, 100)
-  assert.equal(sent[0].endTime, .02)
+  assert.equal(sent.length, 50)
+  assert.equal(sent[0].endTime, .04)
   assert.equal(sent.at(-1).endTime, 2)
   assert.ok(captureAgeMs(2, sent[0].endTime) > 1900, 'UI receipt time cannot make old samples fresh')
 })
-test('recovery waits for connectivity, coalesces failures and stops after three retries', () => {
+test('offline recovery starts timed attempts, coalesces failures and stops after three retries', () => {
   const r = new CaptureRecovery(); r.arm({autoFollow: true})
   let now = 1000
   for (let i = 1; i <= 3; i++) {
     assert.equal(r.request('capture_backlog', now), true)
     assert.equal(r.request('duplicate', now), false)
-    assert.equal(r.take(false, now + 10000), null)
-    const attempt = r.take(true, now + 10000)
+    const attempt = r.take(false, now + 10000)
     assert.equal(attempt.recovery.attempt, i); assert.equal(attempt.autoFollow, true)
     assert.equal(r.take(true, now + 20000), null)
     r.complete(attempt.generation, true, now + 10000); now += 11000
@@ -77,4 +76,14 @@ test('a stable-period budget reset applies once and subsequent failed attempts s
     assert.ok(attempt); r.complete(attempt.generation, false, now)
   }
   assert.equal(r.exhausted, true)
+})
+
+test('a disconnected retry cannot remain pending outside the setup deadline', () => {
+  const r = new CaptureRecovery(); r.arm({autoFollow: true}); r.request('capture_transport_backlog', 1000)
+  const first = r.take(false, 2000); assert.ok(first)
+  r.complete(first.generation, false, 2100)
+  const second = r.take(false, 15000); assert.ok(second)
+  assert.equal(r.expire(27000), true)
+  const third = r.take(false, 30000); assert.ok(third)
+  assert.equal(r.expire(42000), true); assert.equal(r.exhausted, true)
 })

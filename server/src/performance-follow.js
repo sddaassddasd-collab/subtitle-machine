@@ -2,7 +2,7 @@ const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 6, mismatchMs: 4500, mismatchAudioMs: 3000,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 7, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 8, minimumSpeechConfidence: .35,
   longItemMs: 6500, longItemCharacters: 18, stablePrefixCharacters: 3, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
@@ -48,7 +48,7 @@ class PerformanceFollower {
   constructor() {
     this.source = 'script'; this.lock = 'auto'; this.buffer = []; this.usedGroups = new Set();
     this.rates = []; this.lastReliable = null; this.lastConfirmedEnd = -1;
-    this.mismatch = null; this.group = null; this.speed = 1;
+    this.mismatch = null; this.provisionalFenceMs = -1; this.group = null; this.speed = 1;
     this.switchedAt = -Infinity; this.semanticAt = -Infinity; this.reason = 'ready';
     this.returnWitnesses = []; this.stableMatches = new Map();
   }
@@ -113,10 +113,18 @@ class PerformanceFollower {
   semanticSettled(inputId) {
     if (!inputId || this.semanticRequest?.inputId === inputId) this.semanticRequest = null;
   }
+  opening(index, startMs, now) {
+    if (this.source === 'live' || !Number.isFinite(startMs)) return;
+    // A fresh displayed cue starts its own review. It is still unverified and
+    // cannot prepare another cue or contribute a confirmed timing/rate sample.
+    this.provisionalFenceMs = startMs;
+    this.mismatch = null;
+    this.fallbackDecision = {reason: 'opening_review', index, at: now};
+  }
   speech(event, now) {
     if (!event.itemId || !Number.isFinite(event.startMs) || !Number.isFinite(event.endMs) || event.endMs <= event.startMs) return null;
     if (event.audioMs - event.endMs > PERFORMANCE_SETTINGS.maximumLagMs || event.endMs > event.audioMs + 250) return null;
-    const fresh = freshSpeech(event, this.lastConfirmedEnd);
+    const fresh = freshSpeech(event, Math.max(this.lastConfirmedEnd, this.provisionalFenceMs ?? -1));
     const prior = this.buffer.find(x => x.itemId === event.itemId);
     if (!fresh || !normalizeText(fresh.text)) {
       if (prior) this.buffer = this.buffer.filter(x => x !== prior);

@@ -32,8 +32,9 @@ export class CaptureRecovery {
     this.report?.({reason: 'recovery_scheduled', cause: reason, attempt: this.attempts + 1})
     return true
   }
-  take(connected, now = Date.now()) {
-    if (!this.desired || !this.pending || this.inFlight || !connected || now < this.retryAt) return null
+  take(_connected, now = Date.now()) {
+    // Connecting belongs to the timed attempt; offline retries must not wait forever.
+    if (!this.desired || !this.pending || this.inFlight || now < this.retryAt) return null
     this.pending = false; this.inFlight = true; this.attempts++
     this.startedAt = now
     this.report?.({reason: 'recovery_attempt', cause: this.reason, attempt: this.attempts})

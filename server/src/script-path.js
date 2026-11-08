@@ -43,7 +43,8 @@ function observeScriptPath(tracker, script, currentIndex, candidates, event) {
 function isCurrentSuffix(script, currentIndex, text, best, currentCandidate) {
   const current = script.entries[currentIndex]?.text;
   return Boolean(best && best.index > currentIndex + 1 && current && text.length >= 3 &&
-    current !== text && (current.endsWith(text) || (text.length >= 6 && current.length > text.length &&
+    current !== text && (current.endsWith(text) || (text.length >= 6 && text.length <= current.length + 2 &&
+      text.endsWith(current.slice(-3)) &&
       currentCandidate && currentCandidate.offset === currentCandidate.length && currentCandidate.confidence >= T.strongConfidence)));
 }
 

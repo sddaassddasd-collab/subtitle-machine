@@ -59,7 +59,7 @@ test('a matched suffix starting inside a provider word uses that whole word with
   assert.equal(suffixSpeech({...event, words: []}, '起來都好奇怪'), null);
 });
 
-test('a pending current-opening semantic answer gets bounded time before automatic live clears its review', async t => {
+test('a fresh opening clears the old mismatch and still permits same-cue semantic verification', async t => {
   const f = setup(t, ['旋律聽起來都好奇怪', '讓人心裡悶悶的', '我以為自己休息一下就好']);
   let resolve;
   f.enableSemantic(() => new Promise(done => {resolve = done}));
@@ -72,7 +72,8 @@ test('a pending current-opening semantic answer gets bounded time before automat
     {words: [{word: '讓人的心裡頭是悶悶的', startMs: 5500, endMs: 7000}]});
   assert.equal(f.session.currentIndex, 1);
   f.tick(7400, 7600);
-  assert.equal(f.follower().fallbackDecision.reason, 'semantic_grace');
+  assert.equal(f.follower().fallbackDecision.reason, 'needs_distinct_speech');
+  assert.equal(f.follower().mismatch.items.size, 1);
   assert.notEqual(f.session.automaticLive, true);
   resolve({choices: [{message: {content: JSON.stringify({ambiguous: false,
     matches: [{index: 1, matchConfidence: 1, firstWordId: 0, lastWordId: 0}]})}}]}); await flush();
@@ -228,4 +229,30 @@ test('short semantic assistance cannot use negation changes, generic fragments, 
     assert.equal(f.session.currentIndex, 0, text);
     assert.ok(!f.events.some(e => e.reason === 'prepared_short_text_semantic'));
   }
+});
+
+test('the new recording with equal-length ASR insertions/deletions keeps cue 15 then displays 16', () => {
+  const recorded = require('./fixtures/cue-tail-revised.json'), tracker = createTracker();
+  let index = recorded.initialIndex, protectedEnding = false, nextOpening = false;
+  for (const event of recorded.events) {
+    const result = followTranscript(tracker, recorded.lines, index, {...event, streamId: 'revised'});
+    if (Number.isInteger(result.index)) index = result.index;
+    if (event.text === '悲傷的人都能夠感到快樂') {assert.equal(index, 14); protectedEnding = true;}
+    if (event.text === '另外') {assert.equal(index, 15); nextOpening = true;}
+  }
+  assert.equal(protectedEnding, true); assert.equal(nextOpening, true);
+});
+
+test('fresh short openings cannot inherit an almost-expired fallback timer or become confirmed evidence', () => {
+  const p = new PerformanceFollower();
+  p.bind(normalizePerformanceSettings({automaticLive: true}), 'scene', [{text: '前一格'}, {text: '我們該怎麼做呢'}]);
+  p.originIndex = 0;
+  const e = (itemId, startMs, endMs, text) => ({itemId, startMs, endMs, audioMs: endMs, text, isFinal: true});
+  p.observe(e('old-a', 0, 2000, '先前完全無法對齊的話'), null, 1000);
+  p.observe(e('old-b', 2000, 4000, '接著持續說出不同內容'), null, 5400);
+  p.opening(1, 4100, 5479);
+  p.observe(e('opening', 4100, 4500, '我們'), null, 5479);
+  assert.equal(p.maybeLive(4560, 5607), null, 'the old 4.5-second mismatch cannot switch a fresh cue in 128ms');
+  assert.equal(p.lastReliable, null); assert.equal(p.lastConfirmedEnd, -1);
+  assert.equal(p.mismatch.items.size, 1);
 });

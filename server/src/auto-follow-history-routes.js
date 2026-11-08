@@ -21,6 +21,13 @@ function registerAutoFollowHistoryRoutes(app, {history, requireAuth, ownedSessio
     const id = await history.start(session, {fresh: true});
     await history.flush(session.id); broadcast(session.id); res.json({id});
   }));
+  // Authenticated session ownership is sufficient: a failed audio connection
+  // must be able to report before its replacement stream exists.
+  app.post(`${root}/capture-health`, requireAuth, wrap(async (req, res, session) => {
+    const accepted = await history.clientHealth(session.id, req.body?.events);
+    await history.flush(session.id);
+    res.json({accepted});
+  }));
   app.post(`${root}/:runId/end`, requireAuth, wrap(async (req, res, session) => {
     await history.end(session.id, 'user_finished', req.params.runId);
     broadcast(session.id); res.json({ok: true});

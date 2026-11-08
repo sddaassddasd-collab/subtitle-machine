@@ -21,23 +21,28 @@ function fixture({waitPermission=false,waitResume=false}={}) {
     addEventListener(){calls.listenerCount++;}removeEventListener(){calls.listenerCount--;}
   }
   const listeners=new Map();
-  const socket={connected:true,io:{engine:{writeBuffer:[],transport:{name:'websocket',ws:{bufferedAmount:0},close(){calls.transportCloses++;}}}},
+  const socket={connected:false,io:{engine:{writeBuffer:[],transport:{name:'websocket',ws:{bufferedAmount:0},close(){calls.transportCloses++;}}}},
     on(name,fn){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
     off(name,fn){listeners.get(name)?.delete(fn);},
     disconnect(){this.connected=false;},connect(){calls.reconnects++;this.connected=true;for(const fn of listeners.get('connect')||[])fn();},
     timeout(){return this;},emit(name,_payload,reply){
     if(name==='transcription:start')replyProvider=reply;
     if(name==='transcription:stop')calls.backendStops++;
-    if(name==='transcription:audio')calls.audio.push(_payload);
+    if(name==='transcription:audio-pcm'){
+      calls.audio.push(_payload);
+      for(const fn of listeners.get('transcription:audio-ack')||[])fn({ok:true,captureId:_payload.captureId,sequence:_payload.sequence});
+    }
   }};
+  const control={id:'control',connected:true,emit(){},disconnect(){throw new Error('Audio recovery must not disconnect control');}};
   const context=vm.createContext({
     performance, setTimeout, clearTimeout,
+    io:options=>{calls.audioOptions=options;return socket;}, captureOwnerId:'test-controller',
     useEffect(){},captureStartRef:{},MIC_DIAGNOSTIC_UPDATE_MS:500,TARGET_SAMPLE_RATE:24000,
     mixChannelsToMono:channels=>channels[0],downsampleFloat32:s=>s,float32ToInt16:s=>s,
     int16ToBase64:()=> 'AA==',signalMetrics:()=>({level:.1,peak:.2,samples:480,clippedSamples:0}),setMicDiagnostics(){},
     window:{...events,AudioContext},document:{...events,visibilityState:'visible'},
     navigator:{mediaDevices:{getUserMedia:()=>waitPermission?new Promise(resolve=>{allowPermission=()=>resolve(media)}):Promise.resolve(media)}},
-    sessionId:'test',socketRef:{current:socket},captureStateRef:capture,transcriptionAttemptRef:attempts,
+    sessionId:'test',socketRef:{current:control},captureStateRef:capture,transcriptionAttemptRef:attempts,
     transcription:{provider:'deepgram',status:'idle',active:false,language:'zh-TW'},apiKey:'',
     persistTranscriptionContext:async()=>true,setStatus:value=>statuses.push(value),setTranscription(){},
     releaseMicrophoneCapture:()=>{attempts.current++;capture.current={};},
@@ -48,6 +53,9 @@ function fixture({waitPermission=false,waitResume=false}={}) {
   vm.runInContext(fs.readFileSync(require.resolve('../../client/src/lib/capture-recovery.js'),'utf8').replace(/export /g,'')+
     '\nglobalThis.captureRecovery = new CaptureRecovery();',context);
   vm.runInContext(fs.readFileSync(require.resolve('../../client/src/lib/capture-transport.js'),'utf8').replace(/export /g,''),context);
+  const releaseStart=source.indexOf('  const releaseMicrophoneCapture = () => {');
+  const releaseEnd=source.indexOf('  const clearPendingLineClick',releaseStart);
+  vm.runInContext(source.slice(releaseStart,releaseEnd),context);
   vm.runInContext(source.slice(start,end)+'\nglobalThis.begin=handleStartLiveTranscription;',context);
   return {begin:options=>context.begin({autoFollow:true,...options}),attempts,capture,track,contexts,calls,statuses,recovery:context.captureRecovery,
     allowPermission:()=>allowPermission(),allowResume:()=>allowResume(),replyProvider:value=>replyProvider(null,value)};
@@ -55,6 +63,7 @@ function fixture({waitPermission=false,waitResume=false}={}) {
 
 test('a canceled microphone permission request stops only its own late stream',async()=>{
   const f=fixture({waitPermission:true}),pending=f.begin();
+  await new Promise(resolve=>setImmediate(resolve));
   f.attempts.current++;const newer={audioContext:{newer:true}};f.capture.current=newer;
   f.allowPermission();assert.equal(await pending,false);assert.equal(f.track.stops,1);
   assert.equal(f.capture.current,newer);assert.equal(f.calls.backendStops,0);
@@ -84,12 +93,18 @@ test('a matching running snapshot can acknowledge capture readiness before the s
   f.replyProvider({ok:true});assert.equal(f.recovery.desired,true);
 });
 
-test('a transmission recovery resets the real capture connection before requesting a new provider stream',async()=>{
+test('a transmission recovery creates an isolated audio channel before requesting a provider stream',async()=>{
   const f=fixture();f.recovery.arm({autoFollow:true});
   const pending=f.begin({recovering:true,recovery:{reason:'capture_transport_backlog',attempt:1}});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(f.calls.reconnects,1);assert.equal(f.calls.transportCloses,1);
-  f.replyProvider({ok:true});assert.equal(await pending,true);
+  assert.equal(f.calls.transportCloses,0);assert.equal(f.calls.reconnects,1);
+  assert.equal(f.calls.audioOptions.forceNew,true);
+  assert.deepEqual(Array.from(f.calls.audioOptions.transports),['websocket']);
+  let completed=false;pending.then(()=>{completed=true;});
+  f.replyProvider({ok:true});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(completed,false,'a provider-ready ACK is insufficient without new PCM');
+  f.capture.current.captureNode.onaudioprocess({playbackTime:0,inputBuffer:{numberOfChannels:1,getChannelData:()=>new Float32Array(480)}});
+  assert.equal(await pending,true);
   assert.ok(f.capture.current.audioTransport);
 });
 

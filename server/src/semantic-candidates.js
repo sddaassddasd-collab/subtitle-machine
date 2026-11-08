@@ -30,10 +30,16 @@ function selectMatches(result, observation, revision) {
     if (score < S.candidateConfidence) return reject('low_confidence');
     const hasSpan = value.firstWordId != null || value.lastWordId != null;
     const speech = hasSpan ? wordSpeech(revision, value.firstWordId, value.lastWordId) : null;
-    if (hasSpan && (!speech || normalizeText(speech.text).length < S.spanMinimumCharacters)) return reject('invalid_word_span');
+    if (hasSpan && !speech) return reject('invalid_word_span');
+    if (hasSpan && normalizeText(speech.text).length < S.spanMinimumCharacters) return reject('word_span_too_short');
     const prior = matches.at(-1);
-    if (prior && (!speech || !prior.speech || speech.startMs < prior.speech.endMs ||
-      value.index <= prior.index || value.index - prior.index > S.maximumStep)) return reject('unordered_word_spans');
+    if (prior) {
+      if (!speech || !prior.speech) return reject('missing_word_spans');
+      if (speech.startMs < prior.speech.endMs) return reject('overlapping_word_spans');
+      if (value.index <= prior.index) return reject('cue_order_reversed');
+      const maximumStep = score >= S.skipConfidence && prior.tier === 'high' ? S.strongMaximumStep : S.maximumStep;
+      if (value.index - prior.index > maximumStep) return reject('cue_step_too_large');
+    }
     matches.push({...candidate, matchConfidence: score, tier: score >= S.minimumConfidence ? 'high' : 'provisional', speech});
   }
   return {matches, reason: null, legacy};

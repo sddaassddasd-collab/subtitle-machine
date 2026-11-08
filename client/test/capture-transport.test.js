@@ -1,80 +1,85 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {EventEmitter} from 'node:events'
-import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as L, reconnectCaptureSocket, needsCaptureConnectionReset} from '../src/lib/capture-transport.js'
+import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as L, connectCaptureSocket, captureStage} from '../src/lib/capture-transport.js'
 
 function fixture() {
   let now = 0
-  const sent = [], blocked = [], reports = [], acknowledgements = []
+  const sent = [], blocked = [], reports = [], acknowledgements = [], listeners = new EventEmitter()
   const socket = {connected: true, io: {engine: {writeBuffer: [], transport: {name: 'websocket', ws: {bufferedAmount: 0}}}},
-    emit(name, packet, ack) {sent.push({name, packet, ack})}}
+    on: (...args) => listeners.on(...args), off: (...args) => listeners.off(...args),
+    emit(name, packet) {sent.push({name, packet})}}
   const transport = new CaptureTransport(socket, {now: () => now, onBlocked: x => blocked.push(x),
     onReport: x => reports.push(x), onAck: x => acknowledgements.push(x)})
-  const send = i => transport.send({sequence: i, durationMs: 20, audio: 'pcm'})
-  return {transport, socket, sent, blocked, reports, acknowledgements, send, clock: value => {now = value}}
+  const send = i => transport.send({captureId: 'capture', sequence: i, durationMs: 40, pcm: new ArrayBuffer(1920)})
+  const ack = (sequence, extra) => listeners.emit('transcription:audio-ack', {captureId: 'capture', sequence, ok: true, ...extra})
+  return {transport, socket, sent, blocked, reports, acknowledgements, send, ack, clock: value => {now = value}}
 }
 
-test('healthy 50 Hz audio is forwarded immediately with bounded ACK accounting and transport telemetry', () => {
+test('binary audio uses cumulative ACKs and remains bounded through forty minutes of capture', () => {
   const f = fixture()
-  for (let i = 0; i < 500; i++) {
-    f.clock(i * 20); assert.equal(f.send(i), true)
-    f.clock(i * 20 + 10); f.sent.at(-1).ack({ok: true})
+  for (let i = 1; i <= 60000; i++) {
+    f.clock(i * 40); assert.equal(f.send(i), true)
+    if (i % 3 === 0) {f.clock(i * 40 + 10); f.ack(i); f.sent.length = 0}
   }
-  assert.equal(f.sent.length, 500); assert.equal(f.blocked.length, 0)
+  assert.equal(f.transport.sentPackets, 60000); assert.equal(f.blocked.length, 0)
   assert.equal(f.transport.details().inFlightAudioMs, 0)
   assert.equal(f.transport.details().rttMs, 10)
+  assert.equal(f.acknowledgements.length, 20000)
   assert.ok(f.reports.some(x => x.reason === 'capture_transport' && x.transportType === 'websocket'))
 })
 
-test('the reported slow delivery cannot accumulate 9 seconds of reliable audio emits', () => {
+test('a network blackout stops new PCM within one second; late ACKs cannot resume the obsolete clock', () => {
   const f = fixture()
-  for (let i = 0; i < 500; i++) {f.clock(i * 20); f.send(i)}
-  assert.equal(f.sent.length, L.maximumInFlightMs / 20)
+  for (let i = 1; i <= 500; i++) {f.clock(i * 40); f.send(i)}
+  assert.equal(f.sent.length, L.maximumInFlightMs / 40)
   assert.deepEqual(f.blocked, ['capture_transport_backlog'])
   assert.equal(f.transport.details().inFlightAudioMs, L.maximumInFlightMs)
   assert.equal(f.reports.at(-1).reason, 'capture_transport_blocked')
-  assert.equal(f.transport.blocked, true, 'late ACKs cannot restart the old audio clock')
-  f.sent[0].ack({ok: true}); assert.equal(f.send(501), false)
+  f.ack(25); assert.equal(f.send(501), false)
 })
 
-test('native WebSocket queues, Engine.IO queues, polling queues and ACK silence all trigger recovery before more PCM is enqueued', () => {
+test('WebSocket/Engine queues, disconnection and missing receipts block before more PCM is enqueued', () => {
   for (const backlog of [f => {f.socket.io.engine.transport.ws.bufferedAmount = L.maximumBufferedBytes + 1},
     f => {f.socket.io.engine.writeBuffer = [{data: 'x'.repeat(L.maximumBufferedBytes + 1)}]},
     f => {f.socket.io.engine.transport.ws.bufferedAmount = L.maximumBufferedBytes - 1},
-    f => {f.socket.io.engine.transport.name = 'polling'; f.socket.io.engine.writeBuffer = Array.from({length: 65}, () => ({data: ''}))}]) {
+    f => {f.socket.io.engine.writeBuffer = Array.from({length: 65}, () => ({data: ''}))}]) {
     const f = fixture(); backlog(f)
     assert.equal(f.send(1), false); assert.equal(f.sent.length, 0)
     assert.deepEqual(f.blocked, ['capture_transport_backlog'])
   }
   const f = fixture(); f.send(1); f.clock(L.acknowledgementMs)
   assert.equal(f.transport.check(), false); assert.deepEqual(f.blocked, ['capture_transport_timeout'])
-  assert.equal(f.reports.at(-1).oldestAckAgeMs, L.acknowledgementMs)
+  const offline = fixture(); offline.socket.connected = false
+  assert.equal(offline.send(1), false); assert.deepEqual(offline.blocked, ['capture_transport_disconnected'])
 })
 
-test('closing a capture invalidates old acknowledgements and keeps a new capture independent', () => {
-  const f = fixture(); f.send(1); f.transport.close(); f.sent[0].ack({ok: true})
-  assert.equal(f.acknowledgements.length, 0); assert.equal(f.transport.details().inFlightPackets, 0)
-  assert.equal(f.send(2), false)
+test('cumulative receipts cannot cross captures, invent sequences or release newer unreceived audio', () => {
+  const f = fixture(); f.send(1); f.send(2); f.send(3)
+  f.ack(3, {captureId: 'previous'}); f.ack(100)
+  assert.equal(f.transport.details().inFlightPackets, 3)
+  f.ack(2); assert.equal(f.transport.details().inFlightPackets, 1)
+  assert.equal(f.transport.details().inFlightAudioMs, 40)
+  f.transport.close(); f.ack(3)
+  assert.equal(f.acknowledgements.length, 1); assert.equal(f.send(4), false)
 })
 
-test('blocked recovery replaces the physical transport and retains existing control rejoin listeners', async () => {
-  const socket = new EventEmitter(), order = []
-  socket.io = {engine: {transport: {close: () => order.push('old transport closed')}}}
-  socket.disconnect = () => order.push('disconnect')
-  socket.connect = () => {order.push('connect'); socket.emit('connect')}
-  socket.on('connect', () => order.push('control rejoin'))
-  assert.equal(await reconnectCaptureSocket(socket), true)
-  assert.deepEqual(order, ['disconnect', 'old transport closed', 'connect', 'control rejoin'])
-  assert.equal(socket.listenerCount('connect'), 1); assert.equal(socket.listenerCount('connect_error'), 0)
+test('a fresh audio connection never disconnects the control connection', async () => {
+  const audio = new EventEmitter(), order = []
+  audio.connected = false
+  audio.connect = () => {order.push('audio connect'); audio.connected = true; audio.emit('connect')}
+  assert.equal(await connectCaptureSocket(audio), true)
+  assert.deepEqual(order, ['audio connect'])
+  assert.equal(audio.listenerCount('connect'), 0); assert.equal(audio.listenerCount('connect_error'), 0)
+  audio.connected = false
+  assert.equal(await connectCaptureSocket(audio, () => true), false)
+  audio.connect = () => audio.emit('connect_error', new Error('offline'))
+  await assert.rejects(connectCaptureSocket(audio), /offline/)
+  assert.equal(audio.listenerCount('connect_error'), 0)
 })
 
-test('canceled or failed reconnects do not leave extra listeners or start another connection', async () => {
-  const socket = new EventEmitter(); let connects = 0
-  socket.disconnect = () => {}; socket.connect = () => {connects++; socket.emit('connect_error', new Error('offline'))}
-  assert.equal(await reconnectCaptureSocket(socket, () => true), false); assert.equal(connects, 0)
-  await assert.rejects(reconnectCaptureSocket(socket), /offline/)
-  assert.equal(socket.listenerCount('connect'), 0); assert.equal(socket.listenerCount('connect_error'), 0)
-  assert.equal(needsCaptureConnectionReset('capture_transport_backlog'), true)
-  assert.equal(needsCaptureConnectionReset('stale_capture'), true)
-  assert.equal(needsCaptureConnectionReset('capture_backlog'), false)
+test('a hung setup stage terminates and reports its exact phase', async () => {
+  const reports = []
+  await assert.rejects(captureStage(new Promise(() => {}), 'permission', 10, e => reports.push(e)), /permission/)
+  assert.deepEqual(reports.map(e => e.status), ['started', 'failed'])
 })

@@ -220,6 +220,9 @@ class SemanticFollower {
       const reported = result?.matches?.at(-1);
       const modelScore = reported?.matchConfidence ?? result?.confidence;
       const data = {...meta, candidateIndex: reported?.index ?? result?.index ?? null,
+        rawMatches: (Array.isArray(result?.matches) ? result.matches : []).slice(0, S.maximumMatches + 1).map(m =>
+          Object.fromEntries(['index', 'matchConfidence', 'firstWordId', 'lastWordId'].map(key =>
+            [key, Number.isFinite(m?.[key]) ? m[key] : null]))),
         confidence: Number.isFinite(modelScore) ? modelScore : null, matchConfidence: Number.isFinite(modelScore) ? modelScore : null,
         asrConfidence: revision.confidence, scoreSource: 'semantic_model', requestMs: this.now() - now};
       const stale = this.states.get(stream) !== state ? state.cancelReason || 'state_replaced'

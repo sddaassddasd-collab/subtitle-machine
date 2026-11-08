@@ -298,6 +298,32 @@ class AutoFollowHistory {
       if (['audio_reset', 'problem_mark'].includes(type)) this.saveTrace(entry, entry.trace.trigger(at, type, {index: data.index, reason: data.reason}));
     }, {background: true});
   }
+  clientHealth(sessionId, events) {
+    return this.queue(sessionId, entry => {
+      const accepted = [], now = this.now();
+      entry.healthIds ||= new Set();
+      for (const data of (Array.isArray(events) ? events : []).slice(0, 64)) {
+        if (!data || typeof data.eventId !== 'string' || !/^[\w-]{1,100}$/.test(data.eventId)) continue;
+        if (entry.healthIds.has(data.eventId)) {accepted.push(data.eventId); continue;}
+        // Do not attach delayed diagnostics from a finished run to a newer run.
+        if (data.runId && data.runId !== entry.run?.id) {accepted.push(data.eventId); continue;}
+        if (!entry.run || entry.run.endedAt !== null) continue;
+        const {captureTransportDetails} = require('./follow-trace');
+        const details = {...captureTransportDetails(data), receivedAt: now, clientEventId: data.eventId};
+        for (const key of ['reason', 'cause', 'captureId', 'stage', 'status', 'message'])
+          if (typeof data[key] === 'string') details[key] = data[key].slice(0, key === 'message' ? 400 : 100);
+        for (const key of ['attempt', 'sampleAgeMs', 'ackAgeMs', 'captureAgeMs'])
+          if (Number.isFinite(data[key])) details[key] = Math.max(0, Math.min(600000, data[key]));
+        details.occurredAt = Number.isFinite(data.occurredAt) ? Math.max(now - 86400000, Math.min(now + 60000, data.occurredAt)) : now;
+        const event = this.append(entry, 'capture_health', {...details, at: details.occurredAt});
+        if (!event) continue;
+        accepted.push(data.eventId); entry.healthIds.add(data.eventId);
+        while (entry.healthIds.size > 512) entry.healthIds.delete(entry.healthIds.values().next().value);
+      }
+      this.schedule(sessionId, entry);
+      return accepted;
+    });
+  }
   mark(session, runId, data = {}) {
     const at = this.now(), index = session.currentIndex;
     return this.queue(session.id, entry => {
