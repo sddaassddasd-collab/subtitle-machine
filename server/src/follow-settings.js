@@ -9,6 +9,7 @@ const TEXT_SETTINGS = Object.freeze({
   predictedShortMatchedCharacters: 2, localTrailingCharacters: 2, localTrailingPenalty: 0.015,
   localInsertionCost: 0.35, localFillers: '我他它呢啊呀喔哦啦',
   localMinimumMatches: 4, localMatchedCoverage: 0.6, recoveryAfterMs: 2500, recoveryTtlMs: 30000,
+  insertionRecoveryAhead: 6, insertionRecoveryMaximum: 2, insertionRecoveryFillers: '有的呢啊呀喔哦啦',
   recoveryAhead: 12, recoveryMinimumConfidence: 0.92, recoveryMinimumEvidence: 6,
   nearEndingProgress: 0.7, nearEndingRemaining: 3, spanCoverage: 0.8,
   recoveryConfidence: 0.9, recoveryPenalty: 0.04, recoveryLengths: Object.freeze([24, 16, 10, 6]),
@@ -70,7 +71,7 @@ const SEMANTIC_SETTINGS = Object.freeze({
   sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 13, onset: 3, acoustic: 4, diagnostics: 22, semantic: 9, performance: 7, captionCorrection: 1, captionPresentation: 4}),
+  versions: Object.freeze({text: 14, onset: 3, acoustic: 4, diagnostics: 23, semantic: 9, performance: 7, captionCorrection: 1, captionPresentation: 4}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,

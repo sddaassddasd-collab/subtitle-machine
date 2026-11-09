@@ -211,3 +211,19 @@ export function captureStage(promise, stage, timeoutMs, report) {
     report?.({reason: 'capture_setup', stage, status: 'failed', message: error?.message}); throw error
   }).finally(() => clearTimeout(timer))
 }
+
+// Compact close diagnostics only: never persist packet payloads or error URLs.
+export function observeCaptureConnection(socket, now = Date.now) {
+  const engine = socket.io?.engine, ws = engine?.transport?.ws
+  let lastPacketAt, lastHeartbeatAt, closeCode
+  const packet = value => {lastPacketAt = now(); if (['ping', 'pong'].includes(value?.type)) lastHeartbeatAt = now()}
+  const closed = event => {if (Number.isFinite(event?.code)) closeCode = event.code}
+  engine?.on?.('packet', packet); engine?.on?.('packetCreate', packet)
+  ws?.addEventListener?.('close', closed)
+  return {
+    snapshot: () => ({socketCloseCode: closeCode,
+      lastSocketPacketAgeMs: lastPacketAt === undefined ? undefined : Math.max(0, now() - lastPacketAt),
+      lastHeartbeatAgeMs: lastHeartbeatAt === undefined ? undefined : Math.max(0, now() - lastHeartbeatAt)}),
+    close() {engine?.off?.('packet', packet); engine?.off?.('packetCreate', packet); ws?.removeEventListener?.('close', closed)},
+  }
+}

@@ -25,3 +25,7 @@
 伺服器診斷版本 22：Deepgram 的 audio-thread-v2 串流遇到供應商送出緩衝達 48,000 bytes（約 1 秒 PCM）時，改在伺服器排隊，最多保留 12 秒。等待期間不確認為已提交；探測只回報已送交的封包序號。恢復後以不超過 1.25 倍即時速度追趕，避免一次灌入整批積壓。佇列 20 秒沒有提交進度或超出容量時才停止該串流並回報恢復需求。實際送出錯誤、斷線仍沿用既有處理；這些上限不能保證頻寬長期不足時不丟音。
 
 `provider_queue_waiting`、`provider_queue_drained`、`provider_queue_stalled`、`provider_queue_full` 位於 transport_health。`providerQueuedAudioMs`／`providerQueueAgeMs` 記錄伺服器待提交量／最老等待時間，與 WebSocket 的 `providerBufferedBytes` 分開。關閉有待提交音訊的串流時，`provider_queue_abandoned` 保存來源範圍與首尾封包序號。供應商是否真正接收、處理，仍需搭配辨識結果進度判斷。有效參數保存於 stream_configuration.effectiveSettings.providerQueue。
+
+診斷版本 23：客戶端 `capture_socket_disconnect` 保存 Socket.IO 的 `disconnectReason`、可取得時的 WebSocket `socketCloseCode`、最近封包與心跳的經過時間（`lastSocketPacketAgeMs`／`lastHeartbeatAgeMs`），並以 stage 區分 intentional／unexpected。不保存原始封包或任意錯誤物件；未知關閉碼／尚未觀察到心跳時不填值。伺服器另以 `server_socket_disconnect` 記錄音訊連線的斷線原因及供應商佇列狀態，以兩端證據判斷來源。這些欄位用於診斷，不代表已修好斷線來源。
+
+文字規則版本 14（回復後的新變更）：`nearby_insertions` 允許近期已定位位置的前方 6 格內，完整台詞僅多出最多 2 個指定功能／語助字時恢復位置。必須保留劇本所有字與順序，不允許藉此更改否定詞、替換文字、跨音樂或舞台指示邊界；未完成句與歧義候選不適用。有效參數保存於 textSettings 的 insertionRecovery 欄位。兩份不同排練的實際候選均有回歸案例；語意核對仍用於超出此容錯範圍的改寫。

@@ -518,3 +518,17 @@ test('packet identity survives global history sequencing and export on both ends
   assert.equal(ack.uploadWindowMs, 12000);
   await h.end(s.id);
 });
+
+test('disconnect cause and heartbeat diagnostics survive ingestion and export', async () => {
+  const {session: s, history: h} = fixture('disconnect-export');
+  const id = await h.start(s);
+  await h.clientHealth(s.id, [{eventId: 'disconnect-export-1', reason: 'capture_socket_disconnect',
+    disconnectReason: 'ping timeout', socketCloseCode: 1006,
+    lastHeartbeatAgeMs: 25000, lastSocketPacketAgeMs: 120}]);
+  const report = historyReport(await h.read(s.id, id));
+  const e = report.events.find(e => e.reason === 'capture_socket_disconnect');
+  assert.equal(e.disconnectReason, 'ping timeout');
+  assert.equal(e.socketCloseCode, 1006);
+  assert.equal(e.lastHeartbeatAgeMs, 25000);
+  await h.end(s.id);
+});

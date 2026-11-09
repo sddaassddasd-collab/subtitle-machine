@@ -210,3 +210,22 @@ test('a single timed batch can complete the current cue and trigger its unrelate
   assert.equal(result.shortOpening.text, '欸等');
   assert.equal(result.evidence.startMs, 1100);
 });
+
+for (const replay of require('./fixtures/rehearsal-insertion-recovery.json')) {
+  test(`complete nearby cue with spoken function-word insertions recovers in rehearsal ${replay.source.slice(0, 8)}`, () => {
+    const s = show(replay.lines);
+    s.say(s.lines[0].text, {itemId: 'anchor', startMs: replay.anchorEndMs - 1000, endMs: replay.anchorEndMs});
+    const result = s.say(replay.event.text, replay.event);
+    assert.equal(result.index, 4);
+    assert.equal(result.reason, 'nearby_insertions');
+  });
+}
+
+test('insertion recovery cannot accept changed negation or cross a music boundary', () => {
+  for (const [text, barrier] of [['你們又沒有不找到問題的核心了', false], ['你們又沒有找到問題的核心了', true]]) {
+    const s = show(['你又來了這樣根本沒用', {text: '不同內容', music: barrier}, '另一句', '二位', '你們又沒找到問題核心了']);
+    s.say(s.lines[0].text);
+    const result = s.say(text, {itemId: 'recover', startMs: 2000, endMs: 4000});
+    assert.notEqual(result.reason, 'nearby_insertions');
+  }
+});

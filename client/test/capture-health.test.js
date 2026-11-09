@@ -46,3 +46,16 @@ test('offline health storage retains packet joins and signed clocks without PCM'
   assert.equal(box.events[0].streamId, 'asr')
   assert.equal(box.events[0].pcm, undefined)
 })
+
+test('disconnect diagnostics retain reason and heartbeat evidence in offline outbox', async () => {
+  const box = new CaptureHealthOutbox('session', {now: () => 10000,
+    fetcher: async () => {throw new Error('offline')}, id: () => 'disconnect-test'})
+  box.add({reason: 'capture_socket_disconnect', disconnectReason: 'ping timeout',
+    socketCloseCode: 1006, lastHeartbeatAgeMs: 25000, lastSocketPacketAgeMs: 100,
+    rawError: 'do not store arbitrary error details'})
+  await flush()
+  assert.equal(box.events[0].disconnectReason, 'ping timeout')
+  assert.equal(box.events[0].socketCloseCode, 1006)
+  assert.equal(box.events[0].lastHeartbeatAgeMs, 25000)
+  assert.equal(box.events[0].rawError, undefined)
+});

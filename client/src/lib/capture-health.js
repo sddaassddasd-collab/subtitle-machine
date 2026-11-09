@@ -1,6 +1,6 @@
 // Persist compact diagnostics independently of the audio connection. Never PCM,
 // transcripts or keys. Session storage also survives a reload after a failure.
-const fields = new Set(['streamId', 'providerStreamId', 'runId', 'captureId', 'reason', 'cause', 'stage', 'status', 'message', 'attempt',
+const fields = new Set(['streamId', 'providerStreamId', 'runId', 'captureId', 'reason', 'cause', 'disconnectReason', 'stage', 'status', 'message', 'attempt',
   'sampleAgeMs', 'ackAgeMs', 'captureAgeMs', 'transportType', 'transportVersion', 'version',
   'maximumInFlightMs', 'acknowledgementMs', 'maximumBufferedBytes', 'maximumQueuedPackets',
   'reportMs', 'reconnectMs', 'packetMs', 'cumulativeAckMs', 'inFlightPackets', 'inFlightAudioMs',
@@ -9,7 +9,7 @@ const fields = new Set(['streamId', 'providerStreamId', 'runId', 'captureId', 'r
   'lastAckAgeMs', 'serverNetworkAgeMs', 'serverAudioMs', 'serverAckDelayMs', 'retryAfterMs',
   'sourceId', 'sourceStartMs', 'sourceEndMs', 'droppedInputMs', 'expiredReceipts', 'sequence', 'congestionMs', 'probeMs', 'unresponsiveMs',
   'outstandingAudioMs', 'wireBytes', 'pcmBytes', 'probeThresholdMs', 'maximumOutstandingAudioMs',
-  'queuedAudioMs', 'oldestQueuedAgeMs', 'maximumAgeMs', 'maximumQueuedMs', 'overflowRetainMs', 'startupRetainMs', 'backlogMs', 'backlogRecoveryMs', 'retryBaseMs', 'retryMaxMs', 'sampleGapMs', 'clientAckReceivedAt', 'providerQueuedAudioMs', 'providerQueueAgeMs', 'uploadWindowMs', 'maximumAdaptiveOutstandingMs', 'progressStallMs', 'packetSequence', 'generatedAt', 'queuedAt', 'sentAt', 'serverReceivedAt', 'providerSubmittedAt', 'acknowledgedAt', 'clockOffsetMs', 'clockUncertaintyMs', 'generatedAudioMs', 'sentAudioMs', 'receivedAudioMs', 'providerSubmittedAudioMs', 'recognizedAudioMs', 'droppedAudioMs', 'retainedAudioMs', 'recoveryElapsedMs', 'recoveryAt', 'queueWaitMs'])
+  'queuedAudioMs', 'oldestQueuedAgeMs', 'maximumAgeMs', 'maximumQueuedMs', 'overflowRetainMs', 'startupRetainMs', 'backlogMs', 'backlogRecoveryMs', 'retryBaseMs', 'retryMaxMs', 'sampleGapMs', 'clientAckReceivedAt', 'socketCloseCode', 'lastSocketPacketAgeMs', 'lastHeartbeatAgeMs', 'providerQueuedAudioMs', 'providerQueueAgeMs', 'uploadWindowMs', 'maximumAdaptiveOutstandingMs', 'progressStallMs', 'packetSequence', 'generatedAt', 'queuedAt', 'sentAt', 'serverReceivedAt', 'providerSubmittedAt', 'acknowledgedAt', 'clockOffsetMs', 'clockUncertaintyMs', 'generatedAudioMs', 'sentAudioMs', 'receivedAudioMs', 'providerSubmittedAudioMs', 'recognizedAudioMs', 'droppedAudioMs', 'retainedAudioMs', 'recoveryElapsedMs', 'recoveryAt', 'queueWaitMs'])
 export class CaptureHealthOutbox {
   constructor(sessionId, {storage, fetcher = (...args) => globalThis.fetch(...args), now = Date.now, id = () => crypto.randomUUID()} = {}) {
     this.sessionId = sessionId; this.storage = storage; this.fetcher = fetcher; this.now = now; this.id = id

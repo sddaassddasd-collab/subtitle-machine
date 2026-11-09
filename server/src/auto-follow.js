@@ -299,6 +299,25 @@ function canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous)
     !script.entries.slice(currentIndex, best.index + 1).some(entry => entry.source.music));
 }
 
+// Complete nearby cues may contain a small number of spoken function words.
+// Preserve every script character and its order; negation/substitution is not
+// an insertion allowance. This is a bounded recovery, not a global threshold.
+function canRecoverInsertedCue(tracker, script, currentIndex, best, event, ambiguous) {
+  const anchor = recoveryAnchor(tracker, currentIndex), text = normalizeText(event.text);
+  const target = script.entries[best?.index]?.text;
+  if (!anchor || anchor.index !== currentIndex || ambiguous || !best || !target ||
+    best.index <= currentIndex + 1 || best.index > currentIndex + T.insertionRecoveryAhead || target.length < T.recoveryMinimumEvidence ||
+    best.confidence < T.minimumConfidence || event.startMs < anchor.atMs ||
+    event.endMs - anchor.atMs > T.recoveryTtlMs || text.length <= target.length || text.length > target.length + T.insertionRecoveryMaximum ||
+    script.entries.slice(currentIndex, best.index + 1).some(e => e.source.music || e.source.type === 'direction')) return false;
+  let at = 0;
+  for (const char of text) {
+    if (char === target[at]) at++;
+    else if (!T.insertionRecoveryFillers.includes(char)) return false;
+  }
+  return at === target.length;
+}
+
 function clearPreparation(tracker) {
   tracker.armedIndex = null;
   tracker.preparedIndex = null;
@@ -754,10 +773,11 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
 
   const relocation = best.index !== currentIndex && best.index !== next;
   const caughtUp = relocation && canCatchUp(tracker, script, currentIndex, best, event);
-  const recoveredNearby = relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous);
+  const insertedRecovery = relocation && canRecoverInsertedCue(tracker, script, currentIndex, best, event, ambiguous);
+  const recoveredNearby = insertedRecovery || (relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous));
   const captureReacquired = relocation && canReacquireCapture(tracker, script, currentIndex, best, event);
   if (relocation) {
-    if (best.confidence < (best.weakPath ? T.weakPathConfidence : best.pathConfirmed ? T.minimumConfidence : T.strongConfidence) ||
+    if (best.confidence < (insertedRecovery ? T.minimumConfidence : best.weakPath ? T.weakPathConfidence : best.pathConfirmed ? T.minimumConfidence : T.strongConfidence) ||
       (!best.pathConfirmed && text.length < T.relocationEvidence && !recoveredNearby) || (ambiguous && !exactUnique && !best.pathConfirmed)) {
       return uncertain('relocation_requirements', '疑似跳詞，正在核對新的位置。');
     }
@@ -822,7 +842,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   return {
     index: best.index, candidate: best, progress, completed, armedIndex: tracker.armedIndex,
-    reason: captureReacquired ? 'capture_reacquired' : best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
+    reason: insertedRecovery ? 'nearby_insertions' : captureReacquired ? 'capture_reacquired' : best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
       : best.trailingCharacters ? 'trailing_tolerance' : best.colloquial ? 'local_colloquial' : best.recovered ? 'suffix_recovery'
       : best.openingConfirmed ? 'opening_confirmed' : 'text_matched',
     spans: matchedSpans(best, script),

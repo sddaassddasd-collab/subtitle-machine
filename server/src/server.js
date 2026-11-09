@@ -15381,7 +15381,13 @@ io.on('connection', (socket) => {
     broadcastViewerState(sessionId);
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', (disconnectReason) => {
+    for (const [sessionId, stream] of transcriptionStreams) {
+      if (stream.socketId === socket.id) autoFollowHistory.event(sessionId, 'transport_health', {
+        ...followHistoryClock(sessionId), reason: 'server_socket_disconnect', disconnectReason,
+        captureId: stream.captureId, transportType: socket.conn?.transport?.name || 'unknown',
+        ...stream.providerQueue?.details()});
+    }
     const viewerSessionId =
       typeof socket.data?.viewerSessionId === 'string'
         ? socket.data.viewerSessionId

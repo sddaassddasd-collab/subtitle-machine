@@ -155,3 +155,18 @@ test('visible send buffers stay bounded without reconnecting while cumulative re
   assert.deepEqual(f.blocked, [])
   f.transport.close()
 })
+
+test('connection close diagnostics retain heartbeat ages and remove engine listeners', async () => {
+  const {observeCaptureConnection} = await import('../src/lib/capture-transport.js')
+  const engine = new EventEmitter()
+  let now = 1000
+  const monitor = observeCaptureConnection({io: {engine}}, () => now)
+  engine.emit('packet', {type: 'ping', data: 'never export payload'})
+  now = 1500; engine.emit('packetCreate', {type: 'message', data: 'audio'})
+  now = 2000
+  assert.equal(monitor.snapshot().lastHeartbeatAgeMs, 1000)
+  assert.equal(monitor.snapshot().lastSocketPacketAgeMs, 500)
+  monitor.close()
+  assert.equal(engine.listenerCount('packet'), 0)
+  assert.equal(engine.listenerCount('packetCreate'), 0)
+});

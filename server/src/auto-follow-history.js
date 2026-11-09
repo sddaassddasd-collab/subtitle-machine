@@ -310,7 +310,7 @@ class AutoFollowHistory {
         if (!entry.run || entry.run.endedAt !== null) continue;
         const {captureTransportDetails} = require('./follow-trace');
         const details = {...captureTransportDetails(data), receivedAt: now, clientEventId: data.eventId};
-        for (const key of ['streamId', 'providerStreamId', 'reason', 'cause', 'captureId', 'sourceId', 'stage', 'status', 'message'])
+        for (const key of ['streamId', 'providerStreamId', 'reason', 'cause', 'disconnectReason', 'captureId', 'sourceId', 'stage', 'status', 'message'])
           if (typeof data[key] === 'string') details[key] = data[key].slice(0, key === 'message' ? 400 : 100);
         for (const key of ['attempt', 'sampleAgeMs', 'ackAgeMs', 'captureAgeMs'])
           if (Number.isFinite(data[key])) details[key] = Math.max(0, Math.min(600000, data[key]));

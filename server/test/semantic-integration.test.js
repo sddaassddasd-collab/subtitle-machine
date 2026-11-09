@@ -36,8 +36,8 @@ test('the real server recovers a nearby long paraphrase using stable literal-sem
   f.stream.autoFollowAudioMs = 1000;
   f.transcript('你又來了這樣根本沒有用', {streamId: 's', itemId: 'anchor', startMs: 0, endMs: 1000, isFinal: true});
   f.stream.autoFollowAudioMs = 4000;
-  f.transcript('你們又沒有找到問題的核心了', {streamId: 's', itemId: 'paraphrase', startMs: 2000, endMs: 4000,
-    isFinal: true, words: [{word: '你們又沒有找到問題的核心', start: 2, end: 3.7}, {word: '了', start: 3.7, end: 4}]});
+  f.transcript('你們又沒有找到問題的核心啊', {streamId: 's', itemId: 'paraphrase', startMs: 2000, endMs: 4000,
+    isFinal: true, words: [{word: '你們又沒有找到問題的核心', start: 2, end: 3.7}, {word: '啊', start: 3.7, end: 4}]});
   await flush();
   assert.equal(f.session.currentIndex, 4);
   assert.equal(f.state().lastDecision.supportSource, 'joint_text_semantic');

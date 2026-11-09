@@ -1,0 +1,172 @@
+[
+  {
+    "source": "3133125d-c7e7-4278-b615-65f0b2ece047",
+    "lines": [
+      {
+        "text": "你又來了，這樣根本沒用。",
+        "type": "dialogue"
+      },
+      {
+        "text": "你的方法才沒用！",
+        "type": "dialogue"
+      },
+      {
+        "text": "不不不。",
+        "type": "dialogue"
+      },
+      {
+        "text": "二位，",
+        "type": "dialogue"
+      },
+      {
+        "text": "你們又沒找到問題核心了。",
+        "type": "dialogue"
+      },
+      {
+        "text": "我說過，",
+        "type": "dialogue"
+      },
+      {
+        "text": "現在的問題在於他不快樂，",
+        "type": "dialogue"
+      }
+    ],
+    "anchorEndMs": 116310,
+    "event": {
+      "text": "你們又沒有找到問題的核心了",
+      "itemId": "deepgram-123.560",
+      "startMs": 123560,
+      "endMs": 127479.996,
+      "isFinal": false,
+      "words": [
+        {
+          "word": "你們",
+          "endMs": 125720,
+          "startMs": 125399.994,
+          "confidence": 0.4345703,
+          "punctuatedWord": "你們"
+        },
+        {
+          "word": "又沒有",
+          "endMs": 126119.99500000001,
+          "startMs": 125720,
+          "confidence": 0.4255371,
+          "punctuatedWord": "又沒有"
+        },
+        {
+          "word": "找到",
+          "endMs": 126439.995,
+          "startMs": 126119.99500000001,
+          "confidence": 0.15649414,
+          "punctuatedWord": "找到"
+        },
+        {
+          "word": "問題",
+          "endMs": 126680,
+          "startMs": 126439.995,
+          "confidence": 0.9790039,
+          "punctuatedWord": "問題"
+        },
+        {
+          "word": "的核心",
+          "endMs": 127240,
+          "startMs": 126680,
+          "confidence": 0.99902344,
+          "punctuatedWord": "的核心"
+        },
+        {
+          "word": "了",
+          "endMs": 127479.996,
+          "startMs": 127240,
+          "confidence": 0.5288086,
+          "punctuatedWord": "了"
+        }
+      ]
+    }
+  },
+  {
+    "source": "71ca9209-ac0d-4e07-bfc7-4c2154a18620",
+    "lines": [
+      {
+        "text": "你又來了，這樣根本沒用。",
+        "type": "dialogue"
+      },
+      {
+        "text": "你的方法才沒用！",
+        "type": "dialogue"
+      },
+      {
+        "text": "不不不。",
+        "type": "dialogue"
+      },
+      {
+        "text": "二位，",
+        "type": "dialogue"
+      },
+      {
+        "text": "你們又沒找到問題核心了。",
+        "type": "dialogue"
+      },
+      {
+        "text": "我說過，",
+        "type": "dialogue"
+      },
+      {
+        "text": "現在的問題在於他不快樂，",
+        "type": "dialogue"
+      }
+    ],
+    "anchorEndMs": 323630,
+    "event": {
+      "text": "你們又沒有找到問題的核心了",
+      "itemId": "deepgram-335.600",
+      "startMs": 335600,
+      "endMs": 339520.01999999996,
+      "isFinal": false,
+      "words": [
+        {
+          "word": "你們",
+          "endMs": 337600,
+          "startMs": 337360.02,
+          "confidence": 0.27856445,
+          "punctuatedWord": "你們"
+        },
+        {
+          "word": "又沒有",
+          "endMs": 338160,
+          "startMs": 337600,
+          "confidence": 0.9760742,
+          "punctuatedWord": "又沒有"
+        },
+        {
+          "word": "找到",
+          "endMs": 338480,
+          "startMs": 338160,
+          "confidence": 0.98828125,
+          "punctuatedWord": "找到"
+        },
+        {
+          "word": "問題",
+          "endMs": 338800.02,
+          "startMs": 338480,
+          "confidence": 0.6513672,
+          "punctuatedWord": "問題"
+        },
+        {
+          "word": "的核心",
+          "endMs": 339360.02,
+          "startMs": 338800.02,
+          "confidence": 0.9819336,
+          "punctuatedWord": "的核心"
+        },
+        {
+          "word": "了",
+          "endMs": 339520.01999999996,
+          "startMs": 339360.02,
+          "confidence": 0.6557617,
+          "punctuatedWord": "了"
+        }
+      ]
+    }
+  }
+]

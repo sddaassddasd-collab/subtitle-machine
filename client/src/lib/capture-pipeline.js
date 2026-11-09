@@ -1,4 +1,4 @@
-import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket} from './capture-transport.js'
+import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket, observeCaptureConnection} from './capture-transport.js'
 import {signalMetrics} from './audio-signal.js'
 import {AUDIO_WIRE} from './capture-wire.mjs'
 
@@ -61,7 +61,13 @@ export class CapturePipeline {
       this.socket?.disconnect()
       this.socket = this.createSocket()
       const socket = this.socket
-      socket.on('disconnect', () => {
+      socket.on('disconnect', (disconnectReason, details) => {
+        const closeCode = details?.description?.code ?? details?.context?.code
+        if (this.socket === socket) this.report('capture_socket_disconnect', {disconnectReason,
+          ...this.connectionMonitor?.snapshot(),
+          ...(Number.isFinite(closeCode) ? {socketCloseCode: closeCode} : {}),
+          stage: this.connecting || !this.desired ? 'intentional' : 'unexpected',
+          ...this.transport?.details(), queuedAudioMs: this.queuedMs})
         if (this.desired && !this.connecting && this.socket === socket) this.recover('capture_transport_disconnected', 'transport')
       })
       socket.on('control:capture-health', data => {
@@ -79,6 +85,8 @@ export class CapturePipeline {
       const socket = this.socket
       await connectCaptureSocket(socket, () => !this.desired || epoch !== this.epoch)
       if (!this.desired || epoch !== this.epoch) return
+      this.connectionMonitor?.close()
+      this.connectionMonitor = observeCaptureConnection(socket, this.now)
       this.transport = new CaptureTransport(socket, {
         now: this.now,
         onBlocked: reason => {
@@ -305,6 +313,6 @@ export class CapturePipeline {
     this.desired = false; this.epoch++; this.retryAt = 0; this.ready = false
     this.timers.clearInterval(this.timer)
     this.socket?.emit('transcription:stop', {sessionId: this.config?.request.sessionId, captureId: this.captureId, preserveText})
-    this.transport?.close(); this.socket?.disconnect(); this.queue = []; this.queuedMs = 0
+    this.transport?.close(); this.socket?.disconnect(); this.connectionMonitor?.close(); this.queue = []; this.queuedMs = 0
   }
 }
