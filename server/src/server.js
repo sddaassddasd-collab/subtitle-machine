@@ -9516,7 +9516,9 @@ function applyPerformanceAction(session, action) {
     session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
     // Clear pre-armed onset guesses while keeping independent text evidence.
     state.tracker.prediction = null; state.tracker.armedIndex = null;
-    if (action.source === 'live') state.tracker.openingPlan = null;
+    if (action.source === 'live') {
+      state.tracker.openingPlan = null; state.tracker.supportedRecovery = null;
+    }
     state.tracker.preparedIndex = state.tracker.openingPlan && state.tracker.openingPlan.fromIndex === action.index
       ? state.tracker.openingPlan.index : null;
     if (Number.isInteger(action.index)) {
@@ -9784,6 +9786,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       offset: result.candidate.offset, length: result.candidate.length, evidence: result.candidate.evidence,
       contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true,
       colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0,
+      nearbyRecovery: result.candidate.nearbyRecovery === true,
       phonetic: result.candidate.phonetic === true, pathConfirmed: result.candidate.pathConfirmed === true,
       weakPath: result.candidate.weakPath === true,
       wordEvidence: result.candidate.wordEvidence === true, shortRecovery: result.candidate.shortRecovery === true,

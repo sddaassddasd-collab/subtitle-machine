@@ -1,11 +1,12 @@
 const {prepareScript, localSupportCandidates} = require('./auto-follow');
-const {freshSpeech, wordWindows} = require('./word-evidence');
+const {freshSpeech, wordWindows, alignedWords} = require('./word-evidence');
 const {normalizeText} = require('./follow-text');
+const {TEXT_SETTINGS: T} = require('./follow-settings');
 
 // Only raw provider text and word clocks enter the locator. Caption edits are
 // display-only and never become independent script evidence.
-function liveCandidates(script, window, speech) {
-  const options = {ahead: window.to - window.origin, behind: window.origin - window.from, crossDirections: true};
+function liveCandidates(script, window, speech, extra = {}) {
+  const options = {ahead: window.to - window.origin, behind: window.origin - window.from, crossDirections: true, ...extra};
   const variants = [speech];
   const trimmed = speech.text.replace(/[呢啊呀喔哦啦嘛吧耶欸？！?！。，,\s]+$/u, '');
   if (trimmed && trimmed !== speech.text && normalizeText(speech.text).length - normalizeText(trimmed).length <= 2)
@@ -48,7 +49,7 @@ function locateLiveScript(performance, lines, transcript, options, previousScrip
   }
   const pools = [speech, ...selected].map(part => {
     const byIndex = new Map();
-    for (const c of liveCandidates(script, window, part)) {
+    for (const c of liveCandidates(script, window, part, {phoneticMinimum: T.supportedRecoveryConfidence})) {
       const prior = byIndex.get(c.index);
       if (!prior || c.confidence > prior.confidence) byIndex.set(c.index, c);
     }
@@ -56,8 +57,22 @@ function locateLiveScript(performance, lines, transcript, options, previousScrip
     const best = candidates[0];
     return best ? {...best, margin: best.confidence - (candidates[1]?.confidence || 0)} : null;
   }).filter(Boolean);
-  const admitted = pools.filter(c => c.evidence >= 4 && ((c.confidence >= .8 && c.margin >= .07) ||
-    (!c.phonetic && c.confidence >= .7 && c.matchedCharacters >= 3 && c.margin >= .1)));
+  const negations = text => (normalizeText(text).match(/[不沒無勿別]/gu) || []).join('');
+  for (const candidate of pools) candidate.nearbyRecovery = Boolean(
+    candidate.index > window.origin && candidate.index <= window.origin + T.supportedRecoveryAhead &&
+    candidate.offset === candidate.length && candidate.confidence >= T.supportedRecoveryConfidence &&
+    candidate.matchedCharacters >= T.supportedRecoveryMatches && candidate.margin >= T.minimumMargin &&
+    alignedWords(candidate.speech).length &&
+    negations(candidate.speech.text) === negations(lines[candidate.index].text) &&
+    !lines.slice(window.origin, candidate.index + 1).some(line => line.music || line.type === 'direction'));
+  const admitted = pools.filter(c => (c.evidence >= 4 && (c.nearbyRecovery ||
+    (c.confidence >= .8 && c.margin >= .07 && (!c.phonetic || c.confidence >= .9)) ||
+    (!c.phonetic && c.confidence >= .7 && c.matchedCharacters >= 3 && c.margin >= .1))) ||
+    (!c.phonetic && c.margin >= .1 && normalizeText(c.speech.text).length >= 3 &&
+      normalizeText(c.speech.text) === script.entries[c.index].text &&
+      performance.returnWitnesses.some(w => w.nearbyRecovery && w.index + 1 === c.index &&
+        w.itemId !== speech.itemId && c.speech.startMs >= w.endMs &&
+        c.speech.endMs - w.endMs <= T.supportedRecoveryTtlMs)));
   const best = (admitted.length ? admitted : pools).sort((a, b) =>
     b.speech.endMs - a.speech.endMs || b.confidence - a.confidence || b.evidence - a.evidence)[0];
   const accepted = admitted.includes(best);

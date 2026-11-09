@@ -2,7 +2,7 @@ const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 7, mismatchMs: 4500, mismatchAudioMs: 3000,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 8, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 8, minimumSpeechConfidence: .35,
   longItemMs: 6500, longItemCharacters: 18, stablePrefixCharacters: 3, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
@@ -243,7 +243,11 @@ class PerformanceFollower {
       const literal = !match.phonetic && match.confidence >= PERFORMANCE_SETTINGS.weakReturnConfidence &&
         match.evidence >= 4 && match.matchedCharacters >= PERFORMANCE_SETTINGS.weakReturnMatches && match.margin >= .1;
       const steps = previous ? (previous.steps || 1) + 1 : 1;
-      const supported = previous && ((match.confidence >= .8 && previous.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) ||
+      const nearbySupported = previous?.nearbyRecovery && previous.itemId !== event.itemId &&
+        index === previous.index + 1 && endMs - previous.endMs <= PERFORMANCE_SETTINGS.returnSupportMs &&
+        !match.phonetic && text.length >= 3 && text === normalizeText(line.text) &&
+        !this.lines.slice(previous.index, index + 1).some(l => l.music || l.type === 'direction');
+      const supported = previous && (nearbySupported || (match.confidence >= .8 && previous.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) ||
         (literal && steps >= PERFORMANCE_SETTINGS.weakReturnSteps));
       const settled = boundarySettled || Boolean(supported && match.stablePrefix);
       if (settled && (strong || supported)) this.backgroundConfirmed = {index, startMs, endMs, at: now};
@@ -252,7 +256,7 @@ class PerformanceFollower {
           : !strong && now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs ? 'switch_hold' : 'script_reacquired', index, strong, supported: Boolean(supported),
         confidence: match.confidence, evidence: match.evidence, margin: match.margin, startMs, endMs,
         supportingIndex: previous?.index ?? null, pathSteps: steps, retainedPhrase: match.retained === true,
-        stablePrefix: match.stablePrefix === true};
+        stablePrefix: match.stablePrefix === true, nearbySupported: Boolean(nearbySupported)};
       if (this.lock !== 'live' && settled && (strong || (supported && now - this.switchedAt >= PERFORMANCE_SETTINGS.switchHoldMs))) {
         const returnEvidence = this.returnDecision;
         const action = this.transition('script', 'script_reacquired', now);
@@ -261,13 +265,13 @@ class PerformanceFollower {
           audioStartMs: startMs, audioEndMs: endMs, confidence: match.confidence ?? null, returnEvidence,
           speech: match.speech};
       }
-      if ((match.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) || literal) {
+      if ((match.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) || literal || match.nearbyRecovery) {
         // Revisions update their own range, never erase a different cue's
         // nonoverlapping witness or count as a second observation.
         this.returnWitnesses = this.returnWitnesses.filter(w => !(w.index === index && w.itemId === event.itemId && startMs < w.endMs));
         this.returnWitnesses.push({index, itemId: event.itemId, startMs, endMs, text,
           rawText: match.speech?.text || event.text, confidence: match.confidence, settled, steps,
-          lastWordId: match.speech?.lastWordId});
+          lastWordId: match.speech?.lastWordId, nearbyRecovery: match.nearbyRecovery === true});
         this.returnWitnesses = this.returnWitnesses.slice(-PERFORMANCE_SETTINGS.returnWitnesses);
       }
       return null;

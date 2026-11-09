@@ -5,7 +5,12 @@ const negations = text => (text.match(/[不沒無勿別]/gu) || []).join('');
 // A weak literal/phonetic candidate is only a hypothesis. A distinct, later
 // timed cue must independently confirm its immediate successor before recovery.
 function supportedRecovery(tracker, script, currentIndex, event, candidates) {
-  const text = normalizeText(event.text), words = alignedWords(event), old = tracker.supportedRecovery;
+  const text = normalizeText(event.text), words = alignedWords(event);
+  let old = tracker.supportedRecovery;
+  if (old && (event.endMs - old.endMs > T.supportedRecoveryTtlMs ||
+    (currentIndex !== old.fromIndex && !(currentIndex === old.fromIndex + 1 && tracker.prediction?.fromIndex === old.fromIndex)))) {
+    tracker.supportedRecovery = null; old = null;
+  }
   if (!words.length) return null;
   const sameOrigin = old && (old.fromIndex === currentIndex ||
     (currentIndex === old.fromIndex + 1 && tracker.prediction?.fromIndex === old.fromIndex));

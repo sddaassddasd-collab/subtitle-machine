@@ -352,3 +352,24 @@ test('a pending semantic proposal survives automatic live handoff and uses a lat
   assert.ok(f.events.some(e => e.status === 'supported' && e.reason === 'independent_text'));
   assert.ok(!f.events.some(e => e.status === 'reset' && e.reason === 'position_or_script_changed'));
 });
+
+for (const mode of ['accepted', 'expired', 'same-item', 'live-lock', 'withdrawn']) test(`nearby timed live return: ${mode}`, t => {
+  const f = setup(t, {texts: [...texts.slice(0, 3), '你們又沒有找到問題的核心了', '下一句']});
+  f.tracker().supportedRecovery = {fromIndex: 0, index: 2, endMs: 1000};
+  f.begin();
+  assert.equal(f.tracker().supportedRecovery, null);
+  if (mode === 'live-lock') f.event('performance:action', {action: 'lock-live'});
+  const phrase = '你們又沒有找到溫情的核心了';
+  f.say(phrase, 'hypothesis', 12000, 14000, 14000, {words: [{text: phrase, startMs: 12000, endMs: 14000}]});
+  assert.equal(f.session.automaticLive, true);
+  assert.ok(f.follower().returnWitnesses.some(w => w.index === 3 && w.nearbyRecovery));
+  if (mode === 'withdrawn') f.say('隨便說的完全不同內容', 'hypothesis', 12000, 14000, 14100);
+  const start = mode === 'expired' ? 23000 : 14500;
+  f.say('下一句', mode === 'same-item' ? 'hypothesis' : 'successor', start, start + 1000, start + 1000,
+    {words: [{text: '下一句', startMs: start, endMs: start + 1000}]});
+  assert.equal(f.session.automaticLive, mode !== 'accepted');
+  if (mode === 'accepted') {
+    assert.equal(f.session.currentIndex, 4);
+    assert.ok(f.events.some(e => e.returnEvidence?.nearbySupported));
+  }
+});
