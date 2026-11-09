@@ -5,6 +5,7 @@ const {alignedWords, freshSpeech, suffixSpeech, wordWindows} = require('./word-e
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
 const {supportedRecovery} = require('./supported-recovery');
+const {phraseRecovery} = require('./phrase-recovery');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
 const MAX_HEARD = T.maxHeard;
@@ -736,6 +737,12 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     if (!suffixConflict && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(reason)) {
       const words = recoverWordPosition(tracker, script, lines, currentIndex, {...event, text, minimumIndex: item.maxIndex ?? -1});
       if (words) return words;
+      const phrase = phraseRecovery(tracker, script, currentIndex, {...event, minimumIndex: item.maxIndex ?? -1});
+      if (phrase && applySemanticLocation(tracker, lines, phrase.index, phrase.speech, {prepare: false})) {
+        return {index: phrase.index, candidate: phrase, progress: 0, completed: false, spans: [],
+          evidence: {startMs: event.startMs, endMs: event.endMs}, reason: 'nearby_phrase_recovery',
+          status: 'corrected', message: '已依附近台詞的多段文字錨點恢復位置，持續核對內容。'};
+      }
     }
     tracker.directionWait = null;
     if (!waitingForOpening && !(text.length <= 2 && tracker.located && tracker.anchor &&
@@ -938,7 +945,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
       result.evidence = {startMs: speech.startMs, endMs: speech.endMs};
     }
     tracker.selectedStartIndex = null;
-    tracker.openingPlan = prepareOpening(script, result.index, {...event, completed: result.completed});
+    tracker.openingPlan = result.candidate?.phraseAnchored ? null
+      : prepareOpening(script, result.index, {...event, completed: result.completed});
   } else {
     tracker.openingPlan = plan;
     if (plan) observeOpening(plan, event);

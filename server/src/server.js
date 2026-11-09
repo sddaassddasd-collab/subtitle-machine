@@ -9786,6 +9786,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       offset: result.candidate.offset, length: result.candidate.length, evidence: result.candidate.evidence,
       contextualShort: result.candidate.contextualShort === true, recovered: result.candidate.recovered === true,
       colloquial: result.candidate.colloquial === true, trailingCharacters: result.candidate.trailingCharacters || 0,
+      phraseAnchored: result.candidate.phraseAnchored === true, phraseIslands: result.candidate.islands || 0,
       nearbyRecovery: result.candidate.nearbyRecovery === true,
       phonetic: result.candidate.phonetic === true, pathConfirmed: result.candidate.pathConfirmed === true,
       weakPath: result.candidate.weakPath === true,

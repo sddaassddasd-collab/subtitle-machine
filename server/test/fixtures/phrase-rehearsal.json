@@ -1,0 +1,659 @@
+[
+  {
+    "sourceRun": "1c8293ff-7aa4-4e80-8acd-2e4f5b7808d8",
+    "name": "merchant",
+    "firstIndex": 337,
+    "lines": [
+      {
+        "text": "商人第一個出來。",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "我有辦法讓歌手快樂，",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "就讓我來吧，",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "請國王大人直接帶歌手來我家。",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "於是國王與商人約好時間，",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "並帶著歌手來到了商人的家，",
+        "type": "dialogue",
+        "music": false
+      }
+    ],
+    "events": [
+      {
+        "text": "首先商人第一個出來,",
+        "itemId": "deepgram-955.060",
+        "audioStartMs": 955060,
+        "audioEndMs": 957220,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "首先",
+            "endMs": 956020,
+            "startMs": 955380,
+            "confidence": 0.9951172,
+            "punctuatedWord": "首先"
+          },
+          {
+            "word": "商人",
+            "endMs": 956500,
+            "startMs": 956020,
+            "confidence": 0.4206543,
+            "punctuatedWord": "商人"
+          },
+          {
+            "word": "第一個",
+            "endMs": 956980,
+            "startMs": 956500,
+            "confidence": 0.9921875,
+            "punctuatedWord": "第一個"
+          },
+          {
+            "word": "出來",
+            "endMs": 957220,
+            "startMs": 956980,
+            "confidence": 0.63427734,
+            "punctuatedWord": "出來"
+          }
+        ],
+        "sequence": 8756
+      },
+      {
+        "text": "首先商人第一個出來商人說",
+        "itemId": "deepgram-955.060",
+        "audioStartMs": 955060,
+        "audioEndMs": 959220,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "首先",
+            "endMs": 956100,
+            "startMs": 955380,
+            "confidence": 0.9970703,
+            "punctuatedWord": "首先"
+          },
+          {
+            "word": "商人",
+            "endMs": 956580,
+            "startMs": 956100,
+            "confidence": 0.96972656,
+            "punctuatedWord": "商人"
+          },
+          {
+            "word": "第一個",
+            "endMs": 956980,
+            "startMs": 956580,
+            "confidence": 0.9951172,
+            "punctuatedWord": "第一個"
+          },
+          {
+            "word": "出來",
+            "endMs": 957380,
+            "startMs": 956980,
+            "confidence": 0.9707031,
+            "punctuatedWord": "出來"
+          },
+          {
+            "word": "商人",
+            "endMs": 958500,
+            "startMs": 957380,
+            "confidence": 0.87353516,
+            "punctuatedWord": "商人"
+          },
+          {
+            "word": "說",
+            "endMs": 959220,
+            "startMs": 958900,
+            "confidence": 0.9921875,
+            "punctuatedWord": "說"
+          }
+        ],
+        "sequence": 8780
+      },
+      {
+        "text": "國王大人就請讓歌手之間來我家吧",
+        "itemId": "deepgram-963.050",
+        "audioStartMs": 963050,
+        "audioEndMs": 966890,
+        "isFinal": true,
+        "words": [
+          {
+            "word": "國王",
+            "endMs": 963610,
+            "startMs": 963130,
+            "confidence": 0.50878906,
+            "punctuatedWord": "國王"
+          },
+          {
+            "word": "大人",
+            "endMs": 964089.97,
+            "startMs": 963610,
+            "confidence": 0.4399414,
+            "punctuatedWord": "大人"
+          },
+          {
+            "word": "就",
+            "endMs": 964330,
+            "startMs": 964089.97,
+            "confidence": 0.9394531,
+            "punctuatedWord": "就"
+          },
+          {
+            "word": "請",
+            "endMs": 964649.96,
+            "startMs": 964330,
+            "confidence": 0.9892578,
+            "punctuatedWord": "請"
+          },
+          {
+            "word": "讓",
+            "endMs": 965050,
+            "startMs": 964649.96,
+            "confidence": 0.9902344,
+            "punctuatedWord": "讓"
+          },
+          {
+            "word": "歌手",
+            "endMs": 965450,
+            "startMs": 965050,
+            "confidence": 0.9921875,
+            "punctuatedWord": "歌手"
+          },
+          {
+            "word": "之間",
+            "endMs": 965930,
+            "startMs": 965450,
+            "confidence": 0.67626953,
+            "punctuatedWord": "之間"
+          },
+          {
+            "word": "來",
+            "endMs": 966170,
+            "startMs": 965930,
+            "confidence": 0.98828125,
+            "punctuatedWord": "來"
+          },
+          {
+            "word": "我",
+            "endMs": 966410,
+            "startMs": 966170,
+            "confidence": 0.7216797,
+            "punctuatedWord": "我"
+          },
+          {
+            "word": "家",
+            "endMs": 966649.96,
+            "startMs": 966410,
+            "confidence": 0.9970703,
+            "punctuatedWord": "家"
+          },
+          {
+            "word": "吧",
+            "endMs": 966890,
+            "startMs": 966649.96,
+            "confidence": 0.9291992,
+            "punctuatedWord": "吧"
+          }
+        ],
+        "sequence": 8825
+      }
+    ]
+  },
+  {
+    "sourceRun": "1c8293ff-7aa4-4e80-8acd-2e4f5b7808d8",
+    "name": "treatment",
+    "firstIndex": 215,
+    "lines": [
+      {
+        "text": "我主張要使用替代方案，",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "給歌手六個月的觀察期，",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "並且在這期間使用搔癢療法進行治療。",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "你又來了，這樣根本沒用。",
+        "type": "dialogue",
+        "music": false
+      },
+      {
+        "text": "你的方法才沒用！",
+        "type": "dialogue",
+        "music": false
+      }
+    ],
+    "events": [
+      {
+        "text": "我主張使用替代方案",
+        "itemId": "deepgram-613.970",
+        "audioStartMs": 613970,
+        "audioEndMs": 616529.9700000001,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "我",
+            "endMs": 614209.9600000001,
+            "startMs": 613970,
+            "confidence": 0.3972168,
+            "punctuatedWord": "我"
+          },
+          {
+            "word": "主張",
+            "endMs": 614769.96,
+            "startMs": 614209.9600000001,
+            "confidence": 0.81591797,
+            "punctuatedWord": "主張"
+          },
+          {
+            "word": "使用",
+            "endMs": 615569.95,
+            "startMs": 614769.96,
+            "confidence": 0.44482422,
+            "punctuatedWord": "使用"
+          },
+          {
+            "word": "替代",
+            "endMs": 616129.9400000001,
+            "startMs": 615569.95,
+            "confidence": 0.9550781,
+            "punctuatedWord": "替代"
+          },
+          {
+            "word": "方案",
+            "endMs": 616529.9700000001,
+            "startMs": 616129.9400000001,
+            "confidence": 1,
+            "punctuatedWord": "方案"
+          }
+        ],
+        "sequence": 5577
+      },
+      {
+        "text": "我主張使用替代方案給這個歌手6,",
+        "itemId": "deepgram-613.970",
+        "audioStartMs": 613970,
+        "audioEndMs": 617889.95,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "我",
+            "endMs": 614209.9600000001,
+            "startMs": 613970,
+            "confidence": 0.6425781,
+            "punctuatedWord": "我"
+          },
+          {
+            "word": "主張",
+            "endMs": 614689.94,
+            "startMs": 614209.9600000001,
+            "confidence": 0.82470703,
+            "punctuatedWord": "主張"
+          },
+          {
+            "word": "使用",
+            "endMs": 615569.95,
+            "startMs": 614689.94,
+            "confidence": 0.5776367,
+            "punctuatedWord": "使用"
+          },
+          {
+            "word": "替代",
+            "endMs": 616129.9400000001,
+            "startMs": 615569.95,
+            "confidence": 0.9667969,
+            "punctuatedWord": "替代"
+          },
+          {
+            "word": "方案",
+            "endMs": 616850,
+            "startMs": 616129.9400000001,
+            "confidence": 1,
+            "punctuatedWord": "方案"
+          },
+          {
+            "word": "給",
+            "endMs": 617009.95,
+            "startMs": 616850,
+            "confidence": 0.39501953,
+            "punctuatedWord": "給"
+          },
+          {
+            "word": "這個",
+            "endMs": 617250,
+            "startMs": 617009.95,
+            "confidence": 0.7236328,
+            "punctuatedWord": "這個"
+          },
+          {
+            "word": "歌手",
+            "endMs": 617649.96,
+            "startMs": 617250,
+            "confidence": 0.98535156,
+            "punctuatedWord": "歌手"
+          },
+          {
+            "word": "6",
+            "endMs": 617889.95,
+            "startMs": 617649.96,
+            "confidence": 0.60791016,
+            "punctuatedWord": "6"
+          }
+        ],
+        "sequence": 5584
+      },
+      {
+        "text": "我主張使用替代方案,給這個歌手六個月的觀察,",
+        "itemId": "deepgram-613.970",
+        "audioStartMs": 613970,
+        "audioEndMs": 618850,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "我",
+            "endMs": 614209.9600000001,
+            "startMs": 613970,
+            "confidence": 0.96533203,
+            "punctuatedWord": "我"
+          },
+          {
+            "word": "主張",
+            "endMs": 614769.96,
+            "startMs": 614209.9600000001,
+            "confidence": 0.97998047,
+            "punctuatedWord": "主張"
+          },
+          {
+            "word": "使用",
+            "endMs": 615569.95,
+            "startMs": 614769.96,
+            "confidence": 0.65966797,
+            "punctuatedWord": "使用"
+          },
+          {
+            "word": "替代",
+            "endMs": 616129.9400000001,
+            "startMs": 615569.95,
+            "confidence": 0.8989258,
+            "punctuatedWord": "替代"
+          },
+          {
+            "word": "方案",
+            "endMs": 616850,
+            "startMs": 616129.9400000001,
+            "confidence": 1,
+            "punctuatedWord": "方案"
+          },
+          {
+            "word": "給",
+            "endMs": 617009.95,
+            "startMs": 616850,
+            "confidence": 0.5732422,
+            "punctuatedWord": "給"
+          },
+          {
+            "word": "這個",
+            "endMs": 617250,
+            "startMs": 617009.95,
+            "confidence": 0.58203125,
+            "punctuatedWord": "這個"
+          },
+          {
+            "word": "歌手",
+            "endMs": 617649.96,
+            "startMs": 617250,
+            "confidence": 0.98535156,
+            "punctuatedWord": "歌手"
+          },
+          {
+            "word": "六個",
+            "endMs": 618129.9400000001,
+            "startMs": 617649.96,
+            "confidence": 0.7001953,
+            "punctuatedWord": "六個"
+          },
+          {
+            "word": "月",
+            "endMs": 618370,
+            "startMs": 618129.9400000001,
+            "confidence": 0.9951172,
+            "punctuatedWord": "月"
+          },
+          {
+            "word": "的",
+            "endMs": 618529.9700000001,
+            "startMs": 618370,
+            "confidence": 0.81591797,
+            "punctuatedWord": "的"
+          },
+          {
+            "word": "觀察",
+            "endMs": 618850,
+            "startMs": 618529.9700000001,
+            "confidence": 0.921875,
+            "punctuatedWord": "觀察"
+          }
+        ],
+        "sequence": 5601
+      },
+      {
+        "text": "然後在這個期間呢使用了那個搔癢搔癢的方法",
+        "itemId": "deepgram-618.910",
+        "audioStartMs": 618910,
+        "audioEndMs": 622910,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "然後",
+            "endMs": 619709.9600000001,
+            "startMs": 619470,
+            "confidence": 0.32861328,
+            "punctuatedWord": "然後"
+          },
+          {
+            "word": "在這個",
+            "endMs": 620190,
+            "startMs": 619709.9600000001,
+            "confidence": 0.9716797,
+            "punctuatedWord": "在這個"
+          },
+          {
+            "word": "期間",
+            "endMs": 620509.95,
+            "startMs": 620190,
+            "confidence": 0.9970703,
+            "punctuatedWord": "期間"
+          },
+          {
+            "word": "呢",
+            "endMs": 620670,
+            "startMs": 620509.95,
+            "confidence": 0.8857422,
+            "punctuatedWord": "呢"
+          },
+          {
+            "word": "使用",
+            "endMs": 620990,
+            "startMs": 620670,
+            "confidence": 0.91015625,
+            "punctuatedWord": "使用"
+          },
+          {
+            "word": "了",
+            "endMs": 621230,
+            "startMs": 620990,
+            "confidence": 0.8203125,
+            "punctuatedWord": "了"
+          },
+          {
+            "word": "那個",
+            "endMs": 621389.95,
+            "startMs": 621230,
+            "confidence": 0.9116211,
+            "punctuatedWord": "那個"
+          },
+          {
+            "word": "搔",
+            "endMs": 621629.9400000001,
+            "startMs": 621389.95,
+            "confidence": 0.93847656,
+            "punctuatedWord": "搔"
+          },
+          {
+            "word": "癢",
+            "endMs": 621870,
+            "startMs": 621629.9400000001,
+            "confidence": 0.99902344,
+            "punctuatedWord": "癢"
+          },
+          {
+            "word": "搔",
+            "endMs": 622190,
+            "startMs": 621870,
+            "confidence": 0.7368164,
+            "punctuatedWord": "搔"
+          },
+          {
+            "word": "癢",
+            "endMs": 622509.95,
+            "startMs": 622190,
+            "confidence": 0.9980469,
+            "punctuatedWord": "癢"
+          },
+          {
+            "word": "的方法",
+            "endMs": 622910,
+            "startMs": 622509.95,
+            "confidence": 0.73291016,
+            "punctuatedWord": "的方法"
+          }
+        ],
+        "sequence": 5635
+      },
+      {
+        "text": "然後在這個期間呢使用了那個搔癢搔癢的方法進",
+        "itemId": "deepgram-618.910",
+        "audioStartMs": 618910,
+        "audioEndMs": 623389.95,
+        "isFinal": true,
+        "words": [
+          {
+            "word": "然後",
+            "endMs": 619709.9600000001,
+            "startMs": 619470,
+            "confidence": 0.36889648,
+            "punctuatedWord": "然後"
+          },
+          {
+            "word": "在這個",
+            "endMs": 620190,
+            "startMs": 619709.9600000001,
+            "confidence": 0.9760742,
+            "punctuatedWord": "在這個"
+          },
+          {
+            "word": "期間",
+            "endMs": 620509.95,
+            "startMs": 620190,
+            "confidence": 0.9951172,
+            "punctuatedWord": "期間"
+          },
+          {
+            "word": "呢",
+            "endMs": 620670,
+            "startMs": 620509.95,
+            "confidence": 0.8598633,
+            "punctuatedWord": "呢"
+          },
+          {
+            "word": "使用",
+            "endMs": 620990,
+            "startMs": 620670,
+            "confidence": 0.9165039,
+            "punctuatedWord": "使用"
+          },
+          {
+            "word": "了",
+            "endMs": 621230,
+            "startMs": 620990,
+            "confidence": 0.7392578,
+            "punctuatedWord": "了"
+          },
+          {
+            "word": "那個",
+            "endMs": 621389.95,
+            "startMs": 621230,
+            "confidence": 0.8569336,
+            "punctuatedWord": "那個"
+          },
+          {
+            "word": "搔",
+            "endMs": 621629.9400000001,
+            "startMs": 621389.95,
+            "confidence": 0.98095703,
+            "punctuatedWord": "搔"
+          },
+          {
+            "word": "癢",
+            "endMs": 621870,
+            "startMs": 621629.9400000001,
+            "confidence": 0.99902344,
+            "punctuatedWord": "癢"
+          },
+          {
+            "word": "搔",
+            "endMs": 622190,
+            "startMs": 621870,
+            "confidence": 0.8798828,
+            "punctuatedWord": "搔"
+          },
+          {
+            "word": "癢",
+            "endMs": 622509.95,
+            "startMs": 622190,
+            "confidence": 0.99902344,
+            "punctuatedWord": "癢"
+          },
+          {
+            "word": "的方法",
+            "endMs": 623149.96,
+            "startMs": 622509.95,
+            "confidence": 0.9941406,
+            "punctuatedWord": "的方法"
+          },
+          {
+            "word": "進",
+            "endMs": 623389.95,
+            "startMs": 623149.96,
+            "confidence": 0.74365234,
+            "punctuatedWord": "進"
+          }
+        ],
+        "sequence": 5642
+      }
+    ]
+  }
+]

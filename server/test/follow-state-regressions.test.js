@@ -256,3 +256,19 @@ test('fresh short openings cannot inherit an almost-expired fallback timer or be
   assert.equal(p.lastReliable, null); assert.equal(p.lastConfirmedEnd, -1);
   assert.equal(p.mismatch.items.size, 1);
 });
+
+for (const rehearsal of require('./fixtures/phrase-rehearsal.json')) {
+  test(`locked script recovers recorded ${rehearsal.name} paraphrase through the server`, t => {
+    const f = setup(t, rehearsal.lines.map(l => l.text));
+    assert.equal(f.event('performance:action', {action: 'lock-script'}).ok, true);
+    for (const e of rehearsal.events)
+      f.say(e.text, e.itemId, e.audioStartMs, e.audioEndMs, e.audioEndMs, {words: e.words, isFinal: e.isFinal});
+    const index = rehearsal.name === 'merchant' ? 3 : 2;
+    assert.equal(f.session.currentIndex, index);
+    assert.notEqual(f.session.automaticLive, true);
+    assert.equal(f.follower().lastReliable.index, index);
+    assert.equal(f.tracker().preparedIndex, null);
+    assert.equal(f.state().lastDecision.source, 'correction');
+    assert.equal(f.viewer().text, rehearsal.lines[index].text);
+  });
+}
