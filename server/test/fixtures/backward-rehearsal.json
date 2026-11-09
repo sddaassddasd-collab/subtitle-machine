@@ -1,0 +1,451 @@
+{
+  "sourceRun": "ef45bfcf-b7e1-4a0d-bbfc-bb7552d9a9d2",
+  "firstIndex": 475,
+  "selectedIndex": 29,
+  "lines": [
+    {
+      "text": "只是輕輕地搖頭。",
+      "type": "dialogue"
+    },
+    {
+      "text": "知道你想要吃什麼了嗎？",
+      "type": "dialogue"
+    },
+    {
+      "text": "我知道我想要吃什麼，",
+      "type": "dialogue"
+    },
+    {
+      "text": "但我不知道我該不該說。",
+      "type": "dialogue"
+    },
+    {
+      "text": "有什麼好不能說的？",
+      "type": "dialogue"
+    },
+    {
+      "text": "只要你想吃，",
+      "type": "dialogue"
+    },
+    {
+      "text": "我可以滿足你。",
+      "type": "dialogue"
+    },
+    {
+      "text": "但我想吃的不在這裡。",
+      "type": "dialogue"
+    },
+    {
+      "text": "怎麼可能，",
+      "type": "dialogue"
+    },
+    {
+      "text": "你再仔細看看，",
+      "type": "dialogue"
+    },
+    {
+      "text": "無論你要甜的、",
+      "type": "dialogue"
+    },
+    {
+      "text": "鹹的、",
+      "type": "dialogue"
+    },
+    {
+      "text": "苦的、",
+      "type": "dialogue"
+    },
+    {
+      "text": "辣的，",
+      "type": "dialogue"
+    },
+    {
+      "text": "我們什麼都有。",
+      "type": "dialogue"
+    },
+    {
+      "text": "我很仔細看了，我確定這裡沒有我想要的。",
+      "type": "dialogue"
+    },
+    {
+      "text": "雖然廚師有點驚訝，",
+      "type": "dialogue"
+    },
+    {
+      "text": "但這也不是他第一次碰到這種事，",
+      "type": "dialogue"
+    },
+    {
+      "text": "他知道該怎麼處理。",
+      "type": "dialogue"
+    },
+    {
+      "text": "廚師帶著歌手來到廚房倉庫，",
+      "type": "dialogue"
+    },
+    {
+      "text": "這是一個相當大的倉庫，",
+      "type": "dialogue"
+    },
+    {
+      "text": "裡面存放了從全世界搜集來的頂級食材，",
+      "type": "dialogue"
+    },
+    {
+      "text": "彷彿在這倉庫繞上一圈，",
+      "type": "dialogue"
+    },
+    {
+      "text": "就能環遊世界。",
+      "type": "dialogue"
+    },
+    {
+      "text": "廚師看著歌手驚訝的表情，",
+      "type": "dialogue"
+    },
+    {
+      "text": "他知道，",
+      "type": "dialogue"
+    },
+    {
+      "text": "他一定可以幫歌手找回快樂。",
+      "type": "dialogue"
+    },
+    {
+      "text": "這裡什麼都有，",
+      "type": "dialogue"
+    },
+    {
+      "text": "只要你想要，",
+      "type": "dialogue"
+    },
+    {
+      "text": "我可以用最好的食材，",
+      "type": "dialogue"
+    },
+    {
+      "text": "為你量身定做你喜歡的食物，",
+      "type": "dialogue"
+    },
+    {
+      "text": "快跟我說你想要吃什麼吧。",
+      "type": "dialogue"
+    },
+    {
+      "text": "看了這個倉庫之後，我更不好意思說了。",
+      "type": "dialogue"
+    },
+    {
+      "text": "有什麼好不好意思？",
+      "type": "dialogue"
+    }
+  ],
+  "events": [
+    {
+      "text": "你什麼都有隻要是你想要吃的我可以用最好的食材",
+      "itemId": "deepgram-1383.800",
+      "isFinal": false,
+      "audioStartMs": 1383800,
+      "audioEndMs": 1388120,
+      "words": [
+        {
+          "word": "你",
+          "endMs": 1384280,
+          "startMs": 1383960.1,
+          "confidence": 0.50439453,
+          "punctuatedWord": "你"
+        },
+        {
+          "word": "什麼",
+          "endMs": 1384600.1,
+          "startMs": 1384280,
+          "confidence": 0.7104492,
+          "punctuatedWord": "什麼"
+        },
+        {
+          "word": "都有",
+          "endMs": 1385240,
+          "startMs": 1384600.1,
+          "confidence": 0.9970703,
+          "punctuatedWord": "都有"
+        },
+        {
+          "word": "只要是",
+          "endMs": 1385880,
+          "startMs": 1385240,
+          "confidence": 0.9604492,
+          "punctuatedWord": "只要是"
+        },
+        {
+          "word": "你想要",
+          "endMs": 1386280,
+          "startMs": 1385880,
+          "confidence": 0.98095703,
+          "punctuatedWord": "你想要"
+        },
+        {
+          "word": "吃",
+          "endMs": 1386600.1,
+          "startMs": 1386280,
+          "confidence": 0.33544922,
+          "punctuatedWord": "吃"
+        },
+        {
+          "word": "的",
+          "endMs": 1386680,
+          "startMs": 1386600.1,
+          "confidence": 0.5283203,
+          "punctuatedWord": "的"
+        },
+        {
+          "word": "我",
+          "endMs": 1386840.0999999999,
+          "startMs": 1386680,
+          "confidence": 0.94628906,
+          "punctuatedWord": "我"
+        },
+        {
+          "word": "可以用",
+          "endMs": 1387240,
+          "startMs": 1386840.0999999999,
+          "confidence": 0.9873047,
+          "punctuatedWord": "可以用"
+        },
+        {
+          "word": "最好的",
+          "endMs": 1387720.1,
+          "startMs": 1387240,
+          "confidence": 0.9941406,
+          "punctuatedWord": "最好的"
+        },
+        {
+          "word": "食材",
+          "endMs": 1388120,
+          "startMs": 1387720.1,
+          "confidence": 1,
+          "punctuatedWord": "食材"
+        }
+      ],
+      "sequence": 12954
+    },
+    {
+      "text": "你什麼都有隻要是你想要吃的我可以用最好的食材",
+      "itemId": "deepgram-1383.800",
+      "isFinal": true,
+      "audioStartMs": 1383800,
+      "audioEndMs": 1388120,
+      "words": [
+        {
+          "word": "你",
+          "endMs": 1384280,
+          "startMs": 1383960.1,
+          "confidence": 0.56591797,
+          "punctuatedWord": "你"
+        },
+        {
+          "word": "什麼",
+          "endMs": 1384600.1,
+          "startMs": 1384280,
+          "confidence": 0.69091797,
+          "punctuatedWord": "什麼"
+        },
+        {
+          "word": "都有",
+          "endMs": 1385240,
+          "startMs": 1384600.1,
+          "confidence": 0.9970703,
+          "punctuatedWord": "都有"
+        },
+        {
+          "word": "只要是",
+          "endMs": 1385880,
+          "startMs": 1385240,
+          "confidence": 0.96240234,
+          "punctuatedWord": "只要是"
+        },
+        {
+          "word": "你想要",
+          "endMs": 1386280,
+          "startMs": 1385880,
+          "confidence": 0.9819336,
+          "punctuatedWord": "你想要"
+        },
+        {
+          "word": "吃",
+          "endMs": 1386600.1,
+          "startMs": 1386280,
+          "confidence": 0.32299805,
+          "punctuatedWord": "吃"
+        },
+        {
+          "word": "的",
+          "endMs": 1386680,
+          "startMs": 1386600.1,
+          "confidence": 0.5214844,
+          "punctuatedWord": "的"
+        },
+        {
+          "word": "我",
+          "endMs": 1386840.0999999999,
+          "startMs": 1386680,
+          "confidence": 0.9482422,
+          "punctuatedWord": "我"
+        },
+        {
+          "word": "可以用",
+          "endMs": 1387240,
+          "startMs": 1386840.0999999999,
+          "confidence": 0.98828125,
+          "punctuatedWord": "可以用"
+        },
+        {
+          "word": "最好的",
+          "endMs": 1387720.1,
+          "startMs": 1387240,
+          "confidence": 0.9941406,
+          "punctuatedWord": "最好的"
+        },
+        {
+          "word": "食材",
+          "endMs": 1388120,
+          "startMs": 1387720.1,
+          "confidence": 1,
+          "punctuatedWord": "食材"
+        }
+      ],
+      "sequence": 12963
+    },
+    {
+      "text": "你能生病做一個最棒的",
+      "itemId": "deepgram-1388.740",
+      "isFinal": false,
+      "audioStartMs": 1388740,
+      "audioEndMs": 1390660,
+      "words": [
+        {
+          "word": "你",
+          "endMs": 1389220,
+          "startMs": 1388900,
+          "confidence": 0.49145508,
+          "punctuatedWord": "你"
+        },
+        {
+          "word": "能",
+          "endMs": 1389460,
+          "startMs": 1389220,
+          "confidence": 0.32788086,
+          "punctuatedWord": "能"
+        },
+        {
+          "word": "生病",
+          "endMs": 1389860,
+          "startMs": 1389460,
+          "confidence": 0.35986328,
+          "punctuatedWord": "生病"
+        },
+        {
+          "word": "做一個",
+          "endMs": 1390260,
+          "startMs": 1389860,
+          "confidence": 0.8852539,
+          "punctuatedWord": "做一個"
+        },
+        {
+          "word": "最棒的",
+          "endMs": 1390660,
+          "startMs": 1390260,
+          "confidence": 0.78515625,
+          "punctuatedWord": "最棒的"
+        }
+      ],
+      "sequence": 12976
+    },
+    {
+      "text": "你能設定做一個最棒的食物怎麼樣想到要吃什麼了嗎",
+      "itemId": "deepgram-1388.740",
+      "isFinal": true,
+      "audioStartMs": 1388740,
+      "audioEndMs": 1393540,
+      "words": [
+        {
+          "word": "你",
+          "endMs": 1389140,
+          "startMs": 1388900,
+          "confidence": 0.34643555,
+          "punctuatedWord": "你"
+        },
+        {
+          "word": "能",
+          "endMs": 1389460,
+          "startMs": 1389140,
+          "confidence": 0.2680664,
+          "punctuatedWord": "能"
+        },
+        {
+          "word": "設定",
+          "endMs": 1389860,
+          "startMs": 1389460,
+          "confidence": 0.33691406,
+          "punctuatedWord": "設定"
+        },
+        {
+          "word": "做一個",
+          "endMs": 1390260,
+          "startMs": 1389860,
+          "confidence": 0.90478516,
+          "punctuatedWord": "做一個"
+        },
+        {
+          "word": "最棒的",
+          "endMs": 1390900,
+          "startMs": 1390260,
+          "confidence": 0.99316406,
+          "punctuatedWord": "最棒的"
+        },
+        {
+          "word": "食物",
+          "endMs": 1391460,
+          "startMs": 1390900,
+          "confidence": 0.9951172,
+          "punctuatedWord": "食物"
+        },
+        {
+          "word": "怎麼樣",
+          "endMs": 1392259.9,
+          "startMs": 1391460,
+          "confidence": 0.9550781,
+          "punctuatedWord": "怎麼樣"
+        },
+        {
+          "word": "想到",
+          "endMs": 1392580,
+          "startMs": 1392260,
+          "confidence": 0.9667969,
+          "punctuatedWord": "想到"
+        },
+        {
+          "word": "要吃",
+          "endMs": 1392980,
+          "startMs": 1392580,
+          "confidence": 0.9970703,
+          "punctuatedWord": "要吃"
+        },
+        {
+          "word": "什麼",
+          "endMs": 1393220,
+          "startMs": 1392980,
+          "confidence": 0.9760742,
+          "punctuatedWord": "什麼"
+        },
+        {
+          "word": "了嗎",
+          "endMs": 1393540,
+          "startMs": 1393220,
+          "confidence": 0.93603516,
+          "punctuatedWord": "了嗎"
+        }
+      ],
+      "sequence": 13012
+    }
+  ]
+}

@@ -16,6 +16,8 @@ const TEXT_SETTINGS = Object.freeze({
   contextBonus: 0.04, contextConfidence: 0.85, expectationBonus: 0.025,
   openingMinEvidence: 2, sequenceOpeningMinEvidence: 3, nearOpeningMaxEvidence: 12,
   triggerOpeningCharacters: 2, tailParticles: '嘛啊呀呢喔哦啦吧唷', tailParticleGapMs: 250,
+  backwardSupportMs: 10000, backwardConfidence: .9, backwardEvidence: 4,
+  supportedSuccessorConfidence: .86, supportedSuccessorMatches: 4,
   phraseRecoveryAhead: 3, phraseRecoveryIsland: 2, phraseRecoveryMatches: 8,
   phraseRecoveryCoverage: .5, phraseRecoveryHeardCoverage: .35, phraseRecoveryMargin: .15,
   supportedRecoveryAhead: 6, supportedRecoveryConfidence: .65, supportedRecoveryMatches: 6, supportedRecoveryTtlMs: 8000,
@@ -74,7 +76,7 @@ const SEMANTIC_SETTINGS = Object.freeze({
   sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 16, onset: 3, acoustic: 4, diagnostics: 25, semantic: 9, performance: 9, captionCorrection: 1, captionPresentation: 4}),
+  versions: Object.freeze({text: 17, onset: 3, acoustic: 4, diagnostics: 26, semantic: 9, performance: 9, captionCorrection: 1, captionPresentation: 4}),
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,

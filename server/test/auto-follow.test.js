@@ -160,12 +160,19 @@ test('distant interim match requires growing evidence, not duplicate messages', 
   assert.equal(s.index(), 25);
 });
 
-test('genuine backward jump from newer audio is allowed', () => {
+test('genuine distant backward replay requires an independent ordered successor', () => {
   const lines = Array.from({ length: 30 }, () => '其他完全不同的話語');
   lines[2] = '請你記得我們曾經許下的約定';
+  lines[3] = '然後我們一起走向明天的道路';
   const s = show(lines, 25);
-  s.transcript(lines[2], { itemId: 'new', startMs: 4000, endMs: 6000, isFinal: true });
-  assert.equal(s.index(), 2);
+  const say = (index, itemId, startMs, endMs) => s.transcript(lines[index], {itemId, startMs, endMs, isFinal: true,
+    words: [{word: lines[index], startMs, endMs}]});
+  assert.equal(say(2, 'first', 4000, 6000).reason, 'backward_support_required');
+  assert.equal(s.index(), 25);
+  const result = say(3, 'successor', 6500, 8000);
+  assert.equal(s.index(), 3);
+  assert.equal(result.reason, 'independent_backward_recovery');
+  assert.equal(result.completed, false);
 });
 
 test('repeated remote lines stay uncertain instead of guessing', () => {

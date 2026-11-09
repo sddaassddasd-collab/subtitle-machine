@@ -4,8 +4,9 @@ const {normalizeText} = require('./follow-text');
 const {alignedWords, freshSpeech, suffixSpeech, wordWindows} = require('./word-evidence');
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
-const {supportedRecovery} = require('./supported-recovery');
+const {supportedRecovery, expireSupportedRecovery} = require('./supported-recovery');
 const {phraseRecovery} = require('./phrase-recovery');
+const {backwardRecovery, expireBackwardRecovery} = require('./backward-recovery');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
 const MAX_HEARD = T.maxHeard;
@@ -81,7 +82,7 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     weakPath: {hypotheses: [], lastMs: -1},
     wordPath: {hypotheses: []},
     shortOpenings: false, openingPlan: null, selectedStartIndex: null,
-    captureRecovery: null, supportedRecovery: null,
+    captureRecovery: null, supportedRecovery: null, backwardRecovery: null,
   };
 }
 
@@ -566,7 +567,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   const script = preparedScript || prepareScript(lines, tracker.script);
   if (tracker.script && script !== tracker.script) {
-    tracker.supportedRecovery = null;
+    tracker.supportedRecovery = null; tracker.backwardRecovery = null;
     // Edits invalidate old alignment history but preserve the audio ordering fence.
     clearPreparation(tracker);
     tracker.items.clear();
@@ -722,14 +723,16 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     ({ index, confidence, progress: offset / length }));
   const uncertain = (reason, message) => {
     const supported = supportedRecovery(tracker, script, currentIndex, event,
-      localSupportCandidates(script, currentIndex, text, {ahead: T.supportedRecoveryAhead, phoneticMinimum: T.supportedRecoveryConfidence}));
+      localSupportCandidates(script, currentIndex, text, {ahead: T.supportedRecoveryAhead, phoneticMinimum: T.supportedRecoveryConfidence}),
+      part => localSupportCandidates(script, currentIndex, part.text, {ahead: T.supportedRecoveryAhead}));
     if (supported) {
-      applySemanticLocation(tracker, lines, supported.index, event, {prepare: false});
+      const speech = supported.speech || event;
+      applySemanticLocation(tracker, lines, supported.index, speech, {prepare: false});
       return {index: supported.index, reason: 'independent_cue_recovery', status: 'corrected',
         progress: 0, completed: false, spans: [],
-        evidence: {startMs: event.startMs, endMs: event.endMs},
-        candidate: {index: supported.index, confidence: 1, evidence: text.length, heard: text,
-          offset: text.length, length: text.length, locationOnly: true, supportingIndex: supported.priorIndex},
+        evidence: {startMs: speech.startMs, endMs: speech.endMs},
+        candidate: {...supported.candidate, index: supported.index, speech, pathConfirmed: true, pathSteps: 2,
+          locationOnly: true, supportingIndex: supported.priorIndex},
         message: '已依連續兩句獨立語音恢復位置，持續核對內容。'};
     }
     if (tracker.referenceProgress?.index === currentIndex && tracker.referenceProgress.completed &&
@@ -790,7 +793,17 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   // Revisions/finalization of one ASR item must not rewind that item's progress.
   if (item.maxIndex !== null && best.index < item.maxIndex) return {ignored: true, reason: 'same_item_rewind'};
-
+  const rewind = backwardRecovery(tracker, script, currentIndex, event, best, ambiguous && !exactUnique);
+  if (rewind && !rewind.allowed)
+    return uncertain('backward_support_required', '較早位置需要後續獨立台詞佐證，暫時維持目前字幕。');
+  if (rewind?.allowed) {
+    best = {...best, backwardSupported: true, supportingIndex: rewind.supportingIndex};
+    const speech = rewind.speech;
+    applySemanticLocation(tracker, lines, best.index, speech, {prepare: false});
+    return {index: best.index, candidate: {...best, speech, locationOnly: true}, progress: 0, completed: false, spans: [],
+      evidence: {startMs: speech.startMs, endMs: speech.endMs}, reason: 'independent_backward_recovery',
+      status: 'corrected', message: '已依兩句獨立語音確認較早劇本位置，持續核對內容。'};
+  }
   const relocation = best.index !== currentIndex && best.index !== next;
   const caughtUp = relocation && canCatchUp(tracker, script, currentIndex, best, event);
   const insertedRecovery = relocation && canRecoverInsertedCue(tracker, script, currentIndex, best, event, ambiguous);
@@ -897,6 +910,10 @@ function followTranscript(tracker, lines, currentIndex, event) {
   const result = locateTranscript(tracker, lines, currentIndex,
     {...event, prepareOnly: true, trustedCurrentIndex: tracker.prediction?.source === 'opening' &&
       normalizeText(event.text) === script.entries[currentIndex]?.text ? currentIndex : selectedStartIndex}, script);
+  if (!result.ignored) {
+    expireBackwardRecovery(tracker, result.index ?? currentIndex, event);
+    expireSupportedRecovery(tracker, result.index ?? currentIndex, event);
+  }
   tracker.shortOpenings = true;
   tracker.selectedStartIndex = selectedStartIndex;
   if (result.ignored) {
@@ -914,7 +931,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
     script.entries[currentIndex].length > T.triggerOpeningCharacters;
   // A full accepted relocation still wins when the ASR batch already proves a
   // different location. Otherwise the prepared short opening owns the change.
-  if (trigger && !repeatedCurrent && (!accepted || result.index === currentIndex)) {
+  if (trigger && result.reason !== 'backward_support_required' && !repeatedCurrent && (!accepted || result.index === currentIndex)) {
     const speech = {...event, text: trigger.text, startMs: trigger.startMs, endMs: trigger.endMs};
     const item = tracker.items.get(event.itemId), maxIndex = item?.maxIndex ?? null;
     applySemanticLocation(tracker, lines, trigger.index, speech, {prepare: false});
@@ -945,7 +962,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
       result.evidence = {startMs: speech.startMs, endMs: speech.endMs};
     }
     tracker.selectedStartIndex = null;
-    tracker.openingPlan = result.candidate?.phraseAnchored ? null
+    tracker.openingPlan = (result.candidate?.phraseAnchored || result.candidate?.backwardSupported || result.reason === 'independent_cue_recovery') ? null
       : prepareOpening(script, result.index, {...event, completed: result.completed});
   } else {
     tracker.openingPlan = plan;

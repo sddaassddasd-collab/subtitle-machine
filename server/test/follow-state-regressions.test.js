@@ -272,3 +272,35 @@ for (const rehearsal of require('./fixtures/phrase-rehearsal.json')) {
     assert.equal(f.viewer().text, rehearsal.lines[index].text);
   });
 }
+
+test('server keeps recorded grid 506 in place when a suffix matches grid 477', t => {
+  const r = require('./fixtures/backward-rehearsal.json');
+  const f = setup(t, r.lines.map(l => l.text));
+  f.event('setCurrentIndex', {index: r.selectedIndex});
+  assert.equal(f.session.currentIndex, r.selectedIndex);
+  for (const e of r.events)
+    f.say(e.text, e.itemId, e.audioStartMs, e.audioEndMs, e.audioEndMs, {words: e.words, isFinal: e.isFinal});
+  assert.equal(f.session.currentIndex + r.firstIndex + 1, 506);
+  assert.equal(f.tracker().backwardRecovery.index + r.firstIndex + 1, 477);
+  assert.notEqual(f.viewer().text, r.lines[1].text);
+  f.event('setCurrentIndex', {index: 1});
+  assert.equal(f.session.currentIndex, 1, 'manual backward movement stays immediate');
+});
+
+test('server resumes a nearby path from a weak cue and an independent partial successor', t => {
+  const lines = ['你又來了這樣根本沒用', '你的方法才沒用', '不不不', '二位',
+    '你們又沒找到問題核心了', '現在的問題在於他的心情'];
+  const f = setup(t, lines);
+  f.say('你又來了這樣', 'anchor', 0, 1000);
+  const weak = '你們又沒有找到文青的核心了';
+  f.say(weak, 'weak', 2000, 4000, 4000, {isFinal: false, words: [{word: weak, startMs: 2000, endMs: 4000}]});
+  assert.equal(f.session.currentIndex, 0);
+  f.say('現在的問題', 'next', 4500, 5500, 5500, {isFinal: false,
+    words: [{word: '現在的問題', startMs: 4500, endMs: 5500}]});
+  assert.equal(f.session.currentIndex, 5);
+  assert.equal(f.viewer().text, lines[5]);
+  assert.equal(f.tracker().preparedIndex, null);
+  assert.equal(f.follower().lastReliable.index, 5);
+  assert.equal(f.follower().mismatch, null);
+  assert.notEqual(f.session.automaticLive, true);
+});

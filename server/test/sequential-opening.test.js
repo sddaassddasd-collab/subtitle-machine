@@ -298,3 +298,19 @@ test('a contradictory rewrite invalidates a weak cue hypothesis before later sup
     words: [{word: '我說過', startMs: 4500, endMs: 5000}]});
   assert.notEqual(result.reason, 'independent_cue_recovery');
 });
+
+test('weak nearby cue accepts a unique partial timed successor without waiting for a complete sentence', () => {
+  const s = show(['你又來了這樣根本沒用', '你的方法才沒用', '不不不', '二位',
+    '你們又沒找到問題核心了', '現在的問題在於他的心情']);
+  s.say('你又來了這樣', {endMs: 1000});
+  const text = '你們又沒有找到文青的核心了';
+  s.say(text, {itemId: 'weak', startMs: 2000, endMs: 4000, words: [{word: text, startMs: 2000, endMs: 4000}]});
+  assert.equal(s.index(), 0);
+  const result = s.say('現在的問題', {itemId: 'next', startMs: 4500, endMs: 5500,
+    words: [{word: '現在的問題', startMs: 4500, endMs: 5500}]});
+  assert.equal(result.index, 5);
+  assert.equal(result.reason, 'independent_cue_recovery');
+  assert.equal(result.completed, false);
+  assert.equal(s.tracker.preparedIndex, null);
+  assert.deepEqual(result.evidence, {startMs: 4500, endMs: 5500});
+});
