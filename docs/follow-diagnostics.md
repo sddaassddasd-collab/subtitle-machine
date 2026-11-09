@@ -29,3 +29,9 @@
 診斷版本 23：客戶端 `capture_socket_disconnect` 保存 Socket.IO 的 `disconnectReason`、可取得時的 WebSocket `socketCloseCode`、最近封包與心跳的經過時間（`lastSocketPacketAgeMs`／`lastHeartbeatAgeMs`），並以 stage 區分 intentional／unexpected。不保存原始封包或任意錯誤物件；未知關閉碼／尚未觀察到心跳時不填值。伺服器另以 `server_socket_disconnect` 記錄音訊連線的斷線原因及供應商佇列狀態，以兩端證據判斷來源。這些欄位用於診斷，不代表已修好斷線來源。
 
 文字規則版本 14（回復後的新變更）：`nearby_insertions` 允許近期已定位位置的前方 6 格內，完整台詞僅多出最多 2 個指定功能／語助字時恢復位置。必須保留劇本所有字與順序，不允許藉此更改否定詞、替換文字、跨音樂或舞台指示邊界；未完成句與歧義候選不適用。有效參數保存於 textSettings 的 insertionRecovery 欄位。兩份不同排練的實際候選均有回歸案例；語意核對仍用於超出此容錯範圍的改寫。
+
+Pipeline 版本 5 的回到即時模式：本機最老待送音訊年齡，或最近 5 秒 ACK 帶回的相對來源延遲加供應商等待時間，達 3 秒且持續 2 秒時，記錄 `capture_return_to_live`，切換音訊串流並將本機佇列裁至最近約 240 ms。這個判斷不以 ACK 往返時間當成單程延遲；伺服器相對延遲仍有初始時鐘基準限制，不能視為精確絕對延遲。
+
+回到即時採用既有 capture generation／stream identity 隔離：關閉舊傳輸、建立新 captureId，舊 ACK 及舊供應商串流結果不得修改新串流；既有字幕位置保留，等待新語音重新定位。連線建立期間仍持續本機收音，成功建立後再裁至即時邊緣。`capture_drop_range.cause=return_to_live` 記錄確定捨棄的本機音訊；已送出但未確認的區間仍用 capture_unacknowledged_range 記錄，不重複當成確定丟音。
+
+兩次回到即時至少相隔 30 秒；同一未恢復穩定的期間最多執行兩次。受限時記錄 `capture_live_reset_suppressed` 並顯示傳輸不穩；連續 30 秒觀察到低於 1 秒的延遲後重設次數。真正斷線的既有重試仍保留。此模式有意犧牲舊台詞以恢復現場同步，不保證網路持續不足時仍能即時。

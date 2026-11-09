@@ -2,9 +2,10 @@ import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket, o
 import {signalMetrics} from './audio-signal.js'
 import {AUDIO_WIRE} from './capture-wire.mjs'
 
-export const PIPELINE_SETTINGS = Object.freeze({version: 4, sampleRate: 24000, maximumAgeMs: 10000,
+export const PIPELINE_SETTINGS = Object.freeze({version: 5, sampleRate: 24000, maximumAgeMs: 10000,
   maximumQueuedMs: 8000, overflowRetainMs: 1000,
-  backlogMs: 4000, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
+  liveLagMs: 3000, liveLagHoldMs: 2000, liveRetainMs: 240, liveResetCooldownMs: 30000,
+  liveMaximumResets: 2, liveHealthyMs: 30000, backlogMs: 4000, reportMs: 500, sampleGapMs: 3000, retryBaseMs: 1000, retryMaxMs: 12000})
 
 // Keep the fractional sample position across batches (including 44.1 kHz input).
 // Input time and provider time are distinct; dropped input is never counted as
@@ -41,6 +42,7 @@ export class CapturePipeline {
     this.config = config; this.report('capture_pipeline_settings', PIPELINE_SETTINGS); this.desired = true; this.clock = config.clock
     this.resampler = new PcmResampler(config.inputRate)
     this.generation = config.clientInfo.captureGeneration
+    this.liveResetCount = 0; this.lastLiveResetAt = -Infinity
     this.generatedAudioMs = 0; this.droppedAudioMs = 0; this.nextProgressAt = 0
     this.lastSampleAt = this.now(); this.nextReportAt = 0
     this.timer = this.timers.setInterval(() => this.tick(), 100)
@@ -77,6 +79,7 @@ export class CapturePipeline {
     }
     this.captureId = `${this.config.sourceId}:${++this.generation}`
     this.backlogSince = null
+    this.liveLagSince = null; this.liveAckAt = undefined; this.liveAckLagMs = 0; this.liveHealthySince = null
     this.sequence = 0; this.firstReceipt = false; this.failedProbes = 0; this.probeAt = 0
     this.droppedSince = null; this.probePending = null
     this.notify?.({type: 'epoch', captureId: this.captureId, generation: this.generation, sourceId: this.config.sourceId})
@@ -98,10 +101,17 @@ export class CapturePipeline {
         onReport: data => {
           this.report(data.reason, {...data, queuedAudioMs: this.queuedMs,
             oldestQueuedAgeMs: this.queue.length ? Math.max(0, this.now() - this.queue[0].capturedAt) : 0})
-          if (data.reason === 'capture_transport_recovered' && this.firstReceipt && this.droppedSince === null)
+          if (data.reason === 'capture_transport_recovered' && this.firstReceipt && this.droppedSince === null &&
+            (this.liveAckLagMs || 0) < PIPELINE_SETTINGS.liveLagMs)
             this.state('running', '音訊傳輸已恢復，辨識持續進行。')
         },
         onAck: ack => {
+          if (ack.ok && Number.isFinite(ack.networkAgeMs)) {
+            this.liveAckLagMs = Math.max(0, ack.networkAgeMs) +
+              (Number.isFinite(ack.providerSubmittedAt) && Number.isFinite(ack.serverReceivedAt)
+                ? Math.max(0, ack.providerSubmittedAt - ack.serverReceivedAt) : 0)
+            this.liveAckAt = this.now()
+          }
           if (ack.ok && ack.dropped && !ack.queued) {
             if (this.droppedSince === null) {
               this.droppedSince = this.now()
@@ -121,8 +131,9 @@ export class CapturePipeline {
           }
           if (ack.ok && !ack.dropped && !ack.queued && !ack.ignored && !this.firstReceipt) {
             this.firstReceipt = true; this.stableAt = this.now()
-            this.state(this.queuedMs >= PIPELINE_SETTINGS.backlogMs ? 'delayed' : 'running',
-              this.queuedMs >= PIPELINE_SETTINGS.backlogMs ? '音訊持續傳送，正在消化積壓。' : '收音與辨識已連線。')
+            this.state((this.queuedMs >= PIPELINE_SETTINGS.backlogMs || this.liveAckLagMs >= PIPELINE_SETTINGS.liveLagMs) ? 'delayed' : 'running',
+              (this.queuedMs >= PIPELINE_SETTINGS.backlogMs || this.liveAckLagMs >= PIPELINE_SETTINGS.liveLagMs)
+                ? '音訊仍落後，正在恢復即時傳輸。' : '收音與辨識已連線。')
             this.report('capture_client_ready', {attempt: this.attempt})
           }
         },
@@ -147,7 +158,8 @@ export class CapturePipeline {
       this.report('capture_transport_ready', {...this.transport.details()})
       // Retain the bounded outage queue; drain discards only actually expired
       // packets. Reconnection must not apply a second one-second crop.
-      this.trimQueue(PIPELINE_SETTINGS.maximumQueuedMs, 'reconnect_trim')
+      this.trimQueue(this.liveResetPending ? PIPELINE_SETTINGS.liveRetainMs : PIPELINE_SETTINGS.maximumQueuedMs,
+        this.liveResetPending ? 'return_to_live' : 'reconnect_trim')
       this.recoveryReadyAt = this.now(); this.recoverySnapshots = new Set()
       this.report('capture_recovery_ready', {recoveryAt: this.recoveryAt || 0, retainedAudioMs: this.queuedMs, droppedAudioMs: this.droppedAudioMs})
       this.drain()
@@ -245,6 +257,47 @@ export class CapturePipeline {
       if (this.droppedMs) {this.report('capture_input_gap', {droppedInputMs: this.droppedMs, sourceStartMs: packet.sourceStartMs}); this.droppedMs = 0}
     }
   }
+  checkLiveLag(now) {
+    const queueAgeMs = this.queue.length ? Math.max(0, now - this.queue[0].capturedAt) : 0
+    // ACK return-trip time is deliberately excluded. The server measures age
+    // relative to its best observed source clock and includes provider waiting.
+    const serverLagMs = now - (this.liveAckAt ?? -Infinity) <= 5000 ? this.liveAckLagMs || 0 : 0
+    const liveLagMs = Math.max(queueAgeMs, serverLagMs)
+    if (liveLagMs < 1000 && this.firstReceipt) {
+      this.liveHealthySince ??= now
+      if (now - this.liveHealthySince >= PIPELINE_SETTINGS.liveHealthyMs) {
+        this.liveResetCount = 0; this.liveResetPending = false; this.liveResetSuppressed = false
+      }
+    } else this.liveHealthySince = null
+    if (liveLagMs < PIPELINE_SETTINGS.liveLagMs) {this.liveLagSince = null; return false}
+    this.liveLagSince ??= now
+    if (now - this.liveLagSince < PIPELINE_SETTINGS.liveLagHoldMs) return false
+    if (now - this.lastLiveResetAt < PIPELINE_SETTINGS.liveResetCooldownMs ||
+      this.liveResetCount >= PIPELINE_SETTINGS.liveMaximumResets) {
+      if (!this.liveResetSuppressed) {
+        this.liveResetSuppressed = true
+        this.report('capture_live_reset_suppressed', {liveLagMs, liveResetCount: this.liveResetCount, queuedAudioMs: this.queuedMs})
+        this.state('delayed', '傳輸持續不穩，字幕可能落後；本機持續收音。')
+      }
+      return false
+    }
+    this.lastLiveResetAt = now; this.liveResetCount++; this.liveResetPending = true
+    this.liveLagSince = null; this.liveAckAt = undefined; this.liveHealthySince = null
+    this.liveResetSuppressed = false
+    this.report('capture_return_to_live', {liveLagMs, liveResetCount: this.liveResetCount, queuedAudioMs: this.queuedMs,
+      ...this.transport.details()})
+    this.state('reconnecting', '音訊嚴重落後，正在捨棄舊片段並重新定位當下台詞。')
+    this.trimQueue(PIPELINE_SETTINGS.liveRetainMs, 'return_to_live')
+    // Invalidate the old epoch before reconnecting, so late ACKs/results cannot
+    // resume its audio clock. No retry backoff for this deliberate live cut.
+    this.recoveryAt = now; this.ready = false; this.epoch++
+    this.transport.close(); this.connectionMonitor?.close()
+    this.connecting = true
+    this.socket?.disconnect()
+    this.connecting = false
+    void this.connect(true)
+    return true
+  }
   tick() {
     if (!this.desired) return
     const now = this.now()
@@ -271,7 +324,10 @@ export class CapturePipeline {
       this.notify?.({type: 'source-stalled'})
     }
     if (!this.ready || !this.transport || !this.socket?.connected) return
-    this.transport.check(); this.drain()
+    this.transport.check()
+    if (!this.ready) return
+    if (this.checkLiveLag(now)) return
+    this.drain()
     // A growing queue alone cannot distinguish slow receipts from a failed
     // connection. Keep the epoch while cumulative reception is advancing.
     if (this.queuedMs >= PIPELINE_SETTINGS.backlogMs) {

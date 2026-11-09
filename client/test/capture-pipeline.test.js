@@ -5,7 +5,7 @@ import {CapturePipeline, PcmResampler, PIPELINE_SETTINGS as S} from '../src/lib/
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
 function fixture({receipt = true, dropped = false, receiptDelay = 0, probeProgress = true} = {}) {
-  let now = 0, network = true, provider = true
+  let now = 0, network = true, provider = true, serverLagMs = 0
   const sockets = [], events = [], stats = {frames: 0, starts: 0, stops: 0, probes: 0}
   const timers = {setInterval: () => 1, clearInterval() {}}
   const callbacks = []
@@ -29,7 +29,7 @@ function fixture({receipt = true, dropped = false, receiptDelay = 0, probeProgre
           stats.frames++; stats.last = data; this.received = data.sequence; this.audioMs += data.durationMs
           stats.droppedInputMs = (stats.droppedInputMs || 0) + (data.droppedInputMs || 0)
           const response = {captureId: data.captureId, sequence: data.sequence,
-            ok: provider, dropped, serverAudioMs: this.audioMs, networkAgeMs: 0, reason: provider ? '' : 'provider_backpressure'}
+            ok: provider, dropped, serverAudioMs: this.audioMs, networkAgeMs: serverLagMs, reason: provider ? '' : 'provider_backpressure'}
           if (receipt) later(() => this.server('transcription:audio-ack', response))
         }
         if (name === 'transcription:capture-probe') {
@@ -46,7 +46,7 @@ function fixture({receipt = true, dropped = false, receiptDelay = 0, probeProgre
     request: {sessionId: 'session', autoFollow: true}, clientInfo: {captureOwnerId: 'owner', captureGeneration: 100}})
   const samples = new Float32Array(960).fill(.1)
   return {pipeline, events, stats, sockets, frame(ms) {clock(ms); pipeline.receive({samples, endTime: ms / 1000})},
-    clock, network(value) {network = value}, provider(value) {provider = value}}
+    clock, lag(value) {serverLagMs = value}, network(value) {network = value}, provider(value) {provider = value}}
 }
 
 test('three hours of source frames stay in one provider epoch with bounded memory and an exact PCM clock', async () => {
@@ -201,6 +201,7 @@ test('a sustained outage overflows in bounded blocks and the next second of spee
 
 for (const receiptDelay of [5000, 10000, 11000]) test(`sustained ${receiptDelay} ms receipts catch up without reconnecting or losing audio`, async () => {
   const f = fixture({receiptDelay}); await flush()
+  f.pipeline.transport.uploadWindowMs = 12000
   for (let i = 1; i <= 2000; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
   // Stop producing while delayed receipts drain the last packets.
   for (let i = 1; i <= 15; i++) {f.clock(80000 + i * 1000); f.pipeline.tick(); await flush()}
@@ -236,6 +237,7 @@ test('drop ranges and recovery snapshots retain the source timeline and cumulati
 
 test('successful probes with no advancing receipt do not hide a stalled upload', async () => {
   const f = fixture({receipt: false, probeProgress: false}); await flush()
+  f.pipeline.liveResetCount = S.liveMaximumResets
   for (let i = 1; i <= 550; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
   assert.ok(f.events.some(e => e.reason === 'capture_reception_stalled'))
   assert.ok(f.stats.starts > 1)
@@ -254,5 +256,56 @@ test('a brief real disconnection retains all queued speech through transport rep
   assert.equal(f.pipeline.droppedAudioMs, 0)
   assert.equal(f.pipeline.queuedMs, 0)
   assert.equal(f.sockets.reduce((sum, socket) => sum + (socket.audioMs || 0), 0), 4000)
+  f.pipeline.stop()
+})
+
+test('sustained measured source lag cuts to fresh audio and isolates the old epoch', async () => {
+  const f = fixture(); await flush(); f.frame(40)
+  const oldTransport = f.pipeline.transport, oldCapture = f.pipeline.captureId
+  f.lag(5000)
+  for (let i = 2; i <= 65; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  assert.notEqual(f.pipeline.captureId, oldCapture)
+  assert.equal(oldTransport.closed, true)
+  assert.equal(f.stats.starts, 2)
+  assert.equal(f.pipeline.retryAt || 0, 0, 'intentional disconnect must not create a competing retry')
+  assert.ok(f.events.some(e => e.reason === 'capture_return_to_live'))
+  const before = f.pipeline.transport.lastAckSequence
+  oldTransport.acknowledge({ok: true, captureId: oldCapture, sequence: 9999})
+  assert.equal(f.pipeline.transport.lastAckSequence, before)
+  f.pipeline.stop()
+})
+
+test('severe local backlog is cropped once to the live edge, then remains bounded during observation', async () => {
+  const f = fixture({receipt: false, probeProgress: false}); await flush()
+  for (let i = 1; i <= 240; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  assert.equal(f.stats.starts, 2)
+  assert.ok(f.events.some(e => e.reason === 'capture_drop_range' && e.cause === 'return_to_live'))
+  assert.ok(f.pipeline.queue.length === 0 || f.pipeline.queuedMs <= S.maximumQueuedMs)
+  f.pipeline.stop()
+})
+
+test('brief lag is tolerated and persistent bad conditions cannot cause rapid live-reset loops', async () => {
+  const f = fixture(); await flush(); f.frame(40)
+  f.lag(5000)
+  for (let i = 2; i <= 25; i++) {f.frame(i * 40); f.pipeline.tick()}
+  f.lag(0)
+  for (let i = 26; i <= 50; i++) {f.frame(i * 40); f.pipeline.tick()}
+  assert.equal(f.stats.starts, 1)
+  f.lag(5000)
+  for (let i = 51; i <= 500; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  assert.equal(f.stats.starts, 2)
+  assert.ok(f.events.some(e => e.reason === 'capture_live_reset_suppressed'))
+  f.pipeline.stop()
+})
+
+test('two live cuts exhaust the unstable-period budget, which resets only after sustained healthy audio', async () => {
+  const f = fixture(); await flush(); f.frame(40); f.lag(5000)
+  for (let i = 2; i <= 2250; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  assert.equal(f.stats.starts, 3)
+  assert.equal(f.pipeline.liveResetCount, S.liveMaximumResets)
+  f.lag(0)
+  for (let i = 2251; i <= 3075; i++) {f.frame(i * 40); f.pipeline.tick(); await flush()}
+  assert.equal(f.pipeline.liveResetCount, 0)
+  assert.equal(f.stats.starts, 3)
   f.pipeline.stop()
 })
