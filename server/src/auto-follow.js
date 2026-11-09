@@ -4,6 +4,7 @@ const {normalizeText} = require('./follow-text');
 const {alignedWords, freshSpeech, suffixSpeech, wordWindows} = require('./word-evidence');
 const {TEXT_SETTINGS: T, ONSET_SETTINGS: O, SEMANTIC_SETTINGS: S} = require('./follow-settings');
 const {pinyin} = require('pinyin-pro');
+const {supportedRecovery} = require('./supported-recovery');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
 const MAX_HEARD = T.maxHeard;
@@ -79,7 +80,7 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     weakPath: {hypotheses: [], lastMs: -1},
     wordPath: {hypotheses: []},
     shortOpenings: false, openingPlan: null, selectedStartIndex: null,
-    captureRecovery: null,
+    captureRecovery: null, supportedRecovery: null,
   };
 }
 
@@ -564,6 +565,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   const script = preparedScript || prepareScript(lines, tracker.script);
   if (tracker.script && script !== tracker.script) {
+    tracker.supportedRecovery = null;
     // Edits invalidate old alignment history but preserve the audio ordering fence.
     clearPreparation(tracker);
     tracker.items.clear();
@@ -718,6 +720,17 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   tracker.candidates = candidates.slice(0, 3).map(({ index, confidence, offset, length }) =>
     ({ index, confidence, progress: offset / length }));
   const uncertain = (reason, message) => {
+    const supported = supportedRecovery(tracker, script, currentIndex, event,
+      localSupportCandidates(script, currentIndex, text, {ahead: T.supportedRecoveryAhead, phoneticMinimum: T.supportedRecoveryConfidence}));
+    if (supported) {
+      applySemanticLocation(tracker, lines, supported.index, event, {prepare: false});
+      return {index: supported.index, reason: 'independent_cue_recovery', status: 'corrected',
+        progress: 0, completed: false, spans: [],
+        evidence: {startMs: event.startMs, endMs: event.endMs},
+        candidate: {index: supported.index, confidence: 1, evidence: text.length, heard: text,
+          offset: text.length, length: text.length, locationOnly: true, supportingIndex: supported.priorIndex},
+        message: '已依連續兩句獨立語音恢復位置，持續核對內容。'};
+    }
     if (tracker.referenceProgress?.index === currentIndex && tracker.referenceProgress.completed &&
       event.endMs <= tracker.referenceProgress.audioEndMs) return {ignored: true, reason: 'older_than_reference_completion'};
     if (!suffixConflict && !['ambiguous_text', 'insufficient_text_evidence', 'insufficient_opening'].includes(reason)) {
@@ -1096,7 +1109,7 @@ function recoverWordPosition(tracker, script, lines, currentIndex, event) {
 
 // Isolated new speech only: no earlier ASR items, expectation bonus or global
 // correction. Competing nearby lines remain present for ambiguity checks.
-function localSupportCandidates(script, currentIndex, text, {ahead = T.nearbyAhead, behind = T.nearbyBehind, crossDirections = false} = {}) {
+function localSupportCandidates(script, currentIndex, text, {ahead = T.nearbyAhead, behind = T.nearbyBehind, crossDirections = false, phoneticMinimum = S.phoneticConfidence} = {}) {
   const heard = normalizeText(text).slice(-MAX_HEARD);
   let to = Math.min(script.entries.length - 1, currentIndex + ahead);
   for (let i = currentIndex + 1; i <= to; i++) {
@@ -1108,7 +1121,7 @@ function localSupportCandidates(script, currentIndex, text, {ahead = T.nearbyAhe
   }
   const byIndex = new Map(align(heard, script, from, to, {local: true}).map(c => [c.index, c]));
   for (const c of align(heard, script, from, to, {local: true, phonetic: true})) {
-    if (c.phoneticMatches > 0 && c.confidence >= S.phoneticConfidence && c.matchedCharacters >= T.phoneticMinimumMatches &&
+    if (c.phoneticMatches > 0 && c.confidence >= phoneticMinimum && c.matchedCharacters >= T.phoneticMinimumMatches &&
       c.confidence > (byIndex.get(c.index)?.confidence ?? 0)) byIndex.set(c.index, c);
   }
   return [...byIndex.values()].filter(c => c.offset >= Math.min(2, c.length) && !script.entries[c.index].source.music);

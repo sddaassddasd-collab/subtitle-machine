@@ -229,3 +229,72 @@ test('insertion recovery cannot accept changed negation or cross a music boundar
     assert.notEqual(result.reason, 'nearby_insertions');
   }
 });
+
+test('contiguous tail particles wait without spending the prepared next cue', () => {
+  const s = show(['現在的問題在於他不快樂', '那他為什麼不快樂']);
+  s.say(s.lines[0].text);
+  const particle = s.say(s.lines[0].text + '嘛', {endMs: 1200,
+    words: [{word: s.lines[0].text, start: 0, end: 1}, {word: '嘛', start: 1, end: 1.2}]});
+  assert.equal(particle.shortOpening, undefined);
+  assert.equal(s.index(), 0);
+  const next = s.say('那', {itemId: 'next', startMs: 1300, endMs: 1400});
+  assert.equal(next.index, 1);
+});
+
+test('a legitimate one-character particle cue and particle speech after a pause still trigger', () => {
+  for (const [next, gap] of [['啊', 0], ['那他為什麼不快樂', 500]]) {
+    const s = show(['目前這句已經說完了', next]); s.say(s.lines[0].text);
+    assert.equal(s.say('啊', {itemId: 'next', startMs: 1000 + gap, endMs: 1100 + gap}).index, 1);
+  }
+});
+
+test('a weak nearby substitution waits for a distinct timed successor cue before recovery', () => {
+  const s = show(['你又來了這樣根本沒用', '你的方法才沒用', '不不不', '二位',
+    '你們又沒找到問題核心了', '我說過', '現在的問題在於他不快樂']);
+  s.say('你又來了這樣', {endMs: 1000});
+  const weak = {itemId: 'weak', startMs: 2000, endMs: 4000,
+    words: [{word: '你們又沒有找到文青的核心了', start: 2, end: 4}]};
+  s.say('你們又沒有找到文青的核心了', weak);
+  assert.equal(s.index(), 0);
+  s.say('你們又沒有找到文青的核心了', {...weak, endMs: 4100});
+  assert.equal(s.index(), 0, 'revising the same speech is not independent support');
+  const result = s.say('我說過', {itemId: 'successor', startMs: 4500, endMs: 5000,
+    words: [{word: '我說過', start: 4.5, end: 5}]});
+  assert.equal(result.index, 5);
+  assert.equal(result.reason, 'independent_cue_recovery');
+  assert.equal(result.completed, false);
+});
+
+test('weak recovery rejects negation changes, missing word clocks and expired support', () => {
+  for (const mode of ['negation', 'untimed', 'expired', 'overlap']) {
+    const s = show(['你又來了這樣根本沒用', '你的方法才沒用', '不不不', '二位',
+      '你們又沒找到問題核心了', '我說過']);
+    s.say('你又來了這樣', {endMs: 1000});
+    const text = mode === 'negation' ? '你們又沒有不找到文青的核心了' : '你們又沒有找到文青的核心了';
+    s.say(text, {itemId: 'weak', startMs: 2000, endMs: 4000,
+      words: mode === 'untimed' ? undefined : [{word: text, start: 2, end: 4}]});
+    const startMs = mode === 'expired' ? 14000 : mode === 'overlap' ? 3500 : 4500;
+    const result = s.say('我說過', {itemId: 'next', startMs, endMs: startMs + 500,
+      words: [{word: '我說過', startMs, endMs: startMs + 500}]});
+    assert.notEqual(result.reason, 'independent_cue_recovery', mode);
+  }
+});
+
+for (const replay of require('./fixtures/tail-particle-rehearsals.json')) {
+  test(`recorded trailing 嘛 does not advance rehearsal ${replay.source.slice(0, 8)}`, () => {
+    const s = show(replay.lines);
+    for (const event of replay.events) s.say(event.text, event);
+    assert.equal(s.index(), 0);
+  });
+}
+
+test('a contradictory rewrite invalidates a weak cue hypothesis before later support', () => {
+  const s = show(['你又來了這樣根本沒用', '你的方法才沒用', '不不不', '二位', '你們又沒找到問題核心了', '我說過']);
+  s.say('你又來了這樣', {endMs: 1000});
+  for (const [text, endMs] of [['你們又沒有找到文青的核心了', 4000], ['你們又沒有不找到文青的核心了', 4100]]) {
+    s.say(text, {itemId: 'weak', startMs: 2000, endMs, words: [{word: text, startMs: 2000, endMs}]});
+  }
+  const result = s.say('我說過', {itemId: 'next', startMs: 4500, endMs: 5000,
+    words: [{word: '我說過', startMs: 4500, endMs: 5000}]});
+  assert.notEqual(result.reason, 'independent_cue_recovery');
+});

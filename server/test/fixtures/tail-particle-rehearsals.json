@@ -1,0 +1,250 @@
+[
+  {
+    "source": "566af67d-0040-4262-8922-b83b2e74e5ba",
+    "lines": [
+      {
+        "text": "現在的問題在於他不快樂，",
+        "type": "dialogue"
+      },
+      {
+        "text": "那他為什麼不快樂？",
+        "type": "dialogue"
+      }
+    ],
+    "events": [
+      {
+        "text": "現在的問題在於他不快樂",
+        "itemId": "deepgram-648.780",
+        "startMs": 648780,
+        "endMs": 653020,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "現在",
+            "endMs": 650460,
+            "startMs": 649020,
+            "confidence": 0.87841797,
+            "punctuatedWord": "現在"
+          },
+          {
+            "word": "的問題",
+            "endMs": 651180.05,
+            "startMs": 650460,
+            "confidence": 0.9941406,
+            "punctuatedWord": "的問題"
+          },
+          {
+            "word": "在於",
+            "endMs": 651980.04,
+            "startMs": 651180.05,
+            "confidence": 0.9941406,
+            "punctuatedWord": "在於"
+          },
+          {
+            "word": "他",
+            "endMs": 652300.05,
+            "startMs": 651980.04,
+            "confidence": 0.8798828,
+            "punctuatedWord": "他"
+          },
+          {
+            "word": "不",
+            "endMs": 652540.0399999999,
+            "startMs": 652300.05,
+            "confidence": 0.99902344,
+            "punctuatedWord": "不"
+          },
+          {
+            "word": "快樂",
+            "endMs": 653020,
+            "startMs": 652540.0399999999,
+            "confidence": 1,
+            "punctuatedWord": "快樂"
+          }
+        ]
+      },
+      {
+        "text": "現在的問題在於他不快樂嘛",
+        "itemId": "deepgram-648.780",
+        "startMs": 648780,
+        "endMs": 653420.0399999999,
+        "isFinal": true,
+        "words": [
+          {
+            "word": "現在",
+            "endMs": 650060.06,
+            "startMs": 649020,
+            "confidence": 0.9135742,
+            "punctuatedWord": "現在"
+          },
+          {
+            "word": "的問題",
+            "endMs": 651180.05,
+            "startMs": 650460,
+            "confidence": 0.99609375,
+            "punctuatedWord": "的問題"
+          },
+          {
+            "word": "在於",
+            "endMs": 651980.04,
+            "startMs": 651180.05,
+            "confidence": 0.99609375,
+            "punctuatedWord": "在於"
+          },
+          {
+            "word": "他",
+            "endMs": 652300.05,
+            "startMs": 651980.04,
+            "confidence": 0.90527344,
+            "punctuatedWord": "他"
+          },
+          {
+            "word": "不",
+            "endMs": 652540.0399999999,
+            "startMs": 652300.05,
+            "confidence": 0.99902344,
+            "punctuatedWord": "不"
+          },
+          {
+            "word": "快樂",
+            "endMs": 653100.04,
+            "startMs": 652540.0399999999,
+            "confidence": 1,
+            "punctuatedWord": "快樂"
+          },
+          {
+            "word": "嘛",
+            "endMs": 653420.0399999999,
+            "startMs": 653100.04,
+            "confidence": 0.7705078,
+            "punctuatedWord": "嘛"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "source": "41519751-d6b3-4f0e-8991-d0b8990acb07",
+    "lines": [
+      {
+        "text": "現在的問題在於他不快樂，",
+        "type": "dialogue"
+      },
+      {
+        "text": "那他為什麼不快樂？",
+        "type": "dialogue"
+      }
+    ],
+    "events": [
+      {
+        "text": "現在的問題在於他不快樂,",
+        "itemId": "deepgram-644.480",
+        "startMs": 644480,
+        "endMs": 648560,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "現在",
+            "endMs": 646079.9600000001,
+            "startMs": 644720,
+            "confidence": 0.8569336,
+            "punctuatedWord": "現在"
+          },
+          {
+            "word": "的問題",
+            "endMs": 646800,
+            "startMs": 646079.9600000001,
+            "confidence": 0.99316406,
+            "punctuatedWord": "的問題"
+          },
+          {
+            "word": "在於",
+            "endMs": 647600,
+            "startMs": 646800,
+            "confidence": 0.9819336,
+            "punctuatedWord": "在於"
+          },
+          {
+            "word": "他",
+            "endMs": 647839.97,
+            "startMs": 647600,
+            "confidence": 0.7783203,
+            "punctuatedWord": "他"
+          },
+          {
+            "word": "不",
+            "endMs": 648160,
+            "startMs": 647839.97,
+            "confidence": 0.9951172,
+            "punctuatedWord": "不"
+          },
+          {
+            "word": "快樂",
+            "endMs": 648560,
+            "startMs": 648160,
+            "confidence": 0.9980469,
+            "punctuatedWord": "快樂"
+          }
+        ]
+      },
+      {
+        "text": "現在的問題在於他不快樂嘛",
+        "itemId": "deepgram-644.480",
+        "startMs": 644480,
+        "endMs": 649040,
+        "isFinal": false,
+        "words": [
+          {
+            "word": "現在",
+            "endMs": 645760,
+            "startMs": 644720,
+            "confidence": 0.95703125,
+            "punctuatedWord": "現在"
+          },
+          {
+            "word": "的問題",
+            "endMs": 646800,
+            "startMs": 646079.9600000001,
+            "confidence": 0.9951172,
+            "punctuatedWord": "的問題"
+          },
+          {
+            "word": "在於",
+            "endMs": 647600,
+            "startMs": 646800,
+            "confidence": 0.9951172,
+            "punctuatedWord": "在於"
+          },
+          {
+            "word": "他",
+            "endMs": 647920,
+            "startMs": 647600,
+            "confidence": 0.91845703,
+            "punctuatedWord": "他"
+          },
+          {
+            "word": "不",
+            "endMs": 648160,
+            "startMs": 647920,
+            "confidence": 0.99902344,
+            "punctuatedWord": "不"
+          },
+          {
+            "word": "快樂",
+            "endMs": 648720,
+            "startMs": 648160,
+            "confidence": 1,
+            "punctuatedWord": "快樂"
+          },
+          {
+            "word": "嘛",
+            "endMs": 649040,
+            "startMs": 648720,
+            "confidence": 0.74853516,
+            "punctuatedWord": "嘛"
+          }
+        ]
+      }
+    ]
+  }
+]

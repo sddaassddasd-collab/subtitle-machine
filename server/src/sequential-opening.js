@@ -28,7 +28,19 @@ function newOpeningSpeech(plan, event) {
 
 function matchOpening(plan, script, event) {
   if (!plan) return null;
-  const speech = newOpeningSpeech(plan, event), entry = script.entries[plan.index];
+  let speech = newOpeningSpeech(plan, event);
+  const entry = script.entries[plan.index];
+  if (speech && plan.completed && !plan.direction &&
+    speech.startMs - plan.observed.endMs <= T.tailParticleGapMs && entry?.text !== normalizeText(speech.text)) {
+    const words = alignedWords(speech);
+    const particle = text => text && Array.from(normalizeText(text)).every(c => T.tailParticles.includes(c));
+    // Only whole timed words may be removed; never invent a boundary inside
+    // a provider word. Legitimate short next cues and speech after a pause stay fast.
+    let skip = 0;
+    while (skip < words.length && particle(words[skip].text) && !entry.text.startsWith(normalizeText(words[skip].text))) skip++;
+    if (skip) speech = skip === words.length ? null : wordSpeech(speech, words[skip].id, words.at(-1).id);
+    else if (!words.length && particle(speech.text) && !entry.text.startsWith(normalizeText(speech.text))) speech = null;
+  }
   const heard = Array.from(normalizeText(speech?.text));
   const count = Math.min(T.triggerOpeningCharacters, heard.length, entry.length);
   // A completed cue owns the boundary: new speech triggers the expected next
