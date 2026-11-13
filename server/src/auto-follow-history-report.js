@@ -10,9 +10,10 @@ const sourceLabel = source => SOURCE_LABELS[source] || source || '';
 function historyReport({run, events, scope}) {
   const contexts = new Map(), visits = new Map(), decisions = new Map(), rows = [];
   const onsetReviews = new Map();
-  const diagnosticTotals = {transcriptRevisions: 0, traceSamples: 0, acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
+  const diagnosticTotals = {trackingComparisons: 0, transcriptRevisions: 0, traceSamples: 0, acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
   const windows = new Set(), streams = [];
   for (const event of events) {
+    if (event.type === 'tracking_comparison') diagnosticTotals.trackingComparisons++;
     if (event.type === 'transcript_revision') diagnosticTotals.transcriptRevisions++;
     if (event.type === 'decision_trace') { windows.add(event.windowId); diagnosticTotals.traceSamples += event.samples.length; }
     if (event.type === 'acoustic_summary') diagnosticTotals.acousticSummaries++;
@@ -97,6 +98,7 @@ function historyReport({run, events, scope}) {
       '音訊時間以收音串流為單位，串流重啟會歸零；請連同串流 ID、事件序號及伺服器時間核對。',
       '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。',
       '起音預推另存核對過程；逾時或離開前未確認仍維持未確認，不自動視為辨識成功。',
+      'tracking_comparison 為獨立位置追蹤與該段語音處理後的畫面狀態比較，僅記錄、不控制換格；共用辨識結果，不算獨立音訊佐證。位置不同可能是正常預推或追蹤尚未確認，不等同誤跳。',
       'joint_text_semantic 是同一段穩定長句與語意共同佐證，不代表兩份獨立音訊證據，且不代表句尾確認。'],
     events};
 }

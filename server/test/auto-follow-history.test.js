@@ -532,3 +532,39 @@ test('disconnect cause and heartbeat diagnostics survive ingestion and export', 
   assert.equal(e.lastHeartbeatAgeMs, 25000);
   await h.end(s.id);
 });
+
+test('independent tracking comparisons export with revision links without creating cue visits', async () => {
+  const {session: s, history: h} = fixture('shadow-comparison');
+  const id = await h.start(s);
+  h.revision(s.id, '第一句台詞', {revisionId: 'shadow-revision', itemId: 'a', streamId: 'provider',
+    startMs: 0, endMs: 1000, isFinal: true}, {reason: 'text_matched'});
+  h.event(s.id, 'tracking_comparison', {revisionId: 'shadow-revision', streamId: 'capture', providerStreamId: 'provider',
+    mode: 'observe_only', relationship: 'awaiting_confirmation', independentEvidence: false,
+    audioStartMs: 0, audioEndMs: 1000, display: {index: 1, predicted: true}, locator: {index: 0, confirmedIndex: 0}});
+  const report = historyReport(await h.read(s.id, id));
+  assert.equal(report.diagnostics.trackingComparisons, 1);
+  assert.equal(report.totals.visits, 1);
+  const comparison = report.events.find(e => e.type === 'tracking_comparison');
+  assert.equal(comparison.revisionId, report.events.find(e => e.type === 'transcript_revision').id);
+  assert.equal(comparison.locator.index, 0); assert.equal(comparison.display.index, 1);
+  assert.equal(comparison.independentEvidence, false);
+  await h.end(s.id);
+});
+
+test('deferred comparisons retain the source context and cannot leak into a new run', async () => {
+  const {session: s, history: h} = fixture('shadow-context');
+  const id = await h.start(s);
+  await h.revision(s.id, '第一句台詞', {revisionId: 'source-context', itemId: 'a', streamId: 'provider'}, {reason: 'text_matched'});
+  s.cells.push({id: 'act-2', name: '第二幕'}); s.selectedCellId = 'act-2'; await h.sync(s);
+  await h.event(s.id, 'tracking_comparison', {revisionId: 'source-context', relationship: 'aligned'});
+  let report = historyReport(await h.read(s.id, id));
+  assert.equal(report.events.find(e => e.type === 'tracking_comparison').contextId,
+    report.events.find(e => e.id === 'source-context').contextId);
+  assert.notEqual(report.events.find(e => e.type === 'tracking_comparison').contextId, report.contexts.at(-1).contextId);
+  await h.end(s.id); const next = await h.start(s, {fresh: true});
+  await h.event(s.id, 'tracking_comparison', {revisionId: 'source-context', relationship: 'aligned'});
+  await h.event(s.id, 'tracking_comparison', {revisionId: 'missing-revision', relationship: 'aligned'});
+  report = historyReport(await h.read(s.id, next));
+  assert.equal(report.events.filter(e => e.type === 'tracking_comparison').length, 0);
+  await h.end(s.id);
+});

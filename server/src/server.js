@@ -1,4 +1,5 @@
 const express = require('express');
+const {ShadowFollow} = require('./shadow-follow');
 const { resolveProjectorLanguages } = require('./projector-languages');
 const cors = require('cors');
 const http = require('http');
@@ -1839,6 +1840,7 @@ function removeSession(session, reason = 'session deleted') {
   viewerDemandBroadcastTimers.delete(session.id);
   clearLatestRoomStateKeyframesForSession(session.id);
   clearScheduledCurrentIndexPersist(session.id);
+  autoFollowStates.get(session.id)?.shadow?.dispose();
   autoFollowStates.delete(session.id);
   sessions.delete(session.id);
   io.to(`control:${session.id}`).emit('control:deleted', {
@@ -9238,9 +9240,10 @@ function followHistoryClock(sessionId) {
     audioMs: Number.isFinite(stream?.autoFollowAudioMs) ? stream.autoFollowAudioMs : null};
 }
 
-function createAutoFollowState() {
+function createAutoFollowState(sessionId) {
   return {
     tracker: createTracker(),
+    shadow: new ShadowFollow({record: data => autoFollowHistory.event(sessionId, 'tracking_comparison', data)}),
     status: AUTO_FOLLOW_STATUS.IDLE,
     listening: false,
     started: false,
@@ -9319,7 +9322,7 @@ function getAutoFollowState(sessionId) {
       ? sessionId.trim()
       : DEFAULT_SESSION_ID;
   if (!autoFollowStates.has(key)) {
-    autoFollowStates.set(key, createAutoFollowState());
+    autoFollowStates.set(key, createAutoFollowState(key));
   }
   const state = autoFollowStates.get(key);
   const cellId = sessions.get(key)?.selectedCellId || null;
@@ -9333,7 +9336,8 @@ function getAutoFollowState(sessionId) {
     if (session.captionMode === 'script') session.projectorDisplayMode = 'script';
     autoFollowHistory.sync(session);
     recordOnsetReviewEvents(key, state.onsetReview.close('context_changed'));
-    Object.assign(state, createAutoFollowState(), {
+    state.shadow?.dispose();
+    Object.assign(state, createAutoFollowState(key), {
       tracker: createTracker({ ignoreBeforeMs: transcriptionStreams.get(key)?.autoFollowAudioMs ?? -1 }),
       status: AUTO_FOLLOW_STATUS.LISTENING,
       message: '場次、演出語言或劇本欄已切換，正在重新定位。',
@@ -9346,9 +9350,10 @@ function getAutoFollowState(sessionId) {
 
 function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} = {}) {
   const previousState = autoFollowStates.get(sessionId);
+  previousState?.shadow?.dispose();
   recordOnsetReviewEvents(sessionId, autoFollowStates.get(sessionId)?.onsetReview.close('tracker_reset') || []);
   const nextState = {
-    ...createAutoFollowState(),
+    ...createAutoFollowState(sessionId),
     ...patch,
     updatedAt: Date.now(),
   };
@@ -9362,6 +9367,7 @@ function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} 
     const sameScript = previousState?.cellId === nextState.cellId && previousState.followingKey === nextState.followingKey &&
       previousState.tracker.script && prepareScript(lines, previousState.tracker.script) === previousState.tracker.script;
     if (preservePosition && sameScript) {
+      nextState.shadow.inheritPosition(previousState.shadow);
       nextState.performance.lock = previousState.performance.lock;
       nextState.performance.rates = [...previousState.performance.rates];
       nextState.performance.usedGroups = new Set(previousState.performance.usedGroups);
@@ -9753,6 +9759,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     lastTranscriptAudioLagMs: Number.isFinite(audioMs) && Number.isFinite(options.endMs)
       ? Math.max(0, audioMs - options.endMs) : null,
   });
+  const shadowOriginIndex = session.currentIndex;
+  try {
   let result;
   try {
     result = session.automaticLive ? locateLiveScript(state, followingLines, transcript, options)
@@ -9890,6 +9898,20 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   if (holdingCaption(session)) {
     broadcastTranscriptionState(sessionId); broadcastLiveTranscriptionState(sessionId, stream);
   }
+  } finally {
+    // Observational only: never await, publish a cue or call the semantic model.
+    try {
+      state.shadow.enqueue({lines: followingLines, event: {...options, text: transcript},
+        seedIndex: shadowOriginIndex, streamId: stream?.historyStreamId || null,
+        gapFenceMs: stream?.captureGapFenceMs ?? -1, ignoreBeforeMs: state.tracker.ignoreBeforeMs,
+        display: {index: session.currentIndex, source: session.automaticLive ? 'live' : 'script',
+          predicted: state.tracker.prediction?.index === session.currentIndex,
+          holding: state.captionDisplay.holding(session.currentIndex, session.selectedCellId),
+          hidden: session.displayEnabled === false, decisionId: state.lastDecision?.id || null,
+          decisionAt: state.lastDecision?.decidedAt || null}});
+    } catch {} // Shadow scheduling cannot change the existing output path.
+  }
+
 }
 
 function handleSemanticFollow(session, stream, lines, state, transcript, options, result, receivedAt) {

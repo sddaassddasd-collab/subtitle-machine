@@ -44,7 +44,7 @@ class AutoFollowHistory {
   entry(sessionId) {
     if (!this.entries.has(sessionId)) this.entries.set(sessionId, {
       tail: Promise.resolve(), loaded: false, run: null, context: null, pending: [], timer: null,
-      error: '', lost: 0, diagnosticGate: new Map(), confirmGate: new Map(), enabled: false, queued: 0,
+      error: '', lost: 0, revisionContexts: new Map(), diagnosticGate: new Map(), confirmGate: new Map(), enabled: false, queued: 0,
       trace: new FollowTrace(), acousticSummary: null, captureSummary: null,
       pendingBytes: 0, queuedBytes: 0,
     });
@@ -94,14 +94,18 @@ class AutoFollowHistory {
     if (entry.pendingBytes + bytes > this.maxPendingBytes) {
       entry.lost++; entry.error = '歷程待保存資料過多，部分事件未記錄'; return null;
     }
+    if (type === 'transcript_revision') {
+      entry.revisionContexts.set(event.id, {runId: entry.run.id, contextId: event.contextId});
+      while (entry.revisionContexts.size > 256) entry.revisionContexts.delete(entry.revisionContexts.keys().next().value);
+    }
     entry.run.updatedAt = recordedAt;
     entry.pending.push(event);
     entry.pendingBytes += bytes;
     const totals = entry.run.diagnostics ||= {transcriptRevisions: 0, traceSamples: 0, traceWindows: 0,
       acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
     const countKey = {transcript_revision: 'transcriptRevisions', acoustic_summary: 'acousticSummaries',
-      capture_summary: 'captureSummaries', problem_mark: 'problemMarks'}[type];
-    if (countKey) totals[countKey]++;
+      capture_summary: 'captureSummaries', problem_mark: 'problemMarks', tracking_comparison: 'trackingComparisons'}[type];
+    if (countKey) totals[countKey] = (totals[countKey] || 0) + 1;
     if (type === 'decision_trace') {
       totals.traceSamples += event.samples.length;
       if (entry.run.lastTraceWindowId !== event.windowId) { totals.traceWindows++; entry.run.lastTraceWindowId = event.windowId; }
@@ -294,6 +298,11 @@ class AutoFollowHistory {
     if (!this.entries.has(sessionId)) return;
     const at = this.now();
     return this.queue(sessionId, entry => {
+      if (type === 'tracking_comparison') {
+        const source = entry.revisionContexts.get(data.revisionId);
+        if (!source || source.runId !== entry.run?.id) return;
+        data = {...data, contextId: source.contextId};
+      }
       this.append(entry, type, {at, ...data});
       if (['audio_reset', 'problem_mark'].includes(type)) this.saveTrace(entry, entry.trace.trigger(at, type, {index: data.index, reason: data.reason}));
     }, {background: true});

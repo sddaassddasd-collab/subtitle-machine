@@ -75,8 +75,10 @@ const SEMANTIC_SETTINGS = Object.freeze({
   sequentialConfidence: .9, sequentialMinimumCharacters: 3, sequentialMaximumCharacters: 8,
   sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
+const SHADOW_SETTINGS = Object.freeze({version: 1, mode: 'observe_only', maximumQueue: 64});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 17, onset: 3, acoustic: 4, diagnostics: 26, semantic: 9, performance: 9, captionCorrection: 1, captionPresentation: 4}),
+  versions: Object.freeze({text: 17, onset: 3, acoustic: 4, diagnostics: 27, semantic: 9, performance: 9, shadow: 1, captionCorrection: 1, captionPresentation: 4}),
+  shadow: SHADOW_SETTINGS,
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,
   performance: require('./performance-follow').PERFORMANCE_SETTINGS,
@@ -85,4 +87,4 @@ const FOLLOW_SETTINGS = Object.freeze({
   transport: require('./transcription-health').TRANSPORT_SETTINGS,
   pcmTransport: require('./pcm-capture').PCM_CAPTURE_SETTINGS,
 });
-module.exports = {TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS};
+module.exports = {SHADOW_SETTINGS, TEXT_SETTINGS, ONSET_SETTINGS, ACOUSTIC_SETTINGS, DIAGNOSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS};

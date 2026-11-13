@@ -136,6 +136,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         storage: () => serializeSessionForStorage(session),
         follower: () => getPerformanceFollower(session),
         tracker: () => getAutoFollowState(session.id).tracker,
+        shadow: () => getAutoFollowState(session.id).shadow,
         tick: (ms, now) => applyPerformanceAction(session, getPerformanceFollower(session).tick(ms, now)),
         restartTracking: () => resetAutoFollowState(session.id, {}, {preservePosition: true}),
         counts: () => ({ structures: structureCalls, lines: lineCalls }),
@@ -157,6 +158,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           const active = transcriptionStreams.get(session.id);
           clearTimeout(active?.initTimeout); clearInterval(active?.healthTimer); clearInterval(active?.keepAliveTimer);
           active?.providerQueue?.close();
+          getAutoFollowState(session.id).shadow?.dispose();
           referenceRuntime.dispose();
           for (const timer of currentIndexPersistTimers.values()) clearTimeout(timer);
           for (const timer of latestRoomStateKeyframes.values()) clearTimeout(timer);

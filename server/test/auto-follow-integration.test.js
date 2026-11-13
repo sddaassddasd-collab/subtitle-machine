@@ -1,4 +1,10 @@
-const { test } = require('node:test');
+const { test, afterEach } = require('node:test');
+const {ShadowFollow} = require('../src/shadow-follow');
+const activeContexts = new Set();
+afterEach(() => {
+  for (const context of activeContexts) for (const state of context.autoFollowStates.values()) state.shadow?.dispose();
+  activeContexts.clear();
+});
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -30,7 +36,7 @@ function fixture(mode = 'auto') {
   const emissions = [];
   const context = vm.createContext({
     Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
-    ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview,
+    ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview, ShadowFollow,
     TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
     AUTO_FOLLOW_AUDIO_LEVEL_THRESHOLD: 0.04, AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD: 0.018,
@@ -76,6 +82,7 @@ function fixture(mode = 'auto') {
   loadFunctions(context, 'getViewerPayload', 'getProjectorLayoutPayload');
   loadFunctions(context, 'broadcastLiveTranscriptionState', 'getLiveTranslationPatchPayload');
   loadFunctions(context, 'broadcastLiveTranslationState', 'broadcastViewerState');
+  activeContexts.add(context);
   return { session, context, emissions };
 }
 
