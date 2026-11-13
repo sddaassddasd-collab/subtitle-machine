@@ -2,6 +2,7 @@ const {TEXT_SETTINGS: T} = require('./follow-settings');
 const {normalizeText} = require('./follow-text');
 const {alignedWords, suffixSpeech} = require('./word-evidence');
 const {preservedSpeech} = require('./return-evidence');
+const {correctProvisional} = require('./location-safety');
 
 function expireBackwardRecovery(tracker, currentIndex, event) {
   const old = tracker.backwardRecovery;
@@ -13,9 +14,14 @@ function expireBackwardRecovery(tracker, currentIndex, event) {
 // nonoverlapping utterance on the earlier path can authorize a distant rewind.
 function backwardRecovery(tracker, script, currentIndex, event, best, ambiguous) {
   expireBackwardRecovery(tracker, currentIndex, event);
-  if (!best || best.index >= currentIndex - T.nearbyBehind) return null;
-  const old = tracker.backwardRecovery;
+  if (!best) return null;
   const speech = suffixSpeech(event, best.heard || event.text);
+  if (correctProvisional(tracker, script, currentIndex, best, event, ambiguous, speech))
+    return {allowed: true, correctingProvisional: true, supportingIndex: tracker.provisionalLocation.fromIndex, speech};
+  const nearSuffix = best.index < currentIndex && best.recovered && best.evidence < T.backwardSuffixEvidence &&
+    !normalizeText(event.text).includes(script.entries[best.index].text);
+  if (best.index >= currentIndex - T.nearbyBehind && !nearSuffix) return null;
+  const old = tracker.backwardRecovery;
   const timed = speech && alignedWords(speech).length;
   const strong = !ambiguous && !best.phonetic && !best.context &&
     best.confidence >= T.backwardConfidence && best.evidence >= T.backwardEvidence;

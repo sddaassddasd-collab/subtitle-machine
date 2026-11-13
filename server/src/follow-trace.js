@@ -50,7 +50,7 @@ class FollowTrace {
 function trackerSnapshot(tracker, currentIndex) {
   return {currentIndex, located: tracker.located, progressIndex: tracker.progressIndex, progress: tracker.progress,
     captureRecovery: tracker.captureRecovery, supportedRecovery: tracker.supportedRecovery || null,
-    backwardRecovery: tracker.backwardRecovery || null,
+    backwardRecovery: tracker.backwardRecovery || null, provisionalLocation: tracker.provisionalLocation || null,
     armedIndex: tracker.armedIndex, preparedIndex: tracker.preparedIndex,
     prediction: tracker.prediction ? {index: tracker.prediction.index, source: tracker.prediction.source || 'onset', onsetMs: tracker.prediction.onsetMs} : null,
     openingPlan: tracker.openingPlan ? {fromIndex: tracker.openingPlan.fromIndex, index: tracker.openingPlan.index,

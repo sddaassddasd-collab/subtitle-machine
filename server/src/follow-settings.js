@@ -16,6 +16,8 @@ const TEXT_SETTINGS = Object.freeze({
   contextBonus: 0.04, contextConfidence: 0.85, expectationBonus: 0.025,
   openingMinEvidence: 2, sequenceOpeningMinEvidence: 3, nearOpeningMaxEvidence: 12,
   triggerOpeningCharacters: 2, tailParticles: '嘛啊呀呢喔哦啦吧唷', tailParticleGapMs: 250,
+  forwardMinimumMatches: 8, backwardSuffixEvidence: 8, pauseRecoveryAfterMs: 30000,
+  pauseRecoveryConfidence: .94, pauseRecoveryMatches: 8, provisionalLocationMs: 120000, provisionalCorrectionCoverage: .7,
   backwardSupportMs: 10000, backwardConfidence: .9, backwardEvidence: 4,
   supportedSuccessorConfidence: .86, supportedSuccessorMatches: 4,
   phraseRecoveryAhead: 3, phraseRecoveryIsland: 2, phraseRecoveryMatches: 8,
@@ -75,9 +77,9 @@ const SEMANTIC_SETTINGS = Object.freeze({
   sequentialConfidence: .9, sequentialMinimumCharacters: 3, sequentialMaximumCharacters: 8,
   sequentialLiteralMatches: 2, sequentialCoverage: .5,
   weakConfidence: .70, weakEvidence: 4, weakLiteralMatches: 3, weakSteps: 2, maximumMatches: 3, spanMinimumCharacters: 3});
-const SHADOW_SETTINGS = Object.freeze({version: 1, mode: 'observe_only', maximumQueue: 64});
+const SHADOW_SETTINGS = Object.freeze({version: 2, mode: 'observe_only', maximumQueue: 64});
 const FOLLOW_SETTINGS = Object.freeze({
-  versions: Object.freeze({text: 17, onset: 3, acoustic: 4, diagnostics: 27, semantic: 9, performance: 9, shadow: 1, captionCorrection: 1, captionPresentation: 4}),
+  versions: Object.freeze({text: 18, onset: 3, acoustic: 4, diagnostics: 28, semantic: 9, performance: 10, shadow: 2, captionCorrection: 1, captionPresentation: 4}),
   shadow: SHADOW_SETTINGS,
   text: TEXT_SETTINGS, onset: ONSET_SETTINGS, acoustic: ACOUSTIC_SETTINGS, diagnostics: DIAGNOSTIC_SETTINGS,
   semantic: SEMANTIC_SETTINGS,

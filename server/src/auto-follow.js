@@ -7,6 +7,7 @@ const {pinyin} = require('pinyin-pro');
 const {supportedRecovery, expireSupportedRecovery} = require('./supported-recovery');
 const {phraseRecovery} = require('./phrase-recovery');
 const {backwardRecovery, expireBackwardRecovery} = require('./backward-recovery');
+const {forwardRejection, pauseRecovery, provisionalLocation} = require('./location-safety');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
 const MAX_HEARD = T.maxHeard;
@@ -82,7 +83,7 @@ function createTracker({ ignoreBeforeMs = -1 } = {}) {
     weakPath: {hypotheses: [], lastMs: -1},
     wordPath: {hypotheses: []},
     shortOpenings: false, openingPlan: null, selectedStartIndex: null,
-    captureRecovery: null, supportedRecovery: null, backwardRecovery: null,
+    captureRecovery: null, supportedRecovery: null, backwardRecovery: null, provisionalLocation: null,
   };
 }
 
@@ -245,7 +246,7 @@ function canRecoverShort(tracker, script, currentIndex, best, event) {
 // tolerance. Full-script relocation keeps the strict, ordered edit distance.
 function recoveryAnchor(tracker, currentIndex) {
   const confirmed = tracker.lastLocated;
-  if (confirmed?.index === currentIndex) return confirmed;
+  if (confirmed?.index === currentIndex && !confirmed.provisional) return confirmed;
   const prediction = tracker.prediction;
   // A pending onset is not a confirmation. It can, however, retain the
   // established path from the immediately preceding confirmed dialogue.
@@ -567,7 +568,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   const script = preparedScript || prepareScript(lines, tracker.script);
   if (tracker.script && script !== tracker.script) {
-    tracker.supportedRecovery = null; tracker.backwardRecovery = null;
+    tracker.supportedRecovery = null; tracker.backwardRecovery = null; tracker.provisionalLocation = null;
     // Edits invalidate old alignment history but preserve the audio ordering fence.
     clearPreparation(tracker);
     tracker.items.clear();
@@ -791,17 +792,20 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     (best.evidence < 3 && !expectedShort && !best.openingConfirmed && !best.contextualShort)) {
     return uncertain(ambiguous ? 'ambiguous_text' : 'insufficient_text_evidence', '有多處相似台詞，等待更多內容確認。');
   }
+  const forwardReason = forwardRejection(script, currentIndex, best, event, matchedSpans(best, script));
+  if (forwardReason) return uncertain(forwardReason, '相似短片語不足以跨格，等待更具體的內容。');
   // Revisions/finalization of one ASR item must not rewind that item's progress.
   if (item.maxIndex !== null && best.index < item.maxIndex) return {ignored: true, reason: 'same_item_rewind'};
   const rewind = backwardRecovery(tracker, script, currentIndex, event, best, ambiguous && !exactUnique);
   if (rewind && !rewind.allowed)
     return uncertain('backward_support_required', '較早位置需要後續獨立台詞佐證，暫時維持目前字幕。');
   if (rewind?.allowed) {
+    tracker.provisionalLocation = null;
     best = {...best, backwardSupported: true, supportingIndex: rewind.supportingIndex};
     const speech = rewind.speech;
     applySemanticLocation(tracker, lines, best.index, speech, {prepare: false});
     return {index: best.index, candidate: {...best, speech, locationOnly: true}, progress: 0, completed: false, spans: [],
-      evidence: {startMs: speech.startMs, endMs: speech.endMs}, reason: 'independent_backward_recovery',
+      evidence: {startMs: speech.startMs, endMs: speech.endMs}, reason: rewind.correctingProvisional ? 'provisional_location_corrected' : 'independent_backward_recovery',
       status: 'corrected', message: '已依兩句獨立語音確認較早劇本位置，持續核對內容。'};
   }
   const relocation = best.index !== currentIndex && best.index !== next;
@@ -809,12 +813,13 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   const insertedRecovery = relocation && canRecoverInsertedCue(tracker, script, currentIndex, best, event, ambiguous);
   const recoveredNearby = insertedRecovery || (relocation && canRecoverNearby(tracker, script, currentIndex, best, event, ambiguous));
   const captureReacquired = relocation && canReacquireCapture(tracker, script, currentIndex, best, event);
+  const pauseReacquired = relocation && pauseRecovery(tracker, script, currentIndex, best, event, ambiguous);
   if (relocation) {
     if (best.confidence < (insertedRecovery ? T.minimumConfidence : best.weakPath ? T.weakPathConfidence : best.pathConfirmed ? T.minimumConfidence : T.strongConfidence) ||
       (!best.pathConfirmed && text.length < T.relocationEvidence && !recoveredNearby) || (ambiguous && !exactUnique && !best.pathConfirmed)) {
       return uncertain('relocation_requirements', '疑似跳詞，正在核對新的位置。');
     }
-    if (!best.pathConfirmed && !recoveredNearby && !captureReacquired && (!correction?.accepted || corrected.index !== best.index)) {
+    if (!best.pathConfirmed && !recoveredNearby && !captureReacquired && !pauseReacquired && (!correction?.accepted || corrected.index !== best.index)) {
       return uncertain('correction_pending', '疑似跳詞，等待後續語音確認。');
     }
   }
@@ -828,6 +833,8 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     // began before that guess. Old finals still cannot rewind the committed cue.
     tracker.referenceFence = null; tracker.referenceProgress = null;
   }
+  if (provisionalLocation(tracker, script, currentIndex, best, event, matchedSpans(best, script)))
+    best = {...best, locationOnly: true, provisionalLocation: true};
   tracker.progressIndex = best.index;
   tracker.progress = progress;
   tracker.located = true;
@@ -835,12 +842,13 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   tracker.sequence = { index: best.index, atMs: event.endMs,
     observed: { itemId: event.itemId, text, endMs: event.endMs } };
   tracker.lastLocated = {index: best.index, atMs: event.endMs, confidence: best.confidence,
-    literal: !best.phonetic && !best.trailingCharacters && !best.weakPath && best.evidence >= T.relocationEvidence};
+    provisional: best.provisionalLocation === true,
+    literal: !best.provisionalLocation && !best.phonetic && !best.trailingCharacters && !best.weakPath && best.evidence >= T.relocationEvidence};
   const entry = script.entries[best.index];
   const shortAnchor = best.confidence === 1 && best.evidence >= T.shortAnchorEvidence && !best.context &&
     entry.text.includes(best.heard) && !script.entries.some((e, i) => i !== best.index &&
       i >= best.index - T.nearbyBehind && i <= best.index + T.nearbyAhead && e.text.includes(best.heard));
-  if (!best.phonetic && !best.trailingCharacters && !best.weakPath &&
+  if (!best.provisionalLocation && !best.phonetic && !best.trailingCharacters && !best.weakPath &&
     best.confidence >= T.strongConfidence && (tracker.lastLocated.literal || shortAnchor))
     tracker.textAnchor = {...tracker.lastLocated, literal: true};
   const shortRecovery = recoveredNearby && best.evidence < T.recoveryMinimumEvidence;
@@ -875,7 +883,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
   }
   return {
     index: best.index, candidate: best, progress, completed, armedIndex: tracker.armedIndex,
-    reason: insertedRecovery ? 'nearby_insertions' : captureReacquired ? 'capture_reacquired' : best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
+    reason: pauseReacquired ? 'pause_reacquired' : insertedRecovery ? 'nearby_insertions' : captureReacquired ? 'capture_reacquired' : best.shortRecovery ? 'short_exact_recovery' : best.shortNext ? 'contextual_short_next' : best.weakPath ? 'weak_path_recovery' : best.pathConfirmed ? 'path_recovery' : best.phonetic ? 'local_phonetic' : recoveredNearby ? 'nearby_recovery' : caughtUp ? 'nearby_catch_up' : best.contextualShort ? 'contextual_short'
       : best.trailingCharacters ? 'trailing_tolerance' : best.colloquial ? 'local_colloquial' : best.recovered ? 'suffix_recovery'
       : best.openingConfirmed ? 'opening_confirmed' : 'text_matched',
     spans: matchedSpans(best, script),
@@ -962,7 +970,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
       result.evidence = {startMs: speech.startMs, endMs: speech.endMs};
     }
     tracker.selectedStartIndex = null;
-    tracker.openingPlan = (result.candidate?.phraseAnchored || result.candidate?.backwardSupported || result.reason === 'independent_cue_recovery') ? null
+    tracker.openingPlan = (result.candidate?.phraseAnchored || result.candidate?.provisionalLocation || result.candidate?.backwardSupported || result.reason === 'independent_cue_recovery') ? null
       : prepareOpening(script, result.index, {...event, completed: result.completed});
   } else {
     tracker.openingPlan = plan;
@@ -1078,6 +1086,7 @@ function applyReferencePosition(tracker, lines, index, evidence) {
     tracker.referenceFence = {index, audioMs: evidence.audioStartMs, decidedAudioMs: evidence.audioEndMs,
       priorItems: new Set(tracker.items.keys())};
   }
+  if (tracker.provisionalLocation?.index !== index) tracker.provisionalLocation = null;
   tracker.script = script; tracker.located = true; tracker.progressIndex = index;
   tracker.prediction = null;
   tracker.progress = Math.max(sameLine ? tracker.progress : 0, evidence.completed ? 1 : evidence.progress);
@@ -1157,6 +1166,7 @@ function applySemanticLocation(tracker, lines, index, event, {prepare = true} = 
   if (!script.entries[index]?.text || script.entries[index].source.music ||
     event.endMs <= tracker.ignoreBeforeMs) return false;
   clearPreparation(tracker);
+  if (tracker.provisionalLocation?.index !== index) tracker.provisionalLocation = null;
   tracker.script = script; tracker.located = true; tracker.progressIndex = index; tracker.progress = 0;
   tracker.prediction = null; tracker.referenceFence = null; tracker.referenceProgress = null;
   tracker.path = {hypotheses: [], lastMs: event.endMs};

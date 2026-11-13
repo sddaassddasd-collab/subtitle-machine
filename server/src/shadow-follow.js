@@ -1,4 +1,5 @@
 const {createTracker, locateTranscript} = require('./auto-follow');
+const {locationEvidence} = require('./location-evidence');
 const {SHADOW_SETTINGS: SETTINGS, TEXT_SETTINGS: T} = require('./follow-settings');
 const {randomUUID, createHash} = require('crypto');
 const fields = ['id', 'text', 'type', 'role', 'music'];
@@ -65,13 +66,14 @@ class ShadowFollow {
     const result = locateTranscript(this.tracker, job.lines, this.index, {...job.event, prepareOnly: true});
     const candidate = result.candidate;
     const accepted = Number.isInteger(result.index) && !result.ignored;
-    const reliable = accepted && !candidate?.locationOnly && !candidate?.weakPath && !candidate?.phonetic &&
-      (candidate?.confidence >= T.strongConfidence || candidate?.pathConfirmed);
+    const evidence = result.evidence || locationEvidence(job.event, candidate);
+    const reliable = Boolean(accepted && !candidate?.locationOnly && !candidate?.weakPath && !candidate?.phonetic &&
+      (candidate?.confidence >= T.strongConfidence || candidate?.pathConfirmed));
     if (accepted) {
       this.index = result.index;
       if (reliable) {
         this.confirmedIndex = result.index;
-        this.confirmedEndMs = result.evidence?.endMs ?? job.event.endMs;
+        this.confirmedEndMs = evidence.endMs;
         this.completed = result.completed === true;
       }
     }
@@ -89,7 +91,8 @@ class ShadowFollow {
         job.display.source === 'script' && !job.display.hidden && !job.display.holding,
       locator: {index: this.index, confirmedIndex: this.confirmedIndex, confirmedEndMs: this.confirmedEndMs,
         completed: this.completed && this.confirmedIndex === this.index, accepted, reliable,
-        reason: result.reason || result.status, evidence: result.evidence || null,
+        reason: result.reason || result.status, evidence,
+        provisionalLocation: this.tracker.provisionalLocation || null,
         candidate: candidate ? {index: candidate.index, confidence: candidate.confidence, evidence: candidate.evidence,
           phonetic: candidate.phonetic === true, locationOnly: candidate.locationOnly === true} : null},
       queueWaitMs: Math.max(0, startedAt - job.queuedAt), processingMs: Math.max(0, this.now() - startedAt)});

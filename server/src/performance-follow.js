@@ -2,7 +2,7 @@ const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
 
-const PERFORMANCE_SETTINGS = Object.freeze({version: 9, mismatchMs: 4500, mismatchAudioMs: 3000,
+const PERFORMANCE_SETTINGS = Object.freeze({version: 10, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 8, minimumSpeechConfidence: .35,
   longItemMs: 6500, longItemCharacters: 18, stablePrefixCharacters: 3, stableMs: 900, semanticGraceMs: 2500,
   mismatchGapMs: 2500,
@@ -276,8 +276,8 @@ class PerformanceFollower {
       }
       return null;
     }
-    const reliable = match.semantic || match.scriptVerified || match.phraseAnchored || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
-      (match.pathConfirmed && match.evidence >= 4);
+    const reliable = !match.provisionalLocation && (match.semantic || match.scriptVerified || match.phraseAnchored || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
+      (match.pathConfirmed && match.evidence >= 4));
     if (!reliable || endMs <= this.lastConfirmedEnd) return null;
     this.recognitionReliable = true;
     this.mismatch = null; this.fallbackDecision = {reason: 'script_matched', index};

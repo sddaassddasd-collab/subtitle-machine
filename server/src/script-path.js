@@ -1,4 +1,5 @@
 const {TEXT_SETTINGS: T} = require('./follow-settings');
+const {sharedFragment} = require('./location-safety');
 
 // A bounded set of alternative forward paths. Repeating an interim or final
 // never creates a second independent cue observation.
@@ -11,7 +12,8 @@ function observeScriptPath(tracker, script, currentIndex, candidates, event) {
   for (const candidate of candidates.slice(0, T.pathWidth * 2)) {
     if (candidate.index <= currentIndex || candidate.index > currentIndex + T.nearbyAhead ||
       candidate.confidence < T.minimumConfidence || candidate.evidence < T.pathMinimumEvidence ||
-      candidate.offset < 2 || candidate.phonetic ||
+      candidate.offset < 2 || candidate.phonetic || candidate.context ||
+      (candidate.heard !== script.entries[candidate.index].text && sharedFragment(script, currentIndex, candidate.index, candidate.heard)) ||
       script.entries.slice(currentIndex, candidate.index + 1).some(e => e.source.music)) continue;
     let best = {index: candidate.index, score: candidate.confidence - T.pathSkipPenalty * (candidate.index - currentIndex - 1),
       steps: 1, endMs: event.endMs, startMs: event.startMs, itemId: event.itemId, heard: candidate.heard};
