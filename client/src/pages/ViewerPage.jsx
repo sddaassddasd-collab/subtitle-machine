@@ -581,7 +581,7 @@ const ViewerPage = () => {
                 if (nextMode === 'prompter') params.set('mode', 'prompter')
                 else params.delete('mode')
                 navigate({ pathname: location.pathname, search: params.toString() }, { replace: true })
-              }}>{nextMode === 'viewer' ? '觀眾模式' : '提詞模式'}</button>)}
+              }}>{nextMode === 'viewer' ? '攤行' : '多行'}</button>)}
           </div>
           <div className="viewer-toolbar-group viewer-font-controls">
             <button
