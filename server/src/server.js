@@ -1,3 +1,4 @@
+const {SILENCE_TIMEOUT_REASON, normalizeSilenceTimeout, reachedSilenceTimeout} = require('./silence-timeout');
 const express = require('express');
 const {ShadowFollow} = require('./shadow-follow');
 const { resolveProjectorLanguages } = require('./projector-languages');
@@ -3964,6 +3965,7 @@ function ensureSessionStructure(session) {
   session.displayEnabled = session.displayEnabled !== false;
   session.roleColorEnabled = session.roleColorEnabled !== false;
   session.stageDirectionsAsDialogue = session.stageDirectionsAsDialogue === true;
+  session.silenceTimeout = normalizeSilenceTimeout(session.silenceTimeout);
   session.musicEffectEnabled = session.musicEffectEnabled !== false;
   session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(
     session.transcriptionLanguage,
@@ -4147,6 +4149,7 @@ function serializeSessionForStorage(session) {
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
     stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
+    silenceTimeout: normalized.silenceTimeout,
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
@@ -7329,6 +7332,7 @@ function getPublicTranscriptionState(session) {
     followingScript: describeFollowingScript(session),
     status: state.status || 'idle',
     captureId: stream?.captureId || state.captureId || '',
+    silenceTimeoutMessage: state.status === 'idle' ? state.silenceTimeoutMessage || '' : '',
     recoverable: state.recoverable === true,
     recoveryReason: state.recoverable === true ? state.recoveryReason || '' : '',
     text: session.automaticLive || holdingCaption(session) ? getOutputTranscriptionText(session, stream) : typeof state.text === 'string' ? state.text : '',
@@ -7419,7 +7423,10 @@ function stopTranscriptionStream(sessionId, options = {}) {
   const stream = transcriptionStreams.get(sessionId);
   if (stream?.healthTimer) clearInterval(stream.healthTimer);
   stream?.providerQueue?.close();
-  if (stream) updateTranscriptionState(sessionId, {captureId: stream.captureId || ''});
+  updateTranscriptionState(sessionId, {
+    ...(stream ? {captureId: stream.captureId || ''} : {}),
+    silenceTimeoutMessage: options.silenceTimeoutMessage || '',
+  });
   if (!stream) {
     const session = getSession(sessionId);
     if (!session) return;
@@ -8184,6 +8191,7 @@ function getControlPayload(session) {
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
     stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
+    silenceTimeout: normalized.silenceTimeout,
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
@@ -9673,6 +9681,23 @@ function handleReferenceAudioResult(sessionId, result) {
     confidence: result.confidence, referenceSeconds: result.referenceSeconds, completed: result.completed === true,
     segmentStatus: segment.status, acoustic: result.diagnostics, workerTiming: result.workerTiming, audioLagMs,
     audioMs: result.audioEndMs, recordingId: recording.id, recordingRevision: recording.revision});
+}
+
+function stopAutoFollowForSilence(session, stream) {
+  const message = `已連續 ${session.silenceTimeout.minutes} 分鐘無聲，已切回手動並停止收音。`;
+  session.silenceStoppedCapture = {sourceId: stream.captureTimeline?.sourceId, ownerId: stream.captureOwnerId, message};
+  session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
+  session.automaticLive = false;
+  session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.SCRIPT;
+  session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
+  autoFollowHistory.event(session.id, 'control_mode', {mode: SUBTITLE_CONTROL_MODES.MANUAL, reason: SILENCE_TIMEOUT_REASON, message});
+  stopTranscriptionStream(session.id, {reason: SILENCE_TIMEOUT_REASON, silenceTimeoutMessage: message});
+  resetAutoFollowState(session.id, {message});
+  persistSession(session);
+  io.to(stream.socketId).emit('control:capture-health', {captureId: stream.captureId,
+    reason: SILENCE_TIMEOUT_REASON, message});
+  broadcastControlState(session.id);
+  return message;
 }
 
 function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
@@ -13762,6 +13787,11 @@ io.on('connection', (socket) => {
       }
 
       const metadata = clientMetadata(clientInfo);
+      const stopped = session.silenceStoppedCapture;
+      if (stopped?.sourceId && stopped.sourceId === metadata.sourceId && stopped.ownerId === metadata.captureOwnerId) {
+        acknowledge({ok: false, reason: SILENCE_TIMEOUT_REASON, message: stopped.message});
+        return;
+      }
       const active = transcriptionStreams.get(sessionId);
       const sameOwner = active && metadata.captureOwnerId && active.captureOwnerId === metadata.captureOwnerId;
       if (sameOwner && metadata.captureGeneration <= (active.captureGeneration || 0)) {
@@ -13811,6 +13841,7 @@ io.on('connection', (socket) => {
       updateTranscriptionState(sessionId, {
         active: false,
         status: 'connecting',
+        silenceTimeoutMessage: '',
         recoverable: false,
         ...(preserveTextOnRestart === true
           ? {}
@@ -14074,6 +14105,7 @@ io.on('connection', (socket) => {
     const submit = () => {
       if (stream.closing || transcriptionStreams.get(sessionId) !== stream) return;
     try {
+      let gap = false;
       if (persistentCapture) {
         const mapping = stream.captureTimeline.accept({sourceId, sourceStartMs, sourceEndMs, droppedInputMs,
           durationMs: normalizedDurationMs}, stream.autoFollowAudioMs || 0);
@@ -14081,7 +14113,8 @@ io.on('connection', (socket) => {
           stream.lastCaptureDropped = true;
           acknowledge({ok: false, reason: 'invalid_source_clock'}); return;
         }
-        if (mapping.gapMs >= 2) {
+        gap = mapping.gapMs >= 2;
+        if (gap) {
           const fenceMs = stream.autoFollowAudioMs || 0;
           const resetTracking = fenceMs > 0 && mapping.gapMs >= TRANSPORT_SETTINGS.gapResetMs;
           if (resetTracking) {
@@ -14102,6 +14135,16 @@ io.on('connection', (socket) => {
           autoFollowHistory.event(session.id, 'audio_gap', {...followHistoryClock(session.id),
             ...mapping, resetTracking, retainedIndex: session.currentIndex, captureId, sequence});
         }
+      }
+      if (stale === true || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+        stream.silenceWindow = null;
+      } else if (reachedSilenceTimeout(stream, session.silenceTimeout, {
+        quiet: normalizedLevel <= TRANSCRIPTION_SILENCE_LEVEL_THRESHOLD,
+        durationMs: normalizedDurationMs, at: Date.now(), gap, sequence,
+      })) {
+        const message = stopAutoFollowForSilence(session, stream);
+        acknowledge({ok: true, dropped: true, reason: SILENCE_TIMEOUT_REASON, message});
+        return;
       }
       if (stale !== true) {
         handleAutoFollowAudioLevel(session.id, normalizedLevel, normalizedDurationMs,
@@ -14434,6 +14477,7 @@ io.on('connection', (socket) => {
     if (session.subtitleControlMode === nextMode && !sourceChanged) return;
 
     session.subtitleControlMode = nextMode;
+    if (stream) stream.silenceWindow = null;
     if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) void autoFollowHistory.start(session);
     autoFollowHistory.event(session.id, 'control_mode', {mode: nextMode,
       message: nextMode === SUBTITLE_CONTROL_MODES.MANUAL ? '切為手動跟戲，歷程仍會保存人工操作' : '自動跟戲已啟用'});
@@ -14476,6 +14520,19 @@ io.on('connection', (socket) => {
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
+  });
+
+  socket.on('setSilenceTimeout', ({ sessionId, enabled, minutes }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+    session.silenceTimeout = normalizeSilenceTimeout({
+      enabled: typeof enabled === 'boolean' ? enabled : session.silenceTimeout.enabled,
+      minutes: Number.isInteger(minutes) ? minutes : session.silenceTimeout.minutes,
+    });
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream && !session.silenceTimeout.enabled) stream.silenceWindow = null;
+    persistSession(session);
+    broadcastControlState(sessionId);
   });
 
   socket.on('setStageDirectionsAsDialogue', ({ sessionId, enabled }) => {

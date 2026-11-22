@@ -928,6 +928,7 @@ const ControlPage = () => {
   linesRef.current = lines
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [silenceTimeout, setSilenceTimeout] = useState({enabled: false, minutes: 5})
   const [stageDirectionsAsDialogue, setStageDirectionsAsDialogue] = useState(false)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [projectorLayout, setProjectorLayout] = useState(() =>
@@ -1394,6 +1395,12 @@ const ControlPage = () => {
   const applyTranscriptionPayload = useCallback((rawTranscription) => {
     const captureId = captureStateRef.current.captureId
     if (captureId && rawTranscription?.captureId && rawTranscription.captureId !== captureId) return
+    if (rawTranscription?.silenceTimeoutMessage && captureId && rawTranscription.captureId === captureId && captureRecovery.desired) {
+      captureRecovery.stop({preserveText: false})
+      autoStartedTranscriptionRef.current = false
+      setMicDiagnostics(prev => ({...prev, active: false}))
+      setStatus({kind: 'info', message: rawTranscription.silenceTimeoutMessage})
+    }
     const nextTranscription = normalizeTranscriptionState(rawTranscription)
     if (nextTranscription.status === 'error') {
       if (captureId && rawTranscription?.captureId === captureId && rawTranscription?.recoverable)
@@ -1492,6 +1499,7 @@ const ControlPage = () => {
       )
       setRoleColorEnabled(payload?.roleColorEnabled !== false)
       setStageDirectionsAsDialogue(payload?.stageDirectionsAsDialogue === true)
+      setSilenceTimeout(payload?.silenceTimeout || {enabled: false, minutes: 5})
       applyProjectorSettingsPayload(payload?.projector)
       applyTranscriptionPayload(payload?.transcription)
       setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
@@ -2386,6 +2394,11 @@ const ControlPage = () => {
       if (data.type === 'level') {
         setMicDiagnostics(prev => ({...prev, active: true, lastLevel: data.level,
           lastSentAt: data.at, lastHeardAt: data.level > 0.003 ? data.at : prev.lastHeardAt}))
+      } else if (data.type === 'silence-timeout') {
+        autoStartedTranscriptionRef.current = false
+        setMicDiagnostics(prev => ({...prev, active: false}))
+        setTranscription(prev => ({...prev, active: false, status: 'idle', error: ''}))
+        setStatus({kind: 'info', message: data.message})
       } else if (data.type === 'receipt') {
         setMicDiagnostics(prev => ({...prev, lastAckAt: Date.now(), lastAckLevel: data.level,
           lastRejectReason: data.ok ? '' : data.reason || ''}))
@@ -4987,6 +5000,28 @@ const ControlPage = () => {
 <ControlSection panel={['follow', 'live']} activePanel={activePanel} title={activePanel === 'live' ? '即時字幕與座談設定' : '自動跟戲與收音設定'} defaultOpen>
             <div className="input-group transcription-panel">
               <label>即時語音辨識（雲端）</label>
+              {activePanel === 'follow' && (
+                <>
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={silenceTimeout.enabled}
+                      onChange={event => socketRef.current?.emit('setSilenceTimeout', {sessionId, enabled: event.target.checked})} />
+                    長時間無聲時切回手動
+                  </label>
+                  <label htmlFor="silence-timeout-minutes">無聲多久後停止收音（分鐘）</label>
+                  <input id="silence-timeout-minutes" type="number" min="1" max="120" step="1"
+                    key={`${sessionId}:${silenceTimeout.minutes}`} defaultValue={silenceTimeout.minutes}
+                    disabled={!silenceTimeout.enabled}
+                    onBlur={event => {
+                      const minutes = event.target.valueAsNumber
+                      if (!event.target.validity.valid || !Number.isInteger(minutes)) {
+                        event.target.value = silenceTimeout.minutes
+                        return
+                      }
+                      if (minutes !== silenceTimeout.minutes) socketRef.current?.emit('setSilenceTimeout', {sessionId, minutes})
+                    }}
+                    onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                </>
+              )}
               <label htmlFor="transcription-provider">辨識引擎</label>
               <select
                 id="transcription-provider"
@@ -5958,7 +5993,7 @@ const ControlPage = () => {
                     ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
                     : autoFollow.message
               )
-              : '')}
+              : autoFollow.message)}
             error={Boolean(autoFollow.history?.error) || ((isLiveOutput || subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) && Boolean(transcription.error))}
           />
           <div

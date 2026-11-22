@@ -73,7 +73,12 @@ export class CapturePipeline {
         if (this.desired && !this.connecting && this.socket === socket) this.recover('capture_transport_disconnected', 'transport')
       })
       socket.on('control:capture-health', data => {
-        if (data?.captureId === this.captureId && data.recoverable && data.reason !== 'capture_stalled')
+        if (data?.captureId !== this.captureId) return
+        if (data.reason === 'silence_timeout') {
+          this.finishForSilence(data.message)
+          return
+        }
+        if (data.recoverable && data.reason !== 'capture_stalled')
           this.recover(data.reason, data.reason?.startsWith('capture_transport') ? 'transport' : 'provider')
       })
     }
@@ -106,6 +111,10 @@ export class CapturePipeline {
             this.state('running', '音訊傳輸已恢復，辨識持續進行。')
         },
         onAck: ack => {
+          if (ack.reason === 'silence_timeout') {
+            this.finishForSilence(ack.message)
+            return
+          }
           if (ack.ok && Number.isFinite(ack.networkAgeMs)) {
             this.liveAckLagMs = Math.max(0, ack.networkAgeMs) +
               (Number.isFinite(ack.providerSubmittedAt) && Number.isFinite(ack.serverReceivedAt)
@@ -146,6 +155,10 @@ export class CapturePipeline {
           captureTransport: {...T, ...this.transport.details()}},
       }, (error, response) => error ? reject(new Error('辨識服務連線逾時')) : resolve(response)))
       if (!this.desired || epoch !== this.epoch) return
+      if (result?.reason === 'silence_timeout') {
+        this.finishForSilence(result.message)
+        return
+      }
       if (result?.ok !== true) {
         // Configuration/authentication/ownership failures require operator action.
         if (result?.recoverable !== true && result?.reason && !['transcription_stopped', 'transcription_not_running'].includes(result.reason)) {
@@ -364,6 +377,10 @@ export class CapturePipeline {
         this.report('capture_progress_probe', {serverAudioMs: data.serverAudioMs, sequence: data.sequence})
       }
     })
+  }
+  finishForSilence(message) {
+    this.notify?.({type: 'silence-timeout', message: message || '無聲逾時，已切回手動並停止收音。'})
+    this.stop({preserveText: false})
   }
   stop({preserveText = true} = {}) {
     this.desired = false; this.epoch++; this.retryAt = 0; this.ready = false

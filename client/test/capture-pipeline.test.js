@@ -309,3 +309,16 @@ test('two live cuts exhaust the unstable-period budget, which resets only after 
   assert.equal(f.stats.starts, 3)
   f.pipeline.stop()
 })
+
+test('a silence timeout closes the active capture without scheduling another provider start', async () => {
+  const f = fixture(); await flush()
+  f.sockets[0].server('control:capture-health', {captureId: 'old', reason: 'silence_timeout'})
+  assert.equal(f.pipeline.desired, true)
+  f.sockets[0].server('control:capture-health', {captureId: f.pipeline.captureId,
+    reason: 'silence_timeout', message: '已切回手動'})
+  f.clock(60000); f.pipeline.tick(); await flush()
+  assert.equal(f.pipeline.desired, false)
+  assert.equal(f.stats.starts, 1)
+  assert.equal(f.stats.stops, 1)
+  assert.equal(f.events.find(event => event.type === 'silence-timeout').message, '已切回手動')
+})
