@@ -41,10 +41,17 @@ function resolveFollowingLanguage(session, language = session.transcriptionLangu
     explicit: Boolean(binding)};
 }
 
-function selectedText(line, languageId) {
-  if (line.type === 'direction') return String(line.text || '');
+function effectiveCueType(session, line) {
+  return session.stageDirectionsAsDialogue === true && line.type === 'direction' ? 'dialogue' : line.type;
+}
+
+function selectedText(session, line, languageId) {
+  if (effectiveCueType(session, line) === 'direction') return String(line.text || '');
   if (!languageId) return '';
-  return String(languageId === 'primary' ? line.text || '' : line.translations?.[languageId] || '');
+  const text = String(languageId === 'primary' ? line.text || '' : line.translations?.[languageId] || '');
+  // The matcher usually removes parenthetical asides. A promoted direction
+  // needs those words, while display payloads keep the script punctuation.
+  return line.type === 'direction' ? text.replace(/[()（）]/g, '') : text;
 }
 
 function validPinnedId(session, id) {
@@ -64,10 +71,10 @@ function getFollowingLines(session, language = session.transcriptionLanguage, li
   const previous = cache.get(key);
   if (previous?.length === lines.length && lines.every((line, index) => {
     const old = previous[index];
-    return old.id === line.id && old.type === line.type && old.music === line.music && old.role === line.role &&
-      old.text === selectedText(line, languageId);
+    return old.id === line.id && old.type === effectiveCueType(session, line) && old.music === line.music && old.role === line.role &&
+      old.text === selectedText(session, line, languageId);
   })) return previous;
-  const projected = lines.map(line => ({...line, text: selectedText(line, languageId)}));
+  const projected = lines.map(line => ({...line, type: effectiveCueType(session, line), text: selectedText(session, line, languageId)}));
   if (cache.size >= 16) cache.clear();
   cache.set(key, projected);
   return projected;
@@ -80,10 +87,10 @@ function describeFollowingScript(session, language = session.transcriptionLangua
   const missingIndices = [];
   let dialogueCount = 0;
   lines.forEach((line, index) => {
-    if (line.type === 'direction' || !(String(line.text || '').trim() ||
+    if (effectiveCueType(session, line) === 'direction' || !(String(line.text || '').trim() ||
       Object.values(line.translations || {}).some(text => String(text || '').trim()))) return;
     dialogueCount++;
-    if (!selectedText(line, languageId).trim()) missingIndices.push(index);
+    if (!selectedText(session, line, languageId).trim()) missingIndices.push(index);
   });
   const name = languageName(resolved.language);
   const message = !languageId ? (pinnedId === undefined
@@ -103,4 +110,4 @@ function isRecordingCompatible(session, recording) {
 }
 
 module.exports = {SOURCE_LANGUAGES, supportedLanguage, normalizePerformanceLanguage, languageName,
-  resolveFollowingLanguage, getFollowingLines, describeFollowingScript, isRecordingCompatible};
+  resolveFollowingLanguage, getFollowingLines, describeFollowingScript, isRecordingCompatible, effectiveCueType};

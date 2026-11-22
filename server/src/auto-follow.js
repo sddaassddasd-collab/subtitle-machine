@@ -10,6 +10,7 @@ const {backwardRecovery, expireBackwardRecovery} = require('./backward-recovery'
 const {forwardRejection, pauseRecovery, provisionalLocation} = require('./location-safety');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
+const {reviewForwardCue} = require('./forward-cue-evidence');
 const MAX_HEARD = T.maxHeard;
 const SEQUENCE_TTL_MS = T.sequenceTtlMs;
 const DIRECTION_SILENCE_MS = O.directionSilenceMs;
@@ -906,6 +907,48 @@ function restoreOpeningPreparation(tracker) {
 
 // Display timing is separate from the full-evidence locator. A short opening
 // spends one preparation; only a normal accepted match prepares another cue.
+function locateDisplayCue(tracker, lines, currentIndex, event, script) {
+  if (!event.words?.length) return locateTranscript(tracker, lines, currentIndex, event, script);
+
+  // The locator mutates its hypotheses and same-item fences. Publish those
+  // changes together with the chosen cue, or keep the prior display position.
+  const {script: previousScript, items, ...position} = tracker;
+  const trial = {...structuredClone(position), script: previousScript, items: new Map(items)};
+  const result = locateTranscript(trial, lines, currentIndex, event, script);
+  const review = reviewForwardCue(script, currentIndex, result.index, event, result.candidate, event.audioMs);
+  if (!review || review.action === 'advance') {
+    Object.assign(tracker, trial);
+    if (!review) return result;
+    const spans = new Map((result.spans || []).map(span => [span.index, span]));
+    for (const span of review.matches) spans.set(span.index, span);
+    return {...result, spans: [...spans.values()], forwardCue: review};
+  }
+
+  // Consume the revision without setting a fence at the rejected destination.
+  const oldItem = items.get(event.itemId);
+  const item = trial.items.get(event.itemId);
+  if (trial.script !== previousScript || trial.streamId !== tracker.streamId) {
+    Object.assign(tracker, createTracker({ignoreBeforeMs: trial.ignoreBeforeMs}),
+      {script: trial.script, streamId: trial.streamId});
+  }
+  tracker.latestStartMs = trial.latestStartMs;
+  tracker.latestOrder = trial.latestOrder;
+  if (item) tracker.items.set(event.itemId, {...item, maxIndex: oldItem?.maxIndex ?? null});
+  while (tracker.items.size > T.retainedItems) tracker.items.delete(tracker.items.keys().next().value);
+  if (review.action === 'hold') return {status: 'searching', reason: 'forward_cue_waiting',
+    spans: review.matches, forwardCue: review, message: '正在核對中間台詞與後續語音，暫時維持目前字幕。'};
+
+  const cue = review.cue;
+  const speech = {...event, text: cue.heard, startMs: cue.startMs, endMs: cue.endMs};
+  applySemanticLocation(tracker, lines, cue.index, speech, {prepare: false});
+  return {index: cue.index, status: 'advanced', reason: 'forward_intermediate_cue',
+    progress: cue.offset / cue.length, completed: cue.completed, spans: review.matches, forwardCue: review,
+    candidate: {index: cue.index, heard: cue.heard, length: cue.length, offset: cue.offset,
+      evidence: cue.heard.length, confidence: 1, speech, locationOnly: !cue.completed},
+    evidence: {startMs: cue.startMs, endMs: cue.endMs},
+    message: '已依語音時間先顯示中間台詞，繼續核對下一格。'};
+}
+
 function followTranscript(tracker, lines, currentIndex, event) {
   const script = prepareScript(lines, tracker.script);
   const reset = !tracker.shortOpenings || tracker.streamId !== event.streamId || tracker.script !== script;
@@ -915,7 +958,7 @@ function followTranscript(tracker, lines, currentIndex, event) {
   if (!plan && script.entries[currentIndex]?.source.type === 'direction')
     plan = prepareOpening(script, currentIndex, {text: '', endMs: Math.max(0, tracker.ignoreBeforeMs)}, true);
   let trigger = matchOpening(plan, script, event);
-  const result = locateTranscript(tracker, lines, currentIndex,
+  const result = locateDisplayCue(tracker, lines, currentIndex,
     {...event, prepareOnly: true, trustedCurrentIndex: tracker.prediction?.source === 'opening' &&
       normalizeText(event.text) === script.entries[currentIndex]?.text ? currentIndex : selectedStartIndex}, script);
   if (!result.ignored) {
@@ -925,6 +968,11 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.shortOpenings = true;
   tracker.selectedStartIndex = selectedStartIndex;
   if (result.ignored) {
+    tracker.openingPlan = plan;
+    restoreOpeningPreparation(tracker);
+    return result;
+  }
+  if (result.reason === 'forward_cue_waiting') {
     tracker.openingPlan = plan;
     restoreOpeningPreparation(tracker);
     return result;

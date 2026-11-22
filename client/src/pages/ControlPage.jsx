@@ -928,6 +928,7 @@ const ControlPage = () => {
   linesRef.current = lines
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [stageDirectionsAsDialogue, setStageDirectionsAsDialogue] = useState(false)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
   const [projectorLayout, setProjectorLayout] = useState(() =>
     normalizeProjectorLayout(),
@@ -1490,6 +1491,7 @@ const ControlPage = () => {
           : true,
       )
       setRoleColorEnabled(payload?.roleColorEnabled !== false)
+      setStageDirectionsAsDialogue(payload?.stageDirectionsAsDialogue === true)
       applyProjectorSettingsPayload(payload?.projector)
       applyTranscriptionPayload(payload?.transcription)
       setAutoFollow(normalizeAutoFollowState(payload?.autoFollow))
@@ -4399,7 +4401,9 @@ const ControlPage = () => {
   const currentLine = lines[liveCurrentIndex] || null
   const isLiveOutput = sessionMeta?.captionMode === 'live'
   const previewOutput = output?.sessionId === sessionId ? output : null
+  const currentLineIsDirection = !stageDirectionsAsDialogue && currentLine?.type === 'direction'
   const previewLine = previewOutput?.line || currentLine
+  const previewIsDirection = !stageDirectionsAsDialogue && previewLine?.type === 'direction'
   const previewIsLive = previewOutput ? previewOutput.source === 'transcription' : isLiveOutput
   const editingModeLabel = editingModeEnabled && lines.length > 0
     ? currentIndex === liveCurrentIndex
@@ -4449,7 +4453,7 @@ const ControlPage = () => {
       ? []
     : isLiveOutput
       ? [{id: 'live', text: transcription.text?.trim() || '等待即時字幕'}]
-    : currentLine?.type === 'direction'
+    : currentLineIsDirection
         ? []
         : currentLine
           ? projectorPreviewLanguages
@@ -5218,7 +5222,7 @@ const ControlPage = () => {
                 檢視端一次顯示一種語言，觀眾可自行切換；投影端最多兩種，可任選上、下排語言，並同步套用到預覽與投影。
               </span>
             </div></ControlSection>
-<ControlSection panel="projection" activePanel={activePanel} title="角色與音樂顯示" defaultOpen><div className="projector-preview-toggles">
+<ControlSection panel="projection" activePanel={activePanel} title="角色、音樂與舞台指示" defaultOpen><div className="projector-preview-toggles">
                 <label className="checkbox-row viewer-preview-toggle">
                   <input
                     type="checkbox"
@@ -5234,6 +5238,19 @@ const ControlPage = () => {
                     onChange={handleToggleMusicEffectEnabled}
                   />
                   開啟「此段有音樂」效果
+                </label>
+                <label className="checkbox-row viewer-preview-toggle">
+                  <input
+                    type="checkbox"
+                    checked={stageDirectionsAsDialogue}
+                    onChange={event => {
+                      if (!socketRef.current || !sessionId) return
+                      const enabled = event.target.checked
+                      setStageDirectionsAsDialogue(enabled)
+                      socketRef.current.emit('setStageDirectionsAsDialogue', { sessionId, enabled })
+                    }}
+                  />
+                  將舞台指示當作台詞
                 </label>
               </div></ControlSection>
 <ControlSection panel="projection" activePanel={activePanel} title="投影版面與輸出" defaultOpen><div className="projector-preview-controls">
@@ -6101,7 +6118,7 @@ const ControlPage = () => {
               className={`viewer-preview-box ${
                 displayEnabled ? '' : 'viewer-muted'
               } ${
-                !isLiveOutput && currentLine?.type === 'direction' ? 'viewer-direction' : ''
+                !isLiveOutput && currentLineIsDirection ? 'viewer-direction' : ''
               } ${
                 !isLiveOutput && currentLineMusicVisible ? 'viewer-music-preview' : ''
               }`}
@@ -6130,7 +6147,7 @@ const ControlPage = () => {
                 角色：{previewLine.role}
               </div>
             )}
-            {!previewIsLive && previewLine?.type === 'direction' && <small className="input-note">目前為舞台指示，台詞輸出空白。</small>}
+            {!previewIsLive && previewIsDirection && <small className="input-note">目前為舞台指示，台詞輸出空白。</small>}
             {!previewIsLive && currentLineMusicVisible && (
               <div className="viewer-preview-music">
                 {getMusicText(currentLine)}
@@ -6144,7 +6161,7 @@ const ControlPage = () => {
 
 
             <button type="button" className="subtle-button" onClick={() => setActivePanel('projection')}>投影與顯示設定</button>
-            {!isLiveOutput && <div className="workspace-next-cue"><span>下一句</span><p>{lines[liveCurrentIndex + 1]?.type === 'direction' ? '舞台指示' : getLineLanguageText(lines[liveCurrentIndex + 1], primaryLanguage.id) || '已到最後一格'}</p></div>}
+            {!isLiveOutput && <div className="workspace-next-cue"><span>下一句</span><p>{!stageDirectionsAsDialogue && lines[liveCurrentIndex + 1]?.type === 'direction' ? '舞台指示' : getLineLanguageText(lines[liveCurrentIndex + 1], primaryLanguage.id) || '已到最後一格'}</p></div>}
           </div>
         )}
       </aside>

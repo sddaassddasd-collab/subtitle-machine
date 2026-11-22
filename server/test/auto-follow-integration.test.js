@@ -10,6 +10,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates } = require('../src/auto-follow');
 const {freshSpeech} = require('../src/word-evidence');
+const {reviewForwardCue} = require('../src/forward-cue-evidence');
 const {trackerSnapshot} = require('../src/follow-trace');
 const {ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS} = require('../src/follow-settings');
 const {SemanticFollower} = require('../src/semantic-follow');
@@ -35,7 +36,7 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
+    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, reviewForwardCue, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
     ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview, ShadowFollow,
     TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
@@ -390,4 +391,45 @@ test('a trimmed tail can locate a cue without exporting it as a confirmed ending
   assert.equal(session.currentIndex, 1);
   assert.equal(confirmations.at(-1).completed, false);
   assert.equal(context.getPublicAutoFollowState(session).armedIndex, null);
+});
+
+test('the stage direction setting changes following and display payloads without rewriting the script', () => {
+  const {session, context} = fixture();
+  session.languages = [{id: 'primary', code: 'zh-TW', name: '中文'}];
+  session.transcriptionLanguage = 'zh-TW';
+  session.lines = [{id: 'direction', type: 'direction', text: '（演員走上台）'},
+    {id: 'dialogue', type: 'dialogue', text: '你終於來了'}];
+  for (const enabled of [false, true, false]) {
+    session.stageDirectionsAsDialogue = enabled;
+    const type = enabled ? 'dialogue' : 'direction';
+    assert.equal(performanceLanguage.getFollowingLines(session)[0].type, type);
+    assert.equal(performanceLanguage.describeFollowingScript(session).dialogueCount, enabled ? 2 : 1);
+    const viewer = context.getViewerPayload(session, null, {followOnly: true});
+    const projector = context.getProjectorPayload(session);
+    assert.equal(viewer.line.type, type);
+    assert.equal(viewer.cueWindow.lines[0].type, type);
+    assert.equal(projector.line.type, type);
+    assert.equal(viewer.text, enabled ? session.lines[0].text : '');
+    assert.equal(projector.text, viewer.text);
+    assert.equal(session.lines[0].type, 'direction');
+  }
+});
+
+test('spoken stage directions advance the real tracker when the setting is enabled', () => {
+  for (const enabled of [false, true]) {
+    const {session, context} = fixture();
+    session.languages = [{id: 'primary', code: 'zh-TW', name: '中文'}];
+    session.transcriptionLanguage = 'zh-TW';
+    session.stageDirectionsAsDialogue = enabled;
+    session.lines = [{type: 'dialogue', text: '請大家先留在原位'},
+      {type: 'direction', text: '（演員從側幕走上台）'}, {type: 'dialogue', text: '你終於來了'}];
+    context.handleAutoFollowTranscript('test', '請大家先留在原位', {
+      streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true,
+    });
+    context.handleAutoFollowTranscript('test', '演員從側幕走上台', {
+      streamId: 's', itemId: 'b', startMs: 1100, endMs: 2000, isFinal: true,
+      words: [{word: '演員', startMs: 1100, endMs: 1300}, {word: '從側幕走上台', startMs: 1300, endMs: 2000}],
+    });
+    assert.equal(session.currentIndex, enabled ? 1 : 0);
+  }
 });

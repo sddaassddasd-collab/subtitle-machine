@@ -34,10 +34,11 @@ const { registerRecordingRoutes } = require('./recording-routes');
 const { AutoFollowHistory } = require('./auto-follow-history');
 const { registerAutoFollowHistoryRoutes } = require('./auto-follow-history-routes');
 const { SOURCE_LANGUAGES, normalizePerformanceLanguage, supportedLanguage, resolveFollowingLanguage,
-  getFollowingLines, describeFollowingScript, isRecordingCompatible } = require('./performance-language');
+  getFollowingLines, describeFollowingScript, isRecordingCompatible, effectiveCueType } = require('./performance-language');
 const {getCaptionMode, enterLiveCaptions, resumeScriptCaptions} = require('./caption-mode');
 const {PerformanceFollower, PERFORMANCE_SETTINGS, normalizePerformanceSettings, resolveGroups} = require('./performance-follow');
 const {freshSpeech} = require('./word-evidence');
+const {reviewForwardCue} = require('./forward-cue-evidence');
 const { reviewScriptSegmentation, mergeConsecutiveDirections } = require('./script-segmentation-review');
 const { alignFullScript, normalizeAlignmentReviews, hash: alignmentHash,
   alignmentError } = require('./full-script-alignment');
@@ -3962,6 +3963,7 @@ function ensureSessionStructure(session) {
       : null;
   session.displayEnabled = session.displayEnabled !== false;
   session.roleColorEnabled = session.roleColorEnabled !== false;
+  session.stageDirectionsAsDialogue = session.stageDirectionsAsDialogue === true;
   session.musicEffectEnabled = session.musicEffectEnabled !== false;
   session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(
     session.transcriptionLanguage,
@@ -4061,6 +4063,7 @@ function createSessionRecord(ownerUserId) {
     status: 'active',
     displayEnabled: true,
     roleColorEnabled: true,
+    stageDirectionsAsDialogue: false,
     musicEffectEnabled: true,
     transcriptionLanguage: DEEPGRAM_LANGUAGE,
     allowedLiveTranslationLanguageCodes:
@@ -4143,6 +4146,7 @@ function serializeSessionForStorage(session) {
     endedAt: normalized.endedAt,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
+    stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
@@ -8179,6 +8183,7 @@ function getControlPayload(session) {
     currentIndex: normalized.currentIndex,
     displayEnabled: normalized.displayEnabled,
     roleColorEnabled: normalized.roleColorEnabled,
+    stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
@@ -8351,6 +8356,11 @@ function getViewerPayload(session, viewerCellId = null, options = {}) {
   return withPerformanceCaption(session, getViewerPayloadBase(session, viewerCellId, options));
 }
 
+function toDisplayLine(session, line) {
+  const publicLine = toPublicLine(line);
+  return publicLine ? {...publicLine, type: effectiveCueType(session, publicLine)} : null;
+}
+
 function getViewerPayloadBase(session, viewerCellId = null, options = {}) {
   const {
     normalized,
@@ -8366,7 +8376,7 @@ function getViewerPayloadBase(session, viewerCellId = null, options = {}) {
   const includeLines = !options.followOnly && options.includeLines !== false;
   const sourceLines = ensureSessionLines(normalized);
   const publicLines = includeLines
-    ? sourceLines.map((line) => toPublicLine(line))
+    ? sourceLines.map(line => toDisplayLine(normalized, line))
     : null;
   const currentIndex =
     sourceLines.length > 0
@@ -8385,7 +8395,7 @@ function getViewerPayloadBase(session, viewerCellId = null, options = {}) {
   const cueWindow = options.followOnly && isActiveCell && normalized.displayEnabled &&
     getCaptionMode(normalized) !== 'live' ? {
       startIndex: Math.max(0, currentIndex - 2), currentIndex, total: sourceLines.length,
-      lines: sourceLines.slice(Math.max(0, currentIndex - 2), currentIndex + 7).map(toPublicLine),
+      lines: sourceLines.slice(Math.max(0, currentIndex - 2), currentIndex + 7).map(line => toDisplayLine(normalized, line)),
     } : null;
 
   if (!isActiveCell) {
@@ -8496,9 +8506,9 @@ function getViewerPayloadBase(session, viewerCellId = null, options = {}) {
     lines: includeLines ? publicLines : undefined,
     viewerRevision,
     currentIndex,
-    line: toPublicLine(activeScriptLine),
+    line: toDisplayLine(normalized, activeScriptLine),
     text:
-      activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
+      activeScriptLine && effectiveCueType(normalized, activeScriptLine) === LINE_TYPES.DIRECTION
         ? ''
         : activeScriptLine?.text || '',
     liveEntries: [],
@@ -8624,9 +8634,9 @@ function getProjectorPayloadBase(session) {
     languages: normalized.languages,
     defaultLanguageId: normalized.projectorDefaultLanguageId,
     secondaryLanguageId: normalized.projectorSecondaryLanguageId,
-    line: toPublicLine(activeScriptLine),
+    line: toDisplayLine(normalized, activeScriptLine),
     text:
-      activeScriptLine && activeScriptLine.type === LINE_TYPES.DIRECTION
+      activeScriptLine && effectiveCueType(normalized, activeScriptLine) === LINE_TYPES.DIRECTION
         ? ''
         : activeScriptLine?.text || '',
     liveEntries: [],
@@ -9764,7 +9774,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   let result;
   try {
     result = session.automaticLive ? locateLiveScript(state, followingLines, transcript, options)
-      : followTranscript(state.tracker, followingLines, session.currentIndex, { ...options, text: transcript });
+      : followTranscript(state.tracker, followingLines, session.currentIndex, { ...options, text: transcript, audioMs });
   } catch (error) {
     autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before,
       after: trackerSnapshot(state.tracker, session.currentIndex), reason: 'alignment_error', error: String(error?.message || '').slice(0, 300)});
@@ -9866,6 +9876,13 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     audioMs: result.evidence?.endMs ?? options.endMs ?? null, audioStartMs: result.evidence?.startMs ?? options.startMs ?? null,
     candidateIndex: result.candidate?.index, confidence: result.candidate?.confidence,
     message: result.message, candidates: state.tracker.candidates?.slice(0, 3), alignmentMs: state.lastAlignmentMs};
+  if (result.forwardCue) {
+    const {action, targetIndex, matches, target} = result.forwardCue;
+    autoFollowHistory.event(sessionId, 'forward_cue_review', {...followHistoryClock(sessionId), action,
+      fromIndex: session.currentIndex, targetIndex, index: result.index ?? null, itemId: options.itemId, matches,
+      target: target ? {startMs: target.startMs, endMs: target.endMs,
+        firstWordId: target.firstWordId, lastWordId: target.lastWordId} : null});
+  }
   if (result.spans?.length) {
     autoFollowHistory.heard(sessionId, result.spans, evidence);
     // Confirm the displayed prediction before moving past it; covered cues that
@@ -9993,6 +10010,11 @@ function handleSemanticFollow(session, stream, lines, state, transcript, options
       if (['pending', 'supported', 'reset'].includes(status)) broadcastAutoFollowState(sessionId);
     },
     accept: (candidate, speech) => {
+      if (!session.automaticLive && candidate.index > session.currentIndex + 1) {
+        const review = reviewForwardCue(prepareScript(lines, tracker.script), session.currentIndex,
+          candidate.index, speech, candidate, stream.autoFollowAudioMs);
+        if (review && review.action !== 'advance') return;
+      }
       if (!applySemanticLocation(tracker, lines, candidate.index, speech)) return;
       const joint = speech.supportSource === 'joint_text_semantic';
       if (joint) {
@@ -14451,6 +14473,28 @@ io.on('connection', (socket) => {
     if (!session) return;
 
     session.roleColorEnabled = roleColorEnabled !== false;
+    persistSession(session);
+    broadcastControlState(sessionId);
+    broadcastViewerState(sessionId);
+  });
+
+  socket.on('setStageDirectionsAsDialogue', ({ sessionId, enabled }) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session || typeof enabled !== 'boolean' || session.stageDirectionsAsDialogue === enabled) return;
+
+    session.stageDirectionsAsDialogue = enabled;
+    if (session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+      const message = '舞台指示設定已更新，正在核對目前字幕。';
+      if (session.automaticLive) {
+        const stream = transcriptionStreams.get(sessionId);
+        if (stream) semanticFollower.reset(stream, 'script_changed');
+        resetAutoFollowState(sessionId, {listening: Boolean(stream?.ready), message});
+      } else {
+        resetAutoFollowPosition(session, message);
+      }
+    }
+    autoFollowHistory.sync(session);
+    session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
