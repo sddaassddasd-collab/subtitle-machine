@@ -22,7 +22,8 @@ const {trackerSnapshot, clientMetadata, captureTransportDetails} = require('./fo
 const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS} = require('./follow-settings');
 const {serverDiagnosticMetadata} = require('./server-diagnostics');
 const {ProviderAudioQueue, PROVIDER_QUEUE_SETTINGS} = require('./provider-audio-queue');
-const {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
+const {scriptKeyterms, discussionKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
+const {THEATRE_DISCUSSION_CONTEXT, discussionContext} = require('./discussion-context');
 const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
 const {CaptionPresentation} = require('./caption-presentation');
@@ -5199,7 +5200,7 @@ function sanitizeTranscriptionMultilineText(text) {
   return lines.join('\n').trim();
 }
 
-function normalizeTranscriptionContext(rawContext) {
+function normalizeTranscriptionContext(rawContext, maxLength = MAX_TRANSCRIPTION_CONTEXT_CHARS) {
   if (typeof rawContext !== 'string') return '';
 
   const normalized = stripBom(rawContext)
@@ -5211,11 +5212,15 @@ function normalizeTranscriptionContext(rawContext) {
     .trim();
 
   if (!normalized) return '';
-  return normalized.slice(0, MAX_TRANSCRIPTION_CONTEXT_CHARS).trim();
+  return normalized.slice(0, maxLength).trim();
+}
+
+function normalizeProviderTranscriptionContext(context) {
+  return normalizeTranscriptionContext(context, MAX_TRANSCRIPTION_CONTEXT_CHARS + THEATRE_DISCUSSION_CONTEXT.length + 2);
 }
 
 function buildTranscriptionContextPrompt(transcriptionContext) {
-  const normalizedContext = normalizeTranscriptionContext(transcriptionContext);
+  const normalizedContext = normalizeProviderTranscriptionContext(transcriptionContext);
   if (!normalizedContext) return '';
 
   return [
@@ -5859,7 +5864,7 @@ async function correctTranscriptionLine({
 }) {
   const original = normalizeTranscriptionOutputText(text, language);
   if (!original) return '';
-  const normalizedContext = normalizeTranscriptionContext(transcriptionContext);
+  const normalizedContext = normalizeProviderTranscriptionContext(transcriptionContext);
 
   const prompt = [
     {
@@ -5989,7 +5994,7 @@ async function translateLiveTranscriptionLine({
     (language) => language.code === targetLanguage,
   );
   if (!sourceText || !target) return '';
-  const context = normalizeTranscriptionContext(transcriptionContext);
+  const context = normalizeProviderTranscriptionContext(transcriptionContext);
   const response = await client.responses.create(
     {
       model: LIVE_TRANSLATION_MODEL,
@@ -6026,7 +6031,7 @@ async function streamDraftTranslation({
     (language) => language.code === targetLanguage,
   );
   if (!sourceText || !target) return '';
-  const context = normalizeTranscriptionContext(transcriptionContext);
+  const context = normalizeProviderTranscriptionContext(transcriptionContext);
   const responseStream = client.responses.stream(
     {
       model: LIVE_TRANSLATION_MODEL,
@@ -12676,6 +12681,7 @@ function startDeepgramTranscription({
   language,
   speakerRecognitionEnabled,
   transcriptionContext,
+  discussion = false,
   startAcknowledge,
   clientInfo,
   reconnectAttempt = 0,
@@ -12708,7 +12714,8 @@ function startDeepgramTranscription({
     query.set('diarize_model', 'latest');
   }
   const followSession = getSessionRecord(sessionId);
-  const initialKeyterms = followSession?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+  const initialKeyterms = discussion ? discussionKeyterms(selectedLanguage, selectedContext)
+    : followSession?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
     ? scriptKeyterms(getFollowingLines(followSession), followSession.currentIndex, selectedContext,
       ensureTranscriptionState(followSession).scriptVocabulary) : [];
   for (const term of initialKeyterms) query.append('keyterm', term);
@@ -12741,7 +12748,9 @@ function startDeepgramTranscription({
     language: selectedLanguage,
     scriptKeyterms: {terms: initialKeyterms, pending: null, checkedAt: 0, disabled: false},
     scriptVocabulary: normalizeVocabulary(followSession?.transcription?.scriptVocabulary),
-    transcriptionContext: selectedContext,
+    discussion,
+    userTranscriptionContext: selectedContext,
+    transcriptionContext: discussionContext(selectedContext, discussion),
     semanticSegmentationEnabled: true,
     dualChannelEnabled: false,
     speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -12851,7 +12860,7 @@ function startDeepgramTranscription({
       provider: 'deepgram',
       model: DEEPGRAM_MODEL,
       language: selectedLanguage,
-      transcriptionContext: selectedContext,
+      transcriptionContext: stream.userTranscriptionContext,
       semanticSegmentationEnabled: true,
       dualChannelEnabled: false,
       speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -13065,7 +13074,8 @@ function startDeepgramTranscription({
             correctionApiKey,
             language: selectedLanguage,
             speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
-            transcriptionContext: selectedContext,
+            transcriptionContext: stream.userTranscriptionContext,
+            discussion,
             startAcknowledge: pendingStartAcknowledge,
             clientInfo,
             reconnectAttempt: nextAttempt,
@@ -13109,6 +13119,7 @@ function startRealtimeTranscription({
   dualChannelEnabled,
   speakerRecognitionEnabled,
   transcriptionContext,
+  discussion = false,
   startAcknowledge,
   clientInfo,
 }) {
@@ -13121,9 +13132,10 @@ function startRealtimeTranscription({
     normalizeDualChannelEnabled(dualChannelEnabled);
   const selectedSpeakerRecognitionEnabled =
     normalizeSpeakerRecognitionEnabled(speakerRecognitionEnabled);
-  const selectedTranscriptionContext = normalizeTranscriptionContextValue(
+  const userTranscriptionContext = normalizeTranscriptionContextValue(
     transcriptionContext,
   );
+  const selectedTranscriptionContext = discussionContext(userTranscriptionContext, discussion);
   const realtimePromptText = buildRealtimeTranscriptionPrompt({
     language: selectedSourceLanguage,
     transcriptionContext: selectedTranscriptionContext,
@@ -13148,6 +13160,8 @@ function startRealtimeTranscription({
     model: selectedModel,
     language: selectedSourceLanguage,
     transcriptionContext: selectedTranscriptionContext,
+    discussion,
+    userTranscriptionContext,
     realtimePromptText,
     semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
     dualChannelEnabled: selectedDualChannelEnabled,
@@ -13243,7 +13257,7 @@ function startRealtimeTranscription({
       status: 'connecting',
       language: selectedSourceLanguage,
       model: selectedModel,
-      transcriptionContext: selectedTranscriptionContext,
+      transcriptionContext: stream.userTranscriptionContext,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
       speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -13258,7 +13272,7 @@ function startRealtimeTranscription({
           model: selectedModel,
           language: selectedLanguage,
           semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
-          transcriptionContext: selectedTranscriptionContext,
+          transcriptionContext: stream.transcriptionContext,
         }),
       );
       if (stream.initTimeout) {
@@ -13308,7 +13322,7 @@ function startRealtimeTranscription({
       status: 'running',
       language: selectedSourceLanguage,
       model: selectedModel,
-      transcriptionContext: selectedTranscriptionContext,
+      transcriptionContext: stream.userTranscriptionContext,
       semanticSegmentationEnabled: selectedSemanticSegmentationEnabled,
       dualChannelEnabled: selectedDualChannelEnabled,
       speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
@@ -13962,6 +13976,7 @@ io.on('connection', (socket) => {
           dualChannelEnabled,
           speakerRecognitionEnabled,
           transcriptionContext,
+          discussion: autoFollow !== true && !session.automaticLive && getCaptionMode(session) === 'live',
           startAcknowledge: acknowledge,
           clientInfo: metadata,
         });
@@ -14429,7 +14444,8 @@ io.on('connection', (socket) => {
       });
       const stream = transcriptionStreams.get(sessionId);
       if (stream) {
-        stream.transcriptionContext = selectedContext;
+        stream.userTranscriptionContext = selectedContext;
+        stream.transcriptionContext = discussionContext(selectedContext, stream.discussion);
       }
       persistSession(session);
       broadcastTranscriptionState(sessionId);

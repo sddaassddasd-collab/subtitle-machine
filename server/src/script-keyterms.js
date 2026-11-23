@@ -1,3 +1,4 @@
+const {THEATRE_TERMS} = require('./discussion-context');
 const segmenter = new Intl.Segmenter('zh', {granularity: 'word'});
 const STOP = new Set(['我們', '你們', '他們', '這個', '那個', '什麼', '就是', '可以', '沒有', '一個', '因為', '所以',
   '都是', '他的', '你的', '我的', '這裡', '那裡', '到了', '都能', '每個人', '自己', '現在', '這樣', '那樣']);
@@ -50,6 +51,12 @@ function scriptKeyterms(lines, currentIndex, context = '', vocabulary = [], {nea
   return terms;
 }
 
+function discussionKeyterms(language, context) {
+  const theatre = normalizeVocabulary(THEATRE_TERMS[language] || '');
+  const custom = String(context || '').split(/[\s,，、;；]+/u);
+  return scriptKeyterms([], 0, '', [...custom.slice(0, 4), ...theatre, ...custom.slice(4)], {nearby: false});
+}
+
 // Configure is optional and never blocks audio. One update may be in flight;
 // failed/unsupported updates are disabled for this stream and logged.
 function refreshKeyterms(stream, lines, currentIndex, emit, now = Date.now()) {
@@ -60,7 +67,8 @@ function refreshKeyterms(stream, lines, currentIndex, emit, now = Date.now()) {
     if (now - state.pendingAt > 5000) { state.disabled = true; emit('timeout', {terms: state.pending}); }
     return;
   }
-  const terms = scriptKeyterms(lines, currentIndex, stream.transcriptionContext,
+  const terms = stream.discussion ? discussionKeyterms(stream.language, stream.userTranscriptionContext)
+    : scriptKeyterms(lines, currentIndex, stream.transcriptionContext,
     stream.scriptVocabularyActive === false ? [] : stream.scriptVocabulary, {nearby: stream.scriptContextUncertain !== true});
   if (JSON.stringify(terms) === JSON.stringify(state.terms)) return;
   try {
@@ -83,4 +91,4 @@ function acknowledgeKeyterms(stream, event, emit) {
   state.pending = null;
   return true;
 }
-module.exports = {scriptKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms};
+module.exports = {scriptKeyterms, discussionKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms};

@@ -17,7 +17,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
   if (fakeDeepgram) {
     class FakeWebSocket extends EventEmitter {
       static OPEN = 1; static CLOSED = 3;
-      constructor() {super(); this.readyState = 0; this.bufferedAmount = 0; this.sent = [];}
+      constructor(url) {super(); this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = [];}
       send(data) {this.sent.push(data);}
       close() {this.readyState = FakeWebSocket.CLOSED;}
     }
@@ -134,6 +134,8 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
         },
         allowSettings: () => { persistSession = () => {}; },
         storage: () => serializeSessionForStorage(session),
+        realtimeTranscriptionUpdate: buildRealtimeTranscriptionSessionUpdate,
+        correctTranscriptionLine, translateLiveTranscriptionLine,
         follower: () => getPerformanceFollower(session),
         tracker: () => getAutoFollowState(session.id).tracker,
         shadow: () => getAutoFollowState(session.id).shadow,

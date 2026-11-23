@@ -5158,6 +5158,9 @@ const ControlPage = () => {
                   void persistTranscriptionContext()
                 }}
               />
+              {activePanel === 'live' && <span className="input-note">
+                座談字幕會使用劇場與文化藝術術語。可在上方補充劇名、人名或作品專有詞。
+              </span>}
               <label className="checkbox-row">
                 <input
                   type="checkbox"
