@@ -104,6 +104,39 @@ test('the associated control connection can operate the follower while an indepe
   assert.equal(f.connect(undefined, 'another-controller').event('performance:action', {action: 'lock-script'}).ok, false);
 });
 
+test('the control preview shows interim and final speech even when it does not match a cue', t => {
+  const f = createFixture({texts: ['請大家從舞台左側進場', '燈光落下後慢慢轉身'],
+    allowCueChanges: true, fakeDeepgram: true});
+  t.after(() => f.dispose());
+  const stream = f.startProvider();
+  const preview = () => f.control().transcription.recognitionPreview;
+  const recognize = (text, start, isFinal) => stream.socket.emit('message', JSON.stringify({
+    type: 'Results', start, duration: 1, is_final: isFinal,
+    channel: {alternatives: [{transcript: text, words: [{word: text, start, end: start + 1}]}]},
+  }));
+
+  assert.equal(preview(), null);
+  recognize('剛剛那個', 0, false);
+  assert.deepEqual(preview(), {text: '剛剛那個', isFinal: false});
+  recognize('剛剛那個聲音', 0, true);
+  assert.deepEqual(preview(), {text: '剛剛那個聲音', isFinal: true});
+  recognize('剛剛那個', 0, false);
+  assert.deepEqual(preview(), {text: '剛剛那個聲音', isFinal: true});
+  assert.equal(f.session.currentIndex, 0);
+  assert.equal(f.viewer().text, '請大家從舞台左側進場');
+  assert.equal(f.viewer().transcription.recognitionPreview, undefined);
+  assert.equal(f.projector().transcription.recognitionPreview, undefined);
+
+  recognize('麥克風還開著嗎', 1, false);
+  recognize('剛剛那個聲音。', 0, true);
+  assert.deepEqual(preview(), {text: '麥克風還開著嗎', isFinal: false});
+
+  f.event('transcription:stop', {});
+  assert.equal(preview(), null);
+  f.startProvider();
+  assert.equal(preview(), null);
+});
+
 test('the reported receive lag does not discard ordered audio or restart recognition', t => {
   const f = createFixture({lineCount: 3}); t.after(() => f.dispose());
   let now = 100000; t.mock.method(Date, 'now', () => now);

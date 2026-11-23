@@ -1,0 +1,36 @@
+.recognition-preview {
+  flex: 0 0 auto;
+  padding: .45rem .7rem;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #111e2f;
+  color: #f1f5f9;
+}
+
+.recognition-preview-heading {
+  display: flex;
+  align-items: baseline;
+  gap: .55rem;
+  color: #cbd5e1;
+}
+
+.recognition-preview h3 {
+  margin: 0;
+  font-size: .82rem;
+}
+
+.recognition-preview-interim {
+  color: #fbbf24;
+}
+
+.recognition-preview p {
+  margin: .2rem 0 0;
+  block-size: 2.8em;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.recognition-preview p.recognition-preview-empty {
+  color: #a8b8ce;
+}

@@ -5848,6 +5848,13 @@ function getTranscriptionDisplayParts(stream) {
   };
 }
 
+function updateRecognitionPreview(stream, itemId, text, isFinal, startMs) {
+  const previous = stream.recognitionPreview;
+  if (!text || (Number.isFinite(startMs) && Number.isFinite(previous?.startMs) && startMs < previous.startMs)) return;
+  if (previous?.itemId === itemId && previous.isFinal && !isFinal) return;
+  stream.recognitionPreview = {itemId, text, isFinal, startMs};
+}
+
 function syncTranscriptionStateFromStream(sessionId, stream, patch = {}) {
   const { historyLines, draftText } = getTranscriptionDisplayParts(stream);
   const composed = draftText ? [...historyLines, draftText] : historyLines;
@@ -7400,6 +7407,17 @@ function getPublicTranscriptionState(session) {
   };
 }
 
+function getControlTranscriptionState(session) {
+  const state = getPublicTranscriptionState(session);
+  const preview = transcriptionStreams.get(session.id)?.recognitionPreview;
+  return {
+    ...state,
+    recognitionPreview: state.active && state.status === 'running' && preview
+      ? {text: preview.text, isFinal: preview.isFinal}
+      : null,
+  };
+}
+
 function updateTranscriptionState(sessionId, patch = {}) {
   const session = getSessionRecord(sessionId);
   if (!session) return;
@@ -8231,7 +8249,7 @@ function getControlPayload(session) {
       languageMode: normalized.projectorLanguageMode,
       revision: normalized.projectorRevision,
     },
-    transcription: getPublicTranscriptionState(normalized),
+    transcription: getControlTranscriptionState(normalized),
     autoFollow: getPublicAutoFollowState(normalized),
     history: {
       canUndo: canUndoSession(normalized),
@@ -8883,7 +8901,7 @@ function broadcastTranscriptionState(sessionId) {
   if (!session) return;
 
   io.to(`control:${sessionId}`).emit('control:transcription', {
-    transcription: getPublicTranscriptionState(session),
+    transcription: getControlTranscriptionState(session),
     autoFollow: getPublicAutoFollowState(session),
   });
 }
@@ -12971,6 +12989,7 @@ function startDeepgramTranscription({
     }
     transcript = normalizeTranscriptionOutputText(afterGap.text, selectedLanguage);
     const itemId = `deepgram-${start.toFixed(3)}`;
+    updateRecognitionPreview(stream, itemId, transcript, event.is_final === true, start * 1000);
     const timing = stream.autoFollowItems.get(itemId) || {order: ++stream.autoFollowOrder};
     stream.autoFollowItems.set(itemId, timing);
     while (stream.autoFollowItems.size > 100) stream.autoFollowItems.delete(stream.autoFollowItems.keys().next().value);
@@ -13467,6 +13486,7 @@ function startRealtimeTranscription({
       stream.realtimePromptText,
     );
     setDraftLine(stream, event.item_id, merged);
+    updateRecognitionPreview(stream, event.item_id, merged, false, stream.autoFollowItems.get(event.item_id)?.startMs);
     scheduleDraftTranslations(stream, sessionId, event.item_id, merged);
     syncTranscriptionStateFromStream(sessionId, stream);
     handleAutoFollowTranscript(sessionId, merged,
@@ -13489,6 +13509,7 @@ function startRealtimeTranscription({
       selectedLanguage,
       stream.realtimePromptText,
     );
+    updateRecognitionPreview(stream, event.item_id, transcript, true, stream.autoFollowItems.get(event.item_id)?.startMs);
     const accurateSegment = takeAccurateSegmentForItem(stream, event.item_id);
     const boundaryMeta = stream.boundaryMetaByItemId.get(event.item_id) || null;
     stream.boundaryMetaByItemId.delete(event.item_id);
@@ -13548,6 +13569,9 @@ function startRealtimeTranscription({
     const message =
       sanitizeLineText(event?.error?.message || '') || '語音片段辨識失敗';
     takeDraftLine(stream, event?.item_id);
+    if (stream.recognitionPreview?.itemId === event?.item_id && stream.recognitionPreview?.isFinal === false) {
+      stream.recognitionPreview = null;
+    }
     stream.boundaryMetaByItemId.delete(event?.item_id);
     dropAccurateSegmentForItem(stream, event?.item_id);
     syncTranscriptionStateFromStream(sessionId, stream, {

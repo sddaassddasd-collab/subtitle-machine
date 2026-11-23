@@ -12,6 +12,7 @@ import { io } from 'socket.io-client'
 import { ControlStatusSummary, ControlStatusDetails } from '../components/ControlStatus'
 import AutoFollowHistory from '../components/AutoFollowHistory'
 import ControlOutputPreview from '../components/ControlOutputPreview'
+import RecognitionPreview from '../components/RecognitionPreview'
 import {APP_BUILD} from '../lib/build-info'
 import {CaptureSession} from '../lib/capture-session'
 import {CaptureHealthOutbox} from '../lib/capture-health'
@@ -93,6 +94,7 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   active: false,
   status: 'idle',
   text: '',
+  recognitionPreview: null,
   isFinal: true,
   language: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
@@ -4430,6 +4432,8 @@ const ControlPage = () => {
 
   const currentLine = lines[liveCurrentIndex] || null
   const isLiveOutput = sessionMeta?.captionMode === 'live'
+  const showRecognitionPreview = sessionMeta?.automaticLive ||
+    (!isLiveOutput && (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || transcription.backgroundFollow))
   const previewOutput = output?.sessionId === sessionId ? output : null
   const currentLineIsDirection = !stageDirectionsAsDialogue && currentLine?.type === 'direction'
   const previewLine = previewOutput?.line || currentLine
@@ -5620,6 +5624,10 @@ const ControlPage = () => {
 
           </div>
         </header>
+
+        {showRecognitionPreview && (
+          <RecognitionPreview status={transcription.status} preview={transcription.recognitionPreview} />
+        )}
 
         {isLiveOutput && !editingModeEnabled && <div className="workspace-live-captions" aria-live="polite">
           <div className="workspace-live-heading"><h2>{sessionMeta?.automaticLive ? '演出即時字幕' : '座談內容'}</h2><span>劇本位置保留在 CUE {(sessionMeta?.resumeCue ?? liveCurrentIndex) + 1}</span></div>
