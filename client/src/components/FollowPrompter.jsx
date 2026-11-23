@@ -222,7 +222,6 @@ function Timeline({line, currentIndex, cueWindow, viewerToken, languageId, roleC
           <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
           <path d="M8.5 8.5a5 5 0 0 0 0 7m7-7a5 5 0 0 1 0 7M5.5 5.5a9 9 0 0 0 0 13m13-13a9 9 0 0 1 0 13" />
         </svg>
-        直播
       </button>
     </div>}
   </>

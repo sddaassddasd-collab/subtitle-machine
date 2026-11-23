@@ -69,9 +69,9 @@
 .follow-prompter-live-button {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  min-height: 44px;
-  padding: 0.45rem 0.85rem;
+  inline-size: 44px;
+  block-size: 44px;
+  padding: 0;
   border: 1px solid #fecaca;
   border-radius: 999px;
   color: #fff;
