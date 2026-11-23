@@ -24,6 +24,7 @@ const {ACOUSTIC_SETTINGS, SEMANTIC_SETTINGS, FOLLOW_SETTINGS} = require('./follo
 const {serverDiagnosticMetadata} = require('./server-diagnostics');
 const {ProviderAudioQueue, PROVIDER_QUEUE_SETTINGS} = require('./provider-audio-queue');
 const {scriptKeyterms, discussionKeyterms, normalizeVocabulary, refreshKeyterms, acknowledgeKeyterms} = require('./script-keyterms');
+const {DEEPGRAM_LANGUAGE_HINTS, normalizeMixedRecognition} = require('./mixed-recognition');
 const {THEATRE_DISCUSSION_CONTEXT, discussionContext} = require('./discussion-context');
 const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
@@ -3981,6 +3982,7 @@ function ensureSessionStructure(session) {
   );
   session.followingLanguageIds = Object.fromEntries(Object.entries(session.followingLanguageIds || {})
     .filter(([code, id]) => supportedLanguage(code)?.code === code && typeof id === 'string' && id));
+  session.mixedRecognition = normalizeMixedRecognition(session.mixedRecognition);
   session.allowedLiveTranslationLanguageCodes =
     normalizeAllowedLiveTranslationLanguageCodes(
       session.allowedLiveTranslationLanguageCodes,
@@ -4167,6 +4169,7 @@ function serializeSessionForStorage(session) {
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
+    mixedRecognition: normalized.mixedRecognition,
     transcription: {
       scriptVocabulary: normalizeVocabulary(normalized.transcription?.scriptVocabulary),
       acousticDiagnostics: normalized.transcription?.acousticDiagnostics === true,
@@ -8168,6 +8171,7 @@ function getSessionSummary(session) {
     resumeCue: normalized.scriptResume?.index ?? null,
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
+    mixedRecognition: normalized.mixedRecognition,
     followingScript: describeFollowingScript(normalized),
     roleColorEnabled: normalized.roleColorEnabled,
     musicEffectEnabled: normalized.musicEffectEnabled,
@@ -8202,6 +8206,7 @@ function getControlPayload(session) {
     sessionId: normalized.id,
     output: getProjectorPayload(normalized),
     session: getSessionSummary(normalized),
+    recognitionLanguageHints: DEEPGRAM_LANGUAGE_HINTS,
     lines,
     languageSources: getPublicCellLanguageSources(
       selectedCell,
@@ -12717,6 +12722,7 @@ function startDeepgramTranscription({
   apiKey,
   correctionApiKey,
   language,
+  languageHints = [],
   speakerRecognitionEnabled,
   transcriptionContext,
   discussion = false,
@@ -12738,7 +12744,7 @@ function startDeepgramTranscription({
   );
   const query = new URLSearchParams({
     model: DEEPGRAM_MODEL,
-    language: selectedLanguage,
+    language: languageHints.length ? 'multi' : selectedLanguage,
     encoding: 'linear16',
     sample_rate: String(AUDIO_PCM_SAMPLE_RATE),
     channels: '1',
@@ -12749,6 +12755,7 @@ function startDeepgramTranscription({
     punctuate: 'true',
     smart_format: 'true',
   });
+  for (const hint of languageHints) query.append('language_hint', hint);
   if (selectedSpeakerRecognitionEnabled) {
     query.set('diarize_model', 'latest');
   }
@@ -12850,7 +12857,7 @@ function startDeepgramTranscription({
         keyterms: initialKeyterms, acousticDecisionMode: ACOUSTIC_SETTINGS.decisionMode,
         semantic: {...SEMANTIC_SETTINGS, enabled: followSession?.transcription?.semanticFollow === true,
           model: process.env.SEMANTIC_FOLLOW_MODEL || SEMANTIC_SETTINGS.model},
-        query: Object.fromEntries(query)}});
+        query: {...Object.fromEntries(query), ...(languageHints.length ? {language_hint: languageHints} : {})}}});
   }
   queueRequestedLiveTranslations(
     stream,
@@ -13113,6 +13120,7 @@ function startDeepgramTranscription({
             apiKey,
             correctionApiKey,
             language: selectedLanguage,
+            languageHints,
             speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
             transcriptionContext: stream.userTranscriptionContext,
             discussion,
@@ -13888,6 +13896,11 @@ io.on('connection', (socket) => {
       }
 
       const selectedProvider = normalizeTranscriptionProvider(provider);
+      const mixedRecognition = autoFollow === true && session.mixedRecognition.enabled;
+      if (mixedRecognition && selectedProvider !== 'deepgram') {
+        acknowledge({ok: false, reason: '多語辨識需要使用 Deepgram Nova-3'});
+        return;
+      }
       const trimmedApiKey =
         selectedProvider === 'deepgram'
           ? String(process.env.DEEPGRAM_API_KEY || '').trim()
@@ -14016,6 +14029,7 @@ io.on('connection', (socket) => {
               ? apiKey.trim()
               : '',
           language,
+          languageHints: mixedRecognition ? session.mixedRecognition.languages : [],
           model,
           semanticSegmentationEnabled,
           dualChannelEnabled,
@@ -14451,6 +14465,23 @@ io.on('connection', (socket) => {
     syncPerformanceFollowing(session); persistSession(session);
     broadcastControlState(sessionId); broadcastAutoFollowState(sessionId); broadcastTranscriptionState(sessionId);
     reply({ok: true, followingScript: describeFollowingScript(session)});
+  });
+
+  socket.on('transcription:set-mixed-recognition', ({sessionId, enabled, languages} = {}, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return reply({ok: false, reason: '找不到節目'});
+    if (transcriptionStreams.get(sessionId)?.closing === false || deepgramReconnectTimers.has(sessionId)) {
+      return reply({ok: false, reason: '請停止收音後再更新多語辨識設定'});
+    }
+    const settings = normalizeMixedRecognition({enabled, languages});
+    if (enabled === true && !settings.enabled) {
+      return reply({ok: false, reason: '請至少選擇兩種辨識語言'});
+    }
+    session.mixedRecognition = settings;
+    persistSession(session);
+    broadcastControlState(sessionId);
+    reply({ok: true, mixedRecognition: settings});
   });
 
   socket.on('transcription:set-script-settings', ({sessionId, scriptVocabulary, acousticDiagnostics, semanticFollow} = {}, ack) => {

@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import ProjectorLanguageSettings from '../components/ProjectorLanguageSettings'
 import RecordingsPanel from '../components/RecordingsPanel'
 import ScriptRecognitionSettings from '../components/ScriptRecognitionSettings'
+import MixedRecognitionSettings from '../components/MixedRecognitionSettings'
 import PerformanceFollowPanel from '../components/PerformanceFollowPanel'
 import WorkspaceDialog from '../components/WorkspaceDialog'
 import {WORKSPACE_PANELS, TOOL_PANELS} from '../lib/controlWorkspace'
@@ -923,6 +924,7 @@ const ControlPage = () => {
       ? params.sessionId.trim()
       : ''
   const [sessionMeta, setSessionMeta] = useState(null)
+  const [recognitionLanguageHints, setRecognitionLanguageHints] = useState([])
   const [output, setOutput] = useState(null)
   const [lines, setLines] = useState([])
   const linesRef = useRef(lines)
@@ -1475,6 +1477,9 @@ const ControlPage = () => {
         }
       }
       setSessionMeta(nextSession)
+      if (Array.isArray(payload?.recognitionLanguageHints)) {
+        setRecognitionLanguageHints(payload.recognitionLanguageHints)
+      }
       if (payload?.output) setOutput(payload.output)
       setLines(nextLines)
       syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
@@ -5102,8 +5107,11 @@ const ControlPage = () => {
               </select>
               <span className="input-note">
                 {activePanel === 'live' ? '座談語言會與演出設定分開保存；返回劇本時恢復原演出語言與 CUE。'
-                  : '現場辨識、文字跟戲與錄音匯入預設使用此語言。辨識中切換會保留已完成字幕，重新連線與定位。'}
+                  : '單語辨識、劇本欄自動選擇與錄音匯入預設使用此語言。辨識中切換會保留已完成字幕，重新連線與定位。'}
               </span>
+              {activePanel === 'follow' && sessionMeta?.mixedRecognition && recognitionLanguageHints.length > 0 &&
+                <MixedRecognitionSettings key={sessionId} sessionId={sessionId} socketRef={socketRef}
+                  settings={sessionMeta.mixedRecognition} options={recognitionLanguageHints} busy={transcriptionBusy}/>}
               <div className="input-group" hidden={activePanel !== 'follow'}>
               <label htmlFor="following-script-language">跟戲使用的劇本欄</label>
               <select id="following-script-language"
