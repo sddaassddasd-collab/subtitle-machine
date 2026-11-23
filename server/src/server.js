@@ -9186,7 +9186,9 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
     manualOverride &&
     session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.MANUAL
   ) {
-    resetAutoFollowPosition(session, '已手動定位，繼續自動跟戲。');
+    const manualCue = Number.isInteger(nextIndex) && nextIndex >= 0 && nextIndex < session.lines.length
+      ? {index: nextIndex, at: Date.now()} : null;
+    resetAutoFollowPosition(session, '已手動定位，繼續自動跟戲。', manualCue);
   }
   if (manualOverride && session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
     const performance = getPerformanceFollower(session);
@@ -9516,12 +9518,16 @@ function maybeBroadcastAutoFollowDiagnostics(sessionId, now = Date.now()) {
   broadcastAutoFollowState(sessionId);
 }
 
-function resetAutoFollowPosition(session, message = '') {
+function resetAutoFollowPosition(session, message = '', manualCue = null) {
   session.automaticLive = false;
   if (session.captionMode === 'script') session.projectorDisplayMode = 'script';
   const stream = transcriptionStreams.get(session.id);
   if (stream) semanticFollower.reset(stream, 'position_reset');
+  const previous = manualCue ? getAutoFollowState(session.id) : null;
   resetAutoFollowState(session.id, {
+    ...(previous ? {shadow: previous.shadow, manualCue: {...manualCue,
+      originIndex: previous.manualCue?.originIndex ?? session.currentIndex,
+      priorFenceMs: previous.manualCue?.priorFenceMs ?? previous.tracker.ignoreBeforeMs}} : {}),
     tracker: createTracker({ ignoreBeforeMs: stream?.autoFollowAudioMs ?? -1 }),
     listening: Boolean(stream?.ready),
     status: AUTO_FOLLOW_STATUS.LISTENING,
@@ -10022,10 +10028,14 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   } finally {
     // Observational only: never await, publish a cue or call the semantic model.
     try {
+      const manualCue = state.manualCue;
+      const comparingManualCue = manualCue?.index === session.currentIndex && !session.automaticLive;
+      if (manualCue && !comparingManualCue) state.manualCue = null;
       state.shadow.enqueue({lines: followingLines, event: {...options, text: transcript},
-        seedIndex: shadowOriginIndex, streamId: stream?.historyStreamId || null,
-        gapFenceMs: stream?.captureGapFenceMs ?? -1, ignoreBeforeMs: state.tracker.ignoreBeforeMs,
+        seedIndex: manualCue?.originIndex ?? shadowOriginIndex, streamId: stream?.historyStreamId || null,
+        gapFenceMs: stream?.captureGapFenceMs ?? -1, ignoreBeforeMs: manualCue?.priorFenceMs ?? state.tracker.ignoreBeforeMs,
         display: {index: session.currentIndex, source: session.automaticLive ? 'live' : 'script',
+          ...(comparingManualCue ? {manualBackground: true, manualCueAt: manualCue.at} : {}),
           predicted: state.tracker.prediction?.index === session.currentIndex,
           holding: state.captionDisplay.holding(session.currentIndex, session.selectedCellId),
           hidden: session.displayEnabled === false, decisionId: state.lastDecision?.id || null,

@@ -67,3 +67,28 @@ test('a worker reconnect preserves manual control, and resuming auto reuses the 
   monitor.event('setSubtitleControlMode', {mode: 'manual'});
   assert.equal(f.currentStream(), undefined);
 });
+
+test('clicking a cue in auto leaves capture active and preserves background evidence from before the click', async t => {
+  const f = createFixture({allowCueChanges: true, texts: ['我們準備開始演出', '請先放下你手中的東西']});
+  t.after(() => f.dispose());
+  const events = [], revisions = [];
+  f.history.event = (_id, type, data) => events.push({type, ...data});
+  f.history.revision = (_id, _text, _options, data) => revisions.push(data);
+  const shadow = f.shadow();
+  f.stream.autoFollowAudioMs = 2000;
+  f.connect(undefined, 'monitor').event('setCurrentIndex', {index: 1});
+  assert.equal(f.currentStream(), f.stream);
+  assert.equal(f.session.subtitleControlMode, 'auto');
+  assert.equal(f.shadow(), shadow);
+  const receivedAt = Date.now() + 300;
+  f.transcript('請先放下你手中的東西', {streamId: 'script', itemId: 'late', startMs: 1000,
+    endMs: 1900, receivedAt, isFinal: true});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(revisions.at(-1).reason, 'before_manual_fence');
+  const comparison = events.find(event => event.type === 'tracking_comparison');
+  assert.equal(comparison.locator.accepted, true);
+  assert.equal(comparison.locator.index, 1);
+  assert.equal(comparison.display.manualBackground, true);
+  assert.equal(comparison.delayFromManualMs, receivedAt - comparison.display.manualCueAt);
+  assert.equal(f.session.currentIndex, 1);
+});
