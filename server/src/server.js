@@ -16,6 +16,7 @@ const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
 const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates } = require('./auto-follow');
+const {liveTextModelOptions} = require('./live-text-model');
 const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
 const {recoveryCandidateEnd} = require('./semantic-candidates');
 const {trackerSnapshot, clientMetadata, captureTransportDetails} = require('./follow-trace');
@@ -202,7 +203,7 @@ const DEEPGRAM_KEEP_ALIVE_INTERVAL_MS = 3000;
 const DEEPGRAM_RECONNECT_MAX_ATTEMPTS = 3;
 const DEEPGRAM_RECONNECT_BASE_DELAY_MS = 500;
 const LIVE_TRANSLATION_MODEL =
-  process.env.LIVE_TRANSLATION_MODEL || 'gpt-4o-mini';
+  process.env.LIVE_TRANSLATION_MODEL || 'gpt-6-luna';
 const LIVE_DRAFT_TRANSLATION_ENABLED =
   process.env.LIVE_DRAFT_TRANSLATION_ENABLED !== 'false';
 const parsedDraftTranslationIntervalMs = Number(
@@ -805,7 +806,7 @@ const MIN_COMMIT_AUDIO_MS = Number.isFinite(parsedMinCommitAudioMs)
   ? Math.max(0, parsedMinCommitAudioMs)
   : 400;
 const TRANSCRIPTION_CORRECTION_MODEL =
-  process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-4o-mini';
+  process.env.TRANSCRIPTION_CORRECTION_MODEL || 'gpt-6-luna';
 const SECONDARY_ALIGNMENT_MODEL =
   process.env.SECONDARY_ALIGNMENT_MODEL || 'gpt-4o';
 const DEFAULT_SCRIPT_PARSE_MODEL = 'gpt-4o-mini';
@@ -5900,7 +5901,7 @@ ${original}
   const response = await client.responses.create({
     model: TRANSCRIPTION_CORRECTION_MODEL,
     input: prompt,
-    temperature: 0,
+    ...liveTextModelOptions(TRANSCRIPTION_CORRECTION_MODEL),
     max_output_tokens: 200,
   });
 
@@ -6004,7 +6005,7 @@ async function translateLiveTranscriptionLine({
   const response = await client.responses.create(
     {
       model: LIVE_TRANSLATION_MODEL,
-      temperature: 0,
+      ...liveTextModelOptions(LIVE_TRANSLATION_MODEL),
       max_output_tokens: 300,
       input: [
         {
@@ -6041,7 +6042,7 @@ async function streamDraftTranslation({
   const responseStream = client.responses.stream(
     {
       model: LIVE_TRANSLATION_MODEL,
-      temperature: 0,
+      ...liveTextModelOptions(LIVE_TRANSLATION_MODEL),
       max_output_tokens: 160,
       input: [
         {

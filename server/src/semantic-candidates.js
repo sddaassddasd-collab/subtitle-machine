@@ -46,6 +46,7 @@ function selectMatches(result, observation, revision) {
 }
 async function requestSemanticCandidate(client, observation, signal, model = S.model) {
   const response = await client.chat.completions.create({model, max_completion_tokens: 300,
+    ...(model === 'gpt-6-luna' ? {reasoning_effort: 'none'} : {}),
     response_format: {type: 'json_schema', json_schema: {name: 'script_word_matches', strict: true,
       schema: {type: 'object', additionalProperties: false, required: ['matches', 'ambiguous'], properties: {
         ambiguous: {type: 'boolean'}, matches: {type: 'array', maxItems: S.maximumMatches, items: {

@@ -1,3 +1,4 @@
+const {liveTextModelOptions} = require('./live-text-model');
 const {pinyin} = require('pinyin-pro');
 const {normalizeText} = require('./follow-text');
 const SETTINGS = Object.freeze({version: 1, timeoutMs: 2500, maximumCharacters: 300, maximumEdits: 3,
@@ -36,7 +37,7 @@ function applyCaptionEdits(original, edits, script) {
 
 async function correctScriptCaption(client, text, script, model) {
   if (!text || text.length > SETTINGS.maximumCharacters || !script.length) return text;
-  const response = await client.responses.create({model, store: false, temperature: 0, max_output_tokens: 250,
+  const response = await client.responses.create({model, store: false, ...liveTextModelOptions(model), max_output_tokens: 250,
     text: {format: {type: 'json_schema', name: 'caption_substitutions', strict: true,
       schema: {type: 'object', additionalProperties: false, required: ['edits'], properties: {
         edits: {type: 'array', maxItems: SETTINGS.maximumEdits, items: {type: 'object', additionalProperties: false,

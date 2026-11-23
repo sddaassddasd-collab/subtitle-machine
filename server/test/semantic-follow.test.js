@@ -41,6 +41,8 @@ test('structured semantic requests send only text and constrain returned data', 
     sent = body; return {choices: [{message: {content: '{"index":null,"confidence":0}'}}]};
   }}}};
   assert.deepEqual(await requestSemanticCandidate(client, observation('a')), {index: null, confidence: 0});
+  assert.equal(sent.model, 'gpt-6-luna');
+  assert.equal(sent.reasoning_effort, 'none');
   assert.equal(sent.response_format.json_schema.strict, true);
   assert.equal(sent.messages.length, 2);
   assert.equal(JSON.parse(sent.messages[1].content).heard, '演員換了一種說法');
