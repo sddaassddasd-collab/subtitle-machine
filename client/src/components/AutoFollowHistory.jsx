@@ -46,16 +46,30 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
   useEffect(() => {
     if (!open || !sessionId) return
     const controller = new AbortController()
-    let timer
+    let timer, loadedVersion
     async function load() {
       try {
         const list = await (await request(`${root}?offset=${offset}`, {signal: controller.signal})).json()
         if (controller.signal.aborted) return
         setRuns(list.runs); setHasMore(list.hasMore)
-        const id = list.runs.some(run => run.id === selectedId) ? selectedId : list.runs[0]?.id || ''
-        if (id !== selectedId) setSelectedId(id)
-        const report = id ? await (await request(`${root}/${id}`, {signal: controller.signal})).json() : null
+        const run = list.runs.find(run => run.id === selectedId) || list.runs[0]
+        const id = run?.id || ''
+        if (id !== selectedId) {
+          setSelectedId(id)
+          setPage(0)
+          setContextId('all')
+          return
+        }
+        const version = JSON.stringify([id, run?.nextSequence, run?.updatedAt, run?.endedAt])
+        if (loadedVersion === version) {
+          setError('')
+          return
+        }
+        const query = new URLSearchParams({page: String(page), filter, contextId})
+        const report = id ? await (await request(`${root}/${id}?${query}`, {signal: controller.signal})).json() : null
         if (controller.signal.aborted) return
+        const loadedRun = report?.run
+        loadedVersion = JSON.stringify([id, loadedRun?.nextSequence, loadedRun?.updatedAt, loadedRun?.endedAt])
         setData(report); setError(''); setLoaded(true)
       } catch (error) {
         if (!controller.signal.aborted) setError(error.message)
@@ -65,14 +79,12 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
     }
     void load()
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [open, sessionId, root, offset, selectedId, refresh])
+  }, [open, sessionId, root, offset, selectedId, page, filter, contextId, refresh])
 
   const report = data?.run.id === selectedId ? data : null
   const current = report?.run.endedAt === null
-  const rows = (report?.rows || []).filter(row => contextId === 'all' || row.contextId === contextId).filter(row => filter === 'unentered' ? row.type !== 'direction' && !row.entryCount
-    : filter === 'pending' ? row.type !== 'direction' && row.visits.some(visit => !visit.confirmations.length)
-      : filter === 'manual' ? row.visits.some(visit => visit.source === 'manual') : true)
-  const pages = Math.max(1, Math.ceil(rows.length / 40)), safePage = Math.min(page, pages - 1)
+  const rows = report?.rows || []
+  const {page: safePage, pageCount: pages, rowCount} = report?.pagination || {page: 0, pageCount: 1, rowCount: 0}
 
   async function act(action, work) {
     setBusy(action); setError('')
@@ -148,7 +160,7 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
       </label>}
       <div className="follow-history-table-wrap"><table className="follow-history-table">
         <thead><tr><th>字幕格／版本</th><th>台詞</th><th>錄音片段</th><th>最近進入方式／觸發時間（台北）</th><th>後續確認</th><th>狀態／歷程</th></tr></thead>
-        <tbody>{rows.slice(safePage * 40, (safePage + 1) * 40).map(row => {
+        <tbody>{rows.map(row => {
           const last = row.visits.at(-1)
           return <tr key={`${row.contextId}:${row.index}`}>
             <td>{row.index + 1}<small>{row.cellName || '場次'}<br/>版本 {report.contexts.findIndex(context => context.contextId === row.contextId) + 1}</small></td>
@@ -172,7 +184,7 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
       </table></div>
       <div className="follow-history-actions">
         <button type="button" disabled={!safePage} onClick={() => setPage(safePage - 1)}>上一頁</button>
-        <span>{safePage + 1}／{pages} 頁 · {rows.length} 格</span>
+        <span>{safePage + 1}／{pages} 頁 · {rowCount} 格</span>
         <button type="button" disabled={safePage + 1 >= pages} onClick={() => setPage(safePage + 1)}>下一頁</button>
       </div>
       <details><summary>最近事件與診斷（完整事件請匯出 JSON）</summary>
@@ -184,7 +196,7 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
           {event.mode && ` · ${event.mode === 'auto' ? '自動跟戲' : '手動跟戲'}`}
           {event.message && ` · ${event.message}`}{event.text && ` · ${event.text}`}
           {event.reason && ` · ${event.reason}`}{event.note && ` · ${event.note}`}
-          {event.type === 'decision_trace' && ` · ${event.sampleCount ?? event.samples.length} 筆分析結果`}
+          {event.type === 'decision_trace' && ` · ${event.sampleCount ?? event.samples?.length ?? 0} 筆分析結果`}
           {event.acoustic && ` · 聲音門檻 ${Math.round(event.acoustic.minimumConfidence * 100)}% · 連續命中 ${event.acoustic.supportCount}／${event.acoustic.requiredSupport}`}
           {event.workerTiming && ` · 比對排隊 ${Math.round(event.workerTiming.queueMs)} ms／處理 ${Math.round(event.workerTiming.processingMs)} ms`}
         </li>)}</ol>

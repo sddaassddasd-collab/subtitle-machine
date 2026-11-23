@@ -419,6 +419,14 @@ class AutoFollowHistory {
     await this.flush(sessionId);
     return this.store.listFollowRuns(sessionId, limit, offset);
   }
+  async snapshot(sessionId, runId, {exportDiagnostics = false} = {}) {
+    if (exportDiagnostics) await this.queue(sessionId, entry => this.flushDiagnostics(entry, true, false));
+    await this.flush(sessionId);
+    return this.store.getFollowRunHeader(sessionId, runId);
+  }
+  events(run, options) {
+    return this.store.iterateFollowEvents(run, options);
+  }
   async read(sessionId, runId, options) {
     await this.queue(sessionId, entry => this.flushDiagnostics(entry, true, false));
     await this.flush(sessionId);

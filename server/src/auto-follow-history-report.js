@@ -8,11 +8,18 @@ const STATUS_LABELS = Object.freeze({confirmed: '已確認', pending: '已進入
 const sourceLabel = source => SOURCE_LABELS[source] || source || '';
 
 function historyReport({run, events, scope}) {
+  const report = createHistoryReport(run, scope);
+  for (const event of events) report.add(event);
+  return {...report.finish(), events};
+}
+
+function createHistoryReport(run, scope) {
   const contexts = new Map(), visits = new Map(), decisions = new Map(), rows = [];
   const onsetReviews = new Map();
   const diagnosticTotals = {trackingComparisons: 0, transcriptRevisions: 0, traceSamples: 0, acousticSummaries: 0, captureSummaries: 0, problemMarks: 0};
   const windows = new Set(), streams = [];
-  for (const event of events) {
+  let seenAudio = false, hasGaps = false, stoppedNormally = false;
+  function add(event) {
     if (event.type === 'tracking_comparison') diagnosticTotals.trackingComparisons++;
     if (event.type === 'transcript_revision') diagnosticTotals.transcriptRevisions++;
     if (event.type === 'decision_trace') { windows.add(event.windowId); diagnosticTotals.traceSamples += event.samples.length; }
@@ -60,18 +67,6 @@ function historyReport({run, events, scope}) {
       const visit = decisions.get(event.decisionId);
       if (visit) visit.displayAcks.push(event);
     }
-  }
-  for (const row of rows) {
-    for (const visit of row.visits) visit.predictionReviews = onsetReviews.get(visit.decisionId) || [];
-    if (row.visits.length) row.status = row.visits.at(-1).status;
-    else if (row.type !== 'direction' && row.skips.length)
-      row.status = row.skips.every(skip => skip.source === 'manual') ? 'skipped_manual' : 'skipped_auto';
-    row.entryCount = row.visits.length;
-    row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'opening', 'correction', 'silence', 'semantic', 'paced_estimate', 'script_return'].includes(visit.source)).length;
-    row.confirmedCount = row.visits.filter(visit => visit.confirmations.length).length;
-  }
-  let seenAudio = false, hasGaps = false, stoppedNormally = false;
-  for (const event of events) {
     if (['interruption', 'logging_gap'].includes(event.type) ||
       (event.type === 'capture_audio' && event.gapMs >= 2000) ||
       (seenAudio && event.type === 'capture_status' && ['paused', 'error', 'connecting'].includes(event.status) &&
@@ -80,27 +75,39 @@ function historyReport({run, events, scope}) {
     if (stoppedNormally && event.type === 'capture_status' && event.status === 'ready') hasGaps = true;
     if (event.type === 'capture_audio') seenAudio = true;
   }
-  return {schemaVersion: 2, run, rows, streams,
-    diagnostics: scope === 'summary' && run.diagnostics ? run.diagnostics : {...diagnosticTotals, traceWindows: windows.size},
-    contexts: [...contexts.values()].map(({rows: _rows, ...context}) => context),
-    totals: {cueVersions: rows.filter(row => row.type !== 'direction').length,
-      entered: rows.filter(row => row.type !== 'direction' && row.entryCount).length,
-      unentered: rows.filter(row => row.type !== 'direction' && !row.entryCount).length,
-      visits: rows.reduce((sum, row) => sum + row.entryCount, 0),
-      unconfirmedVisits: rows.reduce((sum, row) => sum + row.visits.filter(visit => !visit.confirmations.length && row.type !== 'direction').length, 0)},
-    hasGaps, notes: ['未進入不等於辨識失敗；需核對實際演出範圍、人工跳格及收音中斷。',
-      '起始位置與場次／版本切換不計為自動觸發；同格重演保留每一次經過。',
-      '切格事件逐次保存；確認依來源與辨識片段保留首次及句尾確認，診斷訊息每通道每五秒最多一筆。',
-      '文字涵蓋代表該段辨識能對應此格，不代表該格曾顯示；跨格不會回放已過時的字幕。待確認錄音也可參與聲音比對，狀態仍保留待確認。',
-      '觸發時間為伺服器決策時間（毫秒）；recordedAt 為記錄處理時間。舊事件缺少觸發時間時沿用當時的事件時間。',
-      '辨識修訂逐次保存；決策暫存保留觸發前 5 秒及後 3 秒，重疊樣本不重複保存，單窗最長 10 秒、暫存最多 160 個分析結果。',
-      '聲音及收音摘要每五秒彙整，匯出與暫停時保存尚未滿五秒的摘要；不包含現場原始音訊。超長文字與詞陣列有上限並標示截短。',
-      '音訊時間以收音串流為單位，串流重啟會歸零；請連同串流 ID、事件序號及伺服器時間核對。',
-      '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。',
-      '起音預推另存核對過程；逾時或離開前未確認仍維持未確認，不自動視為辨識成功。',
-      'tracking_comparison 為獨立位置追蹤與該段語音處理後的畫面狀態比較，僅記錄、不控制換格；共用辨識結果，不算獨立音訊佐證。位置不同可能是正常預推或追蹤尚未確認，不等同誤跳。',
-      'joint_text_semantic 是同一段穩定長句與語意共同佐證，不代表兩份獨立音訊證據，且不代表句尾確認。'],
-    events};
+  function finish() {
+    for (const row of rows) {
+      for (const visit of row.visits) visit.predictionReviews = onsetReviews.get(visit.decisionId) || [];
+      if (row.visits.length) row.status = row.visits.at(-1).status;
+      else if (row.type !== 'direction' && row.skips.length)
+        row.status = row.skips.every(skip => skip.source === 'manual') ? 'skipped_manual' : 'skipped_auto';
+      row.entryCount = row.visits.length;
+      row.autoEntryCount = row.visits.filter(visit => ['audio', 'transcript', 'onset', 'opening', 'correction', 'silence', 'semantic', 'paced_estimate', 'script_return'].includes(visit.source)).length;
+      row.confirmedCount = row.visits.filter(visit => visit.confirmations.length).length;
+    }
+    return {schemaVersion: 2, run, rows, streams,
+      diagnostics: scope === 'summary' && run.diagnostics ? run.diagnostics : {...diagnosticTotals, traceWindows: windows.size},
+      contexts: [...contexts.values()].map(({rows: _rows, ...context}) => context),
+      totals: {cueVersions: rows.filter(row => row.type !== 'direction').length,
+        entered: rows.filter(row => row.type !== 'direction' && row.entryCount).length,
+        unentered: rows.filter(row => row.type !== 'direction' && !row.entryCount).length,
+        visits: rows.reduce((sum, row) => sum + row.entryCount, 0),
+        unconfirmedVisits: rows.reduce((sum, row) => sum + row.visits.filter(visit => !visit.confirmations.length && row.type !== 'direction').length, 0)},
+      hasGaps, notes: ['未進入不等於辨識失敗；需核對實際演出範圍、人工跳格及收音中斷。',
+        '起始位置與場次／版本切換不計為自動觸發；同格重演保留每一次經過。',
+        '切格事件逐次保存；確認依來源與辨識片段保留首次及句尾確認，診斷訊息每通道每五秒最多一筆。',
+        '文字涵蓋代表該段辨識能對應此格，不代表該格曾顯示；跨格不會回放已過時的字幕。待確認錄音也可參與聲音比對，狀態仍保留待確認。',
+        '觸發時間為伺服器決策時間（毫秒）；recordedAt 為記錄處理時間。舊事件缺少觸發時間時沿用當時的事件時間。',
+        '辨識修訂逐次保存；決策暫存保留觸發前 5 秒及後 3 秒，重疊樣本不重複保存，單窗最長 10 秒、暫存最多 160 個分析結果。',
+        '聲音及收音摘要每五秒彙整，匯出與暫停時保存尚未滿五秒的摘要；不包含現場原始音訊。超長文字與詞陣列有上限並標示截短。',
+        '音訊時間以收音串流為單位，串流重啟會歸零；請連同串流 ID、事件序號及伺服器時間核對。',
+        '顯示回報表示瀏覽器回報已處理畫面，不代表觀眾實際看見；沒有回報也不能直接判定漏顯示。',
+        '起音預推另存核對過程；逾時或離開前未確認仍維持未確認，不自動視為辨識成功。',
+        'tracking_comparison 為獨立位置追蹤與該段語音處理後的畫面狀態比較，僅記錄、不控制換格；共用辨識結果，不算獨立音訊佐證。位置不同可能是正常預推或追蹤尚未確認，不等同誤跳。',
+        'joint_text_semantic 是同一段穩定長句與語意共同佐證，不代表兩份獨立音訊證據，且不代表句尾確認。'],
+    };
+  }
+  return {add, finish};
 }
 
 function csvCell(value) {
@@ -141,4 +148,4 @@ function historyCsv(report) {
   return '\uFEFF' + records.map(record => record.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 
-module.exports = {historyReport, historyCsv, SOURCE_LABELS, STATUS_LABELS};
+module.exports = {createHistoryReport, historyReport, historyCsv, SOURCE_LABELS, STATUS_LABELS};

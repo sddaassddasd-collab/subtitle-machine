@@ -835,12 +835,47 @@ async function listFollowRuns(sessionId, limit = 20, offset = 0) {
       ORDER BY started_at DESC,run_id DESC LIMIT ? OFFSET ?`).all(sessionId, limit, offset);
   return rows.map(followData);
 }
-async function getFollowRun(sessionId, runId, {summary = false} = {}) {
+async function getFollowRunHeader(sessionId, runId) {
   const row = PERSISTENCE_BACKEND === 'postgres'
     ? (await (await getPostgresPool()).query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2', [sessionId, runId])).rows[0]
     : getSqliteDatabase().prepare('SELECT data FROM follow_runs WHERE session_id=? AND run_id=?').get(sessionId, runId);
-  if (!row) return null;
-  const run = followData(row), boundary = Number.isSafeInteger(run.nextSequence) ? run.nextSequence : 2147483647;
+  return followData(row);
+}
+
+// A run header captures the exclusive upper bound. New events appended while
+// downloading belong to the next snapshot. Keyset reads release the DB between
+// batches so slow clients do not hold a database connection or transaction.
+async function* iterateFollowEvents(run, {reportOnly = false, recent = false} = {}) {
+  const boundary = Number.isSafeInteger(run.nextSequence) ? run.nextSequence : 2147483647;
+  const filter = reportOnly ? ` AND event_type IN ('context','cue_enter','cue_confirm','cue_heard','display_ack',
+    'onset_review','opening_review','stream_configuration','capture_status','capture_audio','logging_gap','interruption')` : '';
+  const comparison = recent ? '<' : '>';
+  const order = recent ? 'DESC' : 'ASC';
+  const size = recent ? 16 : 64;
+  let cursor = recent ? boundary : 0;
+  let remaining = recent ? 80 : Infinity;
+  while (remaining > 0) {
+    const limit = Math.min(size, remaining);
+    const rows = PERSISTENCE_BACKEND === 'postgres'
+      ? (await (await getPostgresPool()).query(`SELECT sequence,data FROM follow_events WHERE session_id=$1
+        AND run_id=$2 AND sequence<$3 AND sequence${comparison}$4${filter} ORDER BY sequence ${order} LIMIT $5`,
+      [run.sessionId, run.id, boundary, cursor, limit])).rows
+      : getSqliteDatabase().prepare(`SELECT sequence,data FROM follow_events WHERE session_id=?
+        AND run_id=? AND sequence<? AND sequence${comparison}?${filter} ORDER BY sequence ${order} LIMIT ?`)
+        .all(run.sessionId, run.id, boundary, cursor, limit);
+    for (const row of rows) yield followData(row);
+    if (rows.length < limit) return;
+    cursor = rows.at(-1).sequence;
+    remaining -= rows.length;
+    // SQLite batches are synchronous. Give capture/audio callbacks a turn.
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
+
+async function getFollowRun(sessionId, runId, {summary = false} = {}) {
+  const run = await getFollowRunHeader(sessionId, runId);
+  if (!run) return null;
+  const boundary = Number.isSafeInteger(run.nextSequence) ? run.nextSequence : 2147483647;
   const details = ['decision_trace', 'transcript_revision', 'acoustic_summary', 'capture_summary'];
   // The panel needs all cue visits, but only recent diagnostic previews. Avoid
   // reading hours of word arrays and trace samples on its five-second refresh.
@@ -953,6 +988,8 @@ module.exports = {
   listOpenFollowSessionIds,
   listFollowRuns,
   getFollowRun,
+  getFollowRunHeader,
+  iterateFollowEvents,
   deleteFollowHistory,
   verifyPassword,
 };

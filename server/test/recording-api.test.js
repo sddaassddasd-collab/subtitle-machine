@@ -96,6 +96,7 @@ async function request(f, route, {method='GET', body, bodyStream, cookie=f.cooki
   const socket=new Duplex({read(){},write(chunk,_encoding,callback){chunks.push(Buffer.from(chunk));callback();}});
   socket.remoteAddress='127.0.0.1';req.socket=socket;req.connection=socket;
   const res=new http.ServerResponse(req);res.assignSocket(socket);
+  socket.on('drain', () => res.emit('drain'));
   const finished=new Promise((resolve,reject)=>{res.on('finish',resolve);res.on('error',reject);});
   f.app.handle(req,res);await finished;
   const raw=Buffer.concat(chunks), separator=raw.indexOf('\r\n\r\n');
@@ -877,4 +878,42 @@ test('semantic preference persists as opt-in without contacting a model during s
   const reply = f.socket('transcription:set-script-settings', {sessionId: f.session.id, semanticFollow: true});
   assert.equal(reply.semanticFollow, true);
   assert.equal(f.store().transcription.semanticFollow, true);
+});
+
+test('follow history paginates filtered rows, skips unchanged work, and exports beyond one batch', async t => {
+  const f = fixture();
+  t.after(async () => { await f.history.end(f.session.id); f.dispose(); });
+  const lines = Array.from({length: 87}, (_, index) => ({id: `cue-${index}`, type: 'dialogue', text: `字幕 ${index + 1}`}));
+  f.session.cells[0].lines = f.session.lines = lines;
+  f.session.subtitleControlMode = 'auto';
+  const id = await f.history.start(f.session);
+  const root = `/api/session/${f.session.id}/follow-history/${id}`;
+  for (let index = 1; index < 82; index++) f.history.enter(f.session, index, {source: 'manual'});
+
+  const first = await request(f, root);
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.json().pagination, {page: 0, pageCount: 3, rowCount: 87});
+  assert.equal(first.json().rows.length, 40);
+  const unchanged = await request(f, root, {headers: {'if-none-match': first.headers.etag}});
+  assert.equal(unchanged.status, 304);
+  assert.equal(unchanged.bytes.length, 0);
+  const second = (await request(f, root + '?filter=manual&page=1')).json();
+  assert.equal(second.rows.length, 40);
+  assert.equal(second.rows[0].index, 41);
+  assert.deepEqual(second.pagination, {page: 1, pageCount: 3, rowCount: 81});
+  assert.equal(second.totals.cueVersions, 87);
+  const last = (await request(f, root + '?filter=manual&page=200')).json();
+  assert.equal(last.pagination.page, 2);
+  assert.deepEqual(last.rows.map(row => row.index), [81]);
+  assert.equal(last.recentEvents.length, 80);
+  assert.ok(last.recentEvents[0].at >= last.recentEvents.at(-1).at);
+
+  f.history.enter(f.session, 82, {source: 'manual'});
+  const changed = await request(f, root, {headers: {'if-none-match': first.headers.etag}});
+  assert.equal(changed.status, 200);
+  assert.notEqual(changed.headers.etag, first.headers.etag);
+  const exported = (await request(f, root + '?format=json')).json();
+  assert.equal(exported.rows.length, 87);
+  assert.deepEqual(exported.events.map(event => event.sequence),
+    Array.from({length: exported.run.nextSequence - 1}, (_, index) => index + 1));
 });

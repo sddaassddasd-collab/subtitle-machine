@@ -1,4 +1,58 @@
-const {historyReport, historyCsv} = require('./auto-follow-history-report');
+const {createHash} = require('node:crypto');
+const {createHistoryReport, historyCsv} = require('./auto-follow-history-report');
+
+const PAGE_SIZE = 40;
+const listFields = ({contextId, cellName, at}) => ({contextId, cellName, at});
+
+function matchesRow(row, contextId, filter) {
+  if (contextId !== 'all' && row.contextId !== contextId) return false;
+  if (filter === 'unentered') return row.type !== 'direction' && !row.entryCount;
+  if (filter === 'pending') return row.type !== 'direction' && row.visits.some(visit => !visit.confirmations.length);
+  if (filter === 'manual') return row.visits.some(visit => visit.source === 'manual');
+  return true;
+}
+
+function previewEvent(event) {
+  const {id, at, type, index, source, status, mode, message, text, reason, note, acoustic, workerTiming, samples} = event;
+  return {id, at, type, index, source, status, mode, message, text, reason, note, acoustic, workerTiming,
+    sampleCount: samples?.length ?? event.sampleCount};
+}
+
+async function writeChunk(res, chunk) {
+  if (res.destroyed) return false;
+  if (!res.write(chunk) && !res.destroyed) await new Promise(resolve => {
+    const done = () => { res.off('drain', done); res.off('close', done); res.off('error', done); resolve(); };
+    res.once('drain', done); res.once('close', done); res.once('error', done);
+  });
+  return !res.destroyed;
+}
+
+async function streamJson(res, run, events) {
+  const result = createHistoryReport(run);
+  if (!await writeChunk(res, '{"events":[')) return;
+  let first = true, lastSequence = 0;
+  for await (const event of events) {
+    if (res.destroyed) return;
+    result.add(event);
+    if (!await writeChunk(res, (first ? '' : ',') + JSON.stringify(event))) return;
+    first = false;
+    lastSequence = event.sequence;
+  }
+  // A concurrent removal must not produce a successful partial download.
+  if (Number.isSafeInteger(run.nextSequence) && lastSequence !== run.nextSequence - 1)
+    throw new Error('匯出期間紀錄已變更，請重新下載');
+
+  const {rows, contexts, streams, ...metadata} = result.finish();
+  if (!await writeChunk(res, '],' + JSON.stringify(metadata).slice(1, -1))) return;
+  for (const [key, entries] of Object.entries({rows, contexts, streams})) {
+    if (!await writeChunk(res, `,"${key}":[`)) return;
+    for (const [index, item] of entries.entries()) {
+      if (!await writeChunk(res, (index ? ',' : '') + JSON.stringify(item))) return;
+    }
+    if (!await writeChunk(res, ']')) return;
+  }
+  res.end('}');
+}
 
 function registerAutoFollowHistoryRoutes(app, {history, requireAuth, ownedSession, broadcast, snapshot = () => null}) {
   const root = '/api/session/:sessionId/follow-history';
@@ -38,35 +92,52 @@ function registerAutoFollowHistoryRoutes(app, {history, requireAuth, ownedSessio
     res.json({ok: true, at});
   }));
   app.get(`${root}/:runId`, requireAuth, wrap(async (req, res, session) => {
-    const data = await history.read(session.id, req.params.runId, {summary: req.query.format !== 'json'});
-    if (!data) return res.status(404).json({error: '找不到這次跟戲紀錄'});
-    const report = historyReport(data);
-    if (req.query.format) {
-      if (!['csv', 'json'].includes(req.query.format)) return res.status(400).json({error: '不支援的匯出格式'});
-      const format = req.query.format;
-      res.attachment(`follow-${data.run.id}.${format}`);
+    const {format} = req.query;
+    if (format !== undefined && !['csv', 'json'].includes(format))
+      return res.status(400).json({error: '不支援的匯出格式'});
+    const run = await history.snapshot(session.id, req.params.runId, {exportDiagnostics: Boolean(format)});
+    if (!run) return res.status(404).json({error: '找不到這次跟戲紀錄'});
+    if (res.destroyed) return;
+
+    if (format) {
+      res.attachment(`follow-${run.id}.${format}`);
       res.type(format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json');
-      if (format === 'csv') return res.send(historyCsv(report));
-      // Write one event at a time: a long run must not allocate a second giant
-      // pretty-printed JSON string while its decoded events are already loaded.
-      const {events, ...metadata} = report;
-      res.write(JSON.stringify(metadata).slice(0, -1) + ',"events":[');
-      for (let index = 0; index < events.length; index++) {
-        if (res.destroyed) return;
-        if (!res.write((index ? ',' : '') + JSON.stringify(events[index]))) await new Promise(resolve => {
-          const done = () => { res.off('drain', done); res.off('close', done); res.off('error', done); resolve(); };
-          res.once('drain', done); res.once('close', done); res.once('error', done);
-        });
-      }
-      return res.end(']}');
     }
-    const {events, contexts, ...summary} = report;
-    res.json({...summary, contexts: contexts.map(({lines: _lines, ...context}) => context),
-      recentEvents: events.filter(event => event.type !== 'context').slice(-80).reverse(), status: history.status(session.id)});
+    if (format === 'json') return streamJson(res, run, history.events(run));
+
+    const page = Math.max(0, Number.parseInt(req.query.page, 10) || 0);
+    const filter = ['unentered', 'pending', 'manual'].includes(req.query.filter) ? req.query.filter : 'all';
+    const contextId = typeof req.query.contextId === 'string' ? req.query.contextId : 'all';
+    if (!format) {
+      const tag = '"' + createHash('sha256').update(JSON.stringify(
+        [run.id, run.nextSequence, run.updatedAt, run.endedAt, page, filter, contextId])).digest('hex') + '"';
+      res.set('ETag', tag);
+      if (req.get('If-None-Match') === tag) return res.status(304).end();
+    }
+
+    const result = createHistoryReport(run, 'summary');
+    for await (const event of history.events(run, {reportOnly: true})) {
+      if (res.destroyed) return;
+      result.add(event);
+    }
+    const report = result.finish();
+    if (format === 'csv') return res.send(historyCsv(report));
+
+    const rows = report.rows.filter(row => matchesRow(row, contextId, filter));
+    const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    const index = Math.min(page, pageCount - 1);
+    const recentEvents = [];
+    for await (const event of history.events(run, {recent: true})) {
+      if (res.destroyed) return;
+      if (event.type !== 'context') recentEvents.push(previewEvent(event));
+    }
+    res.json({...report, rows: rows.slice(index * PAGE_SIZE, (index + 1) * PAGE_SIZE),
+      contexts: report.contexts.map(listFields), pagination: {page: index, pageCount, rowCount: rows.length},
+      recentEvents, status: history.status(session.id)});
   }));
   app.delete(`${root}/:runId`, requireAuth, wrap(async (req, res, session) => {
-    const data = await history.read(session.id, req.params.runId, {summary: true});
-    if (!data) return res.status(404).json({error: '找不到這次跟戲紀錄'});
+    if (!await history.snapshot(session.id, req.params.runId))
+      return res.status(404).json({error: '找不到這次跟戲紀錄'});
     await history.remove(session.id, req.params.runId); res.json({ok: true});
   }));
 }
