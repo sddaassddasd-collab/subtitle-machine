@@ -125,3 +125,31 @@ test('legacy prompter subscriptions still receive full lines while new ones rece
   f.live({liveTranslationStreamId:'test-live',liveTranscriptionRevision:1,language:'zh-TW',completedFragments:[],draftByItemId:new Map(),mergedLineOverrides:new Map()});
   assert.ok(f.broadcasts.some(b=>b.room===modern.socket.data.viewerRoom&&b.event==='prompter:live-update'));
 });
+
+test('public browsing reads bounded cue pages from the active visible scene only', async t => {
+  const f = fixture(); t.after(() => f.dispose());
+  const cell = f.session.cells[0];
+  const url = '/api/viewer/' + cell.viewerToken + '/cues';
+  const query = start => `?cellId=${encodeURIComponent(cell.id)}&start=${start}`;
+  assert.equal((await request(f.app, url + query(-5))).status, 400);
+  assert.equal((await request(f.app, url + '?cellId=other&start=10')).status, 409);
+  const first = await request(f.app, url + query(0));
+  assert.equal(first.status, 200);
+  assert.equal(first.payload.cellId, cell.id);
+  assert.equal(first.payload.total, 1000);
+  assert.equal(first.payload.lines.length, 24);
+  assert.equal(first.payload.lines[4].type, 'direction');
+  assert.equal(first.payload.lines[5].music, true);
+  assert.equal(first.payload.lines[5].translations.en, 'Line 5');
+  const last = await request(f.app, url + query(990));
+  assert.equal(last.payload.lines.length, 10);
+  assert.equal(last.payload.lines.at(-1).id, 'cue-999');
+  f.session.displayEnabled = false;
+  assert.equal((await request(f.app, url + query(0))).status, 409);
+  f.session.displayEnabled = true;
+  f.session.captionMode = 'live';
+  assert.equal((await request(f.app, url + query(0))).status, 409);
+  f.session.captionMode = 'script';
+  f.session.selectedCellId = f.other.id;
+  assert.equal((await request(f.app, url + query(0))).status, 409);
+});

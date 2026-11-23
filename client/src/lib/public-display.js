@@ -26,16 +26,3 @@ export class PublicDisplayGate {
     return true
   }
 }
-
-export function preventPrompterScroll(event) {
-  if (event.type === 'wheel') {
-    if (!event.ctrlKey) event.preventDefault() // Preserve browser zoom.
-    return
-  }
-  if (event.type === 'touchmove') {
-    if (event.touches?.length === 1) event.preventDefault()
-    return
-  }
-  if (event.target?.closest?.('button, a, input, select, textarea, [role="combobox"]')) return
-  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) event.preventDefault()
-}

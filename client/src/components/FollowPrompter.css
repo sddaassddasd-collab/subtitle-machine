@@ -1,0 +1,87 @@
+.follow-prompter {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  width: min(100%, 1000px);
+  overflow: hidden;
+  text-align: start;
+}
+
+.follow-prompter-viewport {
+  height: 100%;
+  container-type: size;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  touch-action: pan-y pinch-zoom;
+  scrollbar-width: none;
+  cursor: grab;
+  user-select: none;
+}
+
+.follow-prompter-viewport:active {
+  cursor: grabbing;
+}
+
+.follow-prompter-viewport:focus-visible {
+  outline: 2px solid #94a3b8;
+  outline-offset: -2px;
+}
+
+.follow-prompter-track {
+  position: relative;
+  display: grid;
+  gap: clamp(0.65rem, 2.5vh, 1.5rem);
+  padding: 50cqh clamp(0.75rem, 3vw, 2rem);
+}
+
+.follow-prompter-cue {
+  color: #a1a1aa;
+  font-size: calc(clamp(1.55rem, 4vw, 3.25rem) * var(--prompter-font-scale, 1));
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  transition: color 180ms ease;
+}
+
+.follow-prompter-cue[aria-current="true"] {
+  color: #fff;
+}
+
+.follow-prompter-live-control {
+  position: absolute;
+  inset: auto 0.75rem 3.25rem auto;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-size: 0.85rem;
+}
+
+.follow-prompter-live-control [role="status"] {
+  background: #18181b;
+  padding: 0.35rem 0.6rem;
+  border-radius: 0.45rem;
+}
+
+.follow-prompter-live-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid #fecaca;
+  border-radius: 999px;
+  color: #fff;
+  background: #b91c1c;
+}
+
+.follow-prompter-live-button:hover {
+  background: #991b1b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .follow-prompter-cue { transition: none; }
+}

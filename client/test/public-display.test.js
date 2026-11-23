@@ -1,6 +1,6 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {PublicDisplayGate, publicViewMode, preventPrompterScroll} from '../src/lib/public-display.js'
+import {PublicDisplayGate, publicViewMode} from '../src/lib/public-display.js'
 import {normalizeDisplayPayload} from '../src/lib/displayPayload.js'
 
 test('ordinary links always default to viewer; only explicit mode selects prompter', () => {
@@ -40,26 +40,12 @@ test('switching modes accepts the same cue revision but rejects late recovery re
   assert.equal(gate.accepts(cue(12)), true)
 })
 
-test('locked prompter blocks scroll navigation while preserving controls and browser zoom', () => {
-  const blocked = overrides => {
-    let prevented = false
-    preventPrompterScroll({type: 'keydown', key: 'PageDown', preventDefault() {prevented = true}, ...overrides})
-    return prevented
-  }
-  for (const key of ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']) assert.equal(blocked({key}), true)
-  assert.equal(blocked({type: 'wheel'}), true)
-  assert.equal(blocked({type: 'wheel', ctrlKey: true}), false)
-  assert.equal(blocked({type: 'touchmove', touches: [{}]}), true)
-  assert.equal(blocked({type: 'touchmove', touches: [{}, {}]}), false)
-  assert.equal(blocked({target: {closest: () => ({tagName: 'SELECT'})}}), false)
-  assert.equal(blocked({key: 'Tab'}), false)
-})
-
 test('nearby context must contain the current cue and disappears when hidden, live or waiting', () => {
   const lines = [2,3,4,5,6,7,8,9,10].map(i => ({id: 'cue-' + i, text: '台詞' + i}))
-  const payload = {source: 'script', currentIndex: 4, line: lines[2], cueWindow: {startIndex: 2, currentIndex: 4, total: 1000, lines}}
+  const payload = {source: 'script', currentIndex: 4, line: lines[2], cueWindow: {cellId: 'scene', startIndex: 2, currentIndex: 4, total: 1000, lines}}
   const normalized = normalizeDisplayPayload(payload)
   assert.equal(normalized.currentIndex, 4)
+  assert.equal(normalized.cueWindow.cellId, 'scene')
   assert.equal(normalized.cueWindow.lines[2].id, 'cue-4')
   assert.equal(normalized.cueWindow.lines.length, 9)
   assert.equal(normalized.cueWindow.lines.at(-1).id, 'cue-10')

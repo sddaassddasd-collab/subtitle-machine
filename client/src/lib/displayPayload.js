@@ -151,7 +151,7 @@ export const normalizeDisplayPayload = (payload) => {
   const cueWindow = enabled && source === 'script' && window && window.currentIndex === currentIndex &&
     currentIndex >= startIndex && currentIndex < startIndex + windowLines.length &&
     (!nextLine?.id || windowLines[currentIndex - startIndex]?.id === nextLine.id)
-    ? {startIndex, currentIndex, total: normalizeInt(window.total, startIndex + windowLines.length, 0), lines: windowLines} : null
+    ? {cellId: typeof window.cellId === 'string' ? window.cellId : '', startIndex, currentIndex, total: normalizeInt(window.total, startIndex + windowLines.length, 0), lines: windowLines} : null
   const liveEntries = Array.isArray(payload?.liveEntries)
     ? payload.liveEntries
         .map((entry) => ({

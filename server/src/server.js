@@ -8411,7 +8411,7 @@ function getViewerPayloadBase(session, viewerCellId = null, options = {}) {
   // Legacy prompter clients can continue requesting the full lines array.
   const cueWindow = options.followOnly && isActiveCell && normalized.displayEnabled &&
     getCaptionMode(normalized) !== 'live' ? {
-      startIndex: Math.max(0, currentIndex - 2), currentIndex, total: sourceLines.length,
+      cellId: normalized.selectedCellId, startIndex: Math.max(0, currentIndex - 2), currentIndex, total: sourceLines.length,
       lines: sourceLines.slice(Math.max(0, currentIndex - 2), currentIndex + 7).map(line => toDisplayLine(normalized, line)),
     } : null;
 
@@ -11861,6 +11861,23 @@ app.get('/api/viewer-entry/:viewerAlias', (req, res) => {
     viewerToken: session.viewerToken,
     redirectPath: getViewerEntryRedirectPath(session),
   });
+});
+
+app.get('/api/viewer/:viewerToken/cues', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const target = getViewerTargetByToken(req.params.viewerToken);
+  if (!target) return res.status(410).json(getPublicSessionUnavailablePayload('viewer', {session: null, token: req.params.viewerToken}));
+  const {session, cell} = target;
+  if ((cell && cell.id !== session.selectedCellId) || req.query.cellId !== session.selectedCellId ||
+    !session.displayEnabled || getCaptionMode(session) === 'live' || holdingCaption(session)) {
+    return res.status(409).json({error: '目前無法瀏覽劇本字幕'});
+  }
+  const start = typeof req.query.start === 'string' && /^\d+$/.test(req.query.start) ? Number(req.query.start) : NaN;
+  if (!Number.isSafeInteger(start)) return res.status(400).json({error: '字幕起點不正確'});
+  const lines = ensureSessionLines(session);
+  const startIndex = Math.min(start, lines.length);
+  res.json({cellId: session.selectedCellId, startIndex, total: lines.length,
+    lines: lines.slice(startIndex, startIndex + 24).map(line => toDisplayLine(session, line))});
 });
 
 app.get('/api/viewer/:viewerToken', (req, res) => {

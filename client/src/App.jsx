@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import './App.css'
+import './components/FollowPrompter.css'
 import AdminPage from './pages/AdminPage'
 import ControlPage from './pages/ControlPage'
 import HomePage from './pages/HomePage'

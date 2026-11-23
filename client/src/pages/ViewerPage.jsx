@@ -3,7 +3,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import FollowPrompter from '../components/FollowPrompter'
 import CaptionSurface from '../components/CaptionSurface'
 import {latestCaptionRows} from '../lib/caption-frame'
-import { PublicDisplayGate, publicViewMode, preventPrompterScroll } from '../lib/public-display'
+import { PublicDisplayGate, publicViewMode } from '../lib/public-display'
 import { io } from 'socket.io-client'
 import { useAutoFollowDisplayAck } from '../lib/useAutoFollowDisplayAck'
 import {
@@ -86,6 +86,11 @@ const ViewerPage = () => {
   const liveFeedRef = useRef(null)
   const socketRef = useRef(null)
   const observeAutoFollowDisplay = useAutoFollowDisplayAck(socketRef, `${resolvedViewerToken}:${mode}`)
+  const prompterDisplayPayload = useRef(null)
+  const reportPrompterPosition = useCallback(index => {
+    const payload = prompterDisplayPayload.current
+    observeAutoFollowDisplay(payload?.currentIndex === index ? payload : null)
+  }, [observeAutoFollowDisplay])
   const hasLoadedStateRef = useRef(false)
   const recoveryTimerRef = useRef(null)
   const effectiveLiveLanguage = captionPresentation.performance
@@ -112,26 +117,20 @@ const ViewerPage = () => {
     if (gate.mode === mode) return
     gate.select(mode)
     setCueWindow(null)
+    prompterDisplayPayload.current = null
     observeAutoFollowDisplay(null)
     rejoinRef.current?.()
   }, [mode, observeAutoFollowDisplay])
 
   useEffect(() => {
     if (!isPrompter || fatalError) return
-    const page = pageRef.current
     const htmlOverflow = document.documentElement.style.overflow
     const bodyOverflow = document.body.style.overflow
     document.documentElement.style.overflow = 'hidden'
     document.body.style.overflow = 'hidden'
-    page?.addEventListener('wheel', preventPrompterScroll, { passive: false })
-    page?.addEventListener('touchmove', preventPrompterScroll, { passive: false })
-    document.addEventListener('keydown', preventPrompterScroll)
     return () => {
       document.documentElement.style.overflow = htmlOverflow
       document.body.style.overflow = bodyOverflow
-      page?.removeEventListener('wheel', preventPrompterScroll)
-      page?.removeEventListener('touchmove', preventPrompterScroll)
-      document.removeEventListener('keydown', preventPrompterScroll)
     }
   }, [isPrompter, fatalError, hasLoadedState, connectionIssue])
 
@@ -173,7 +172,8 @@ const ViewerPage = () => {
     setHasLoadedState(true)
     setConnectionIssue('')
     setFatalError('')
-    observeAutoFollowDisplay(payload)
+    prompterDisplayPayload.current = requestedMode === 'prompter' ? payload : null
+    if (requestedMode !== 'prompter' || next.source !== 'script' || !next.enabled) observeAutoFollowDisplay(payload)
   }, [observeAutoFollowDisplay])
 
   const classifyPublicFailure = useCallback((response, data, fallbackMessage) => {
@@ -693,8 +693,8 @@ const ViewerPage = () => {
         <div className="no-session"><h2>{waitingMessage}</h2><p>控制端開始此場次後，字幕會自動顯示。</p></div>
       ) : isPrompter ? (
         <FollowPrompter enabled={hasLoadedState && displayEnabled} line={line} currentIndex={currentIndex}
-          cueWindow={cueWindow} languageId={resolveAvailableLanguageId(languages, selectedLanguageId)}
-          roleColorEnabled={roleColorEnabled} live={lineSource === 'transcription'}
+          cueWindow={cueWindow} viewerToken={resolvedViewerToken} languageId={resolveAvailableLanguageId(languages, selectedLanguageId)}
+          onFollowPosition={reportPrompterPosition} roleColorEnabled={roleColorEnabled} live={lineSource === 'transcription'}
           liveEntries={visibleLiveEntries} fontPercent={prompterFontPercent} />
       ) : lineSource === 'transcription' && displayEnabled && !captionPresentation.performance ? (
         <div className={liveFeedClassName} ref={liveFeedRef}>
