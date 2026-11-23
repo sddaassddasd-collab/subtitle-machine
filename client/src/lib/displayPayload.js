@@ -326,5 +326,7 @@ export const roleToColor = (role) => {
   for (let index = 0; index < role.length; index += 1) {
     hash = (hash * 31 + role.charCodeAt(index)) % 360
   }
-  return `hsl(${hash}deg 90% 76%)`
+  // Keep blue-violet roles readable on the black subtitle background.
+  const hue = hash >= 235 && hash <= 305 ? 165 + Math.round((hash - 235) / 2) : hash
+  return `hsl(${hue}deg 90% 76%)`
 }
