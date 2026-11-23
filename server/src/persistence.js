@@ -680,7 +680,7 @@ async function openFollowRun(proposed, {fresh = false} = {}) {
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [historyLock(proposed.sessionId)]);
-      current = followData((await client.query('SELECT data FROM follow_runs WHERE session_id=$1 AND ended_at IS NULL', [proposed.sessionId])).rows[0]);
+      current = followData((await client.query('SELECT data FROM follow_runs WHERE session_id=$1 AND ended_at IS NULL FOR UPDATE', [proposed.sessionId])).rows[0]);
       if (current && fresh) {
         const closed = finish(current);
         await client.query('UPDATE follow_runs SET ended_at=$3,data=$4::jsonb WHERE session_id=$1 AND run_id=$2',
@@ -772,7 +772,7 @@ async function saveFollowHistory(run, events) {
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [historyLock(run.sessionId)]);
-      const stored = followData((await client.query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2', [run.sessionId, run.id])).rows[0]);
+      const stored = followData((await client.query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2 FOR UPDATE', [run.sessionId, run.id])).rows[0]);
       // Deletion is explicit. A stale writer must not recreate the removed run.
       if (!stored) { await client.query('COMMIT'); return {run: null, context: null}; }
       const existing = (await client.query(`SELECT data FROM follow_events WHERE session_id=$1 AND run_id=$2
@@ -840,6 +840,20 @@ async function getFollowRunHeader(sessionId, runId) {
     ? (await (await getPostgresPool()).query('SELECT data FROM follow_runs WHERE session_id=$1 AND run_id=$2', [sessionId, runId])).rows[0]
     : getSqliteDatabase().prepare('SELECT data FROM follow_runs WHERE session_id=? AND run_id=?').get(sessionId, runId);
   return followData(row);
+}
+
+// Record the user's intent without waiting for the in-process event queue.
+async function requestFollowRunEnd(sessionId, runId, at, reason) {
+  const patch = {finishRequestedAt: at, finishReason: reason};
+  const row = PERSISTENCE_BACKEND === 'postgres'
+    ? (await (await getPostgresPool()).query(`UPDATE follow_runs SET data=data || $3::jsonb
+        WHERE session_id=$1 AND run_id=$2 AND ended_at IS NULL AND data->>'finishRequestedAt' IS NULL RETURNING data`,
+      [sessionId, runId, JSON.stringify(patch)])).rows[0]
+    : getSqliteDatabase().prepare(`UPDATE follow_runs
+        SET data=json_set(data, '$.finishRequestedAt', ?, '$.finishReason', ?)
+        WHERE session_id=? AND run_id=? AND ended_at IS NULL AND json_extract(data, '$.finishRequestedAt') IS NULL
+        RETURNING data`).get(at, reason, sessionId, runId);
+  return row ? followData(row) : getFollowRunHeader(sessionId, runId);
 }
 
 // A run header captures the exclusive upper bound. New events appended while
@@ -989,6 +1003,7 @@ module.exports = {
   listFollowRuns,
   getFollowRun,
   getFollowRunHeader,
+  requestFollowRunEnd,
   iterateFollowEvents,
   deleteFollowHistory,
   verifyPassword,

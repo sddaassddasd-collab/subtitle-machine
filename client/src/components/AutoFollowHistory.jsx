@@ -37,6 +37,7 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
   const [contextId, setContextId] = useState('all')
   const [page, setPage] = useState(0)
   const [refresh, setRefresh] = useState(0)
+  const [requestedEndId, setRequestedEndId] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
@@ -58,6 +59,10 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
           setSelectedId(id)
           setPage(0)
           setContextId('all')
+          return
+        }
+        if (run?.endedAt === null && run.finishRequestedAt != null) {
+          setError(''); setLoaded(true)
           return
         }
         const version = JSON.stringify([id, run?.nextSequence, run?.updatedAt, run?.endedAt])
@@ -82,7 +87,9 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
   }, [open, sessionId, root, offset, selectedId, page, filter, contextId, refresh])
 
   const report = data?.run.id === selectedId ? data : null
-  const current = report?.run.endedAt === null
+  const selectedRun = runs.find(run => run.id === selectedId) || report?.run
+  const current = selectedRun?.endedAt === null
+  const ending = current && (selectedRun.finishRequestedAt != null || requestedEndId === selectedId)
   const rows = report?.rows || []
   const {page: safePage, pageCount: pages, rowCount} = report?.pagination || {page: 0, pageCount: 1, rowCount: 0}
 
@@ -98,22 +105,25 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
     {(error || historyStatus?.error || report?.status.error) && <p className="control-status-error" role="alert">
       {error || historyStatus?.error || report?.status.error}</p>}
     <div className="follow-history-actions">
-      <button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={() => {
+      <button type="button" className="subtle-button" disabled={Boolean(busy) || ending} onClick={() => {
         if ((report?.status.runId || historyStatus?.runId) && !window.confirm('結束目前紀錄並開始新一次？舊紀錄會保留。')) return
         void act('開始中', async () => {
           const result = await (await request(`${root}/start`, {method: 'POST'})).json()
           setOffset(0); setSelectedId(result.id); setPage(0); setContextId('all')
         })
       }}>開始新一次紀錄</button>
-      <button type="button" className="subtle-button" disabled={Boolean(busy) || !current} onClick={() => {
-        void act('結束中', () => request(`${root}/${selectedId}/end`, {method: 'POST'}))
-      }}>結束本次紀錄</button>
+      <button type="button" className="subtle-button" disabled={Boolean(busy) || !current || ending} onClick={() => {
+        void act('結束中', async () => {
+          const result = await (await request(`${root}/${selectedId}/end`, {method: 'POST'})).json()
+          if (result.ending) setRequestedEndId(selectedId)
+        })
+      }}>{ending ? '正在結束' : '結束本次紀錄'}</button>
       <button type="button" className="subtle-button" disabled={Boolean(busy)} onClick={() => setRefresh(value => value + 1)}>重新整理</button>
       {busy && <span role="status">{busy}…</span>}
     </div>
     <div className="follow-history-actions">
       <input value={problemNote} maxLength={300} onChange={event => setProblemNote(event.target.value)} placeholder="問題註記（選填）" aria-label="問題註記"/>
-      <button type="button" className="subtle-button" disabled={Boolean(busy) || !current} onClick={() => {
+      <button type="button" className="subtle-button" disabled={Boolean(busy) || !current || ending} onClick={() => {
         void act('標記中', async () => {
           await request(`${root}/${selectedId}/mark`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({note: problemNote})})
           setProblemNote('')
@@ -123,7 +133,7 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
     <label className="follow-history-select">排練紀錄
       <select value={selectedId} onChange={event => { setSelectedId(event.target.value); setPage(0); setContextId('all') }}>
         {!runs.length && <option value="">尚無紀錄</option>}
-        {runs.map(run => <option key={run.id} value={run.id}>{time(run.startedAt)} · {run.name} · {run.endedAt === null ? '進行中' : '已結束'}</option>)}
+        {runs.map(run => <option key={run.id} value={run.id}>{time(run.startedAt)} · {run.name} · {run.endedAt === null ? run.finishRequestedAt != null ? '正在結束' : '進行中' : '已結束'}</option>)}
       </select>
     </label>
     {(offset > 0 || hasMore) && <div className="follow-history-actions">
@@ -131,8 +141,9 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
       <span>紀錄第 {Math.floor(offset / 20) + 1} 頁</span>
       <button type="button" disabled={!hasMore} onClick={() => { setOffset(value => value + 20); setSelectedId(''); setPage(0) }}>較舊紀錄</button>
     </div>}
+    {ending && <p role="status">正在結束紀錄，系統正在保存最後一批資料。</p>}
     {report && <>
-      <p role="status">{current ? '紀錄進行中' : `已結束：${time(report.run.endedAt)}`} · 台詞版本 {report.totals.cueVersions} 格 ·
+      <p role="status">{ending ? '正在結束' : current ? '紀錄進行中' : `已結束：${time(selectedRun?.endedAt)}`} · 台詞版本 {report.totals.cueVersions} 格 ·
         已進入 {report.totals.entered} 格 · 未進入 {report.totals.unentered} 格 · 共經過 {report.totals.visits} 次
         {report.hasGaps && ' · 含收音／服務中斷，請核對時間線'}</p>
       <div className="follow-history-actions">

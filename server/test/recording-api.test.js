@@ -785,6 +785,8 @@ test('follow history records real text/manual transitions, exports every visit a
   assert.equal((await request(f, root)).status, 404);
   assert.equal((await request(f, `${root}/${id}?format=json`)).status, 404);
   f.session.ownerUserId = originalOwner;
+  assert.equal((await request(f, `${root}/${id}/end`, {method: 'POST'})).status, 202);
+  await f.history.flush(f.session.id);
   assert.equal((await request(f, `${root}/${id}/end`, {method: 'POST'})).status, 200);
   const next = (await request(f, `${root}/start`, {method: 'POST'})).json().id;
   assert.notEqual(next, id);

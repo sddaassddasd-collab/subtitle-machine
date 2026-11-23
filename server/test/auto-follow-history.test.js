@@ -568,3 +568,64 @@ test('deferred comparisons retain the source context and cannot leak into a new 
   assert.equal(report.events.filter(e => e.type === 'tracking_comparison').length, 0);
   await h.end(s.id);
 });
+
+test('end requests bypass a blocked event queue and write the backlog in bounded batches', async () => {
+  const batches = [];
+  const {session: s, history: h} = fixture('async-finish', {store: {...store,
+    async saveFollowHistory(run, events) {
+      batches.push(events.map(event => event.type));
+      return store.saveFollowHistory(run, events);
+    },
+  }});
+  const id = await h.start(s);
+  for (let i = 0; i < 140; i++) h.event(s.id, 'diagnostic', {message: `event ${i}`});
+  await h.entry(s.id).tail;
+  let unblock;
+  const blocked = h.queue(s.id, () => new Promise(resolve => { unblock = resolve; }));
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    const accepted = await h.requestEnd(s.id, id);
+    assert.equal(accepted.endedAt, null);
+    assert.equal((await h.list(s.id, 10, 0))[0].finishRequestedAt, accepted.finishRequestedAt);
+    assert.equal((await h.requestEnd(s.id, id)).finishRequestedAt, accepted.finishRequestedAt);
+    assert.deepEqual(batches, []);
+  } finally {
+    unblock();
+  }
+  await blocked;
+  await h.flush(s.id);
+  const complete = await store.getFollowRun(s.id, id);
+  assert.equal(complete.events.filter(event => event.type === 'diagnostic').length, 140);
+  assert.equal(complete.events.at(-1).type, 'run_end');
+  assert.ok(batches.every(batch => batch.length <= 64));
+  assert.deepEqual(batches.at(-1), ['run_end']);
+  assert.ok((await h.requestEnd(s.id, id)).endedAt);
+  const next = await h.start(s, {fresh: true});
+  await h.requestEnd(s.id, id);
+  assert.equal(h.entry(s.id).enabled, true);
+  assert.equal(h.status(s.id).runId, next);
+  await h.end(s.id);
+});
+
+test('a durable finish intent survives restart and a failed final write', async () => {
+  const {session: s, history: original} = fixture('restart-finishing');
+  const id = await original.start(s);
+  await original.flush(s.id);
+  await store.requestFollowRunEnd(s.id, id, Date.now(), 'user_finished');
+  let failed = false;
+  const {history: recovered} = fixture(s.id, {store: {...store, async saveFollowHistory(run, events) {
+    if (!failed && events.some(event => event.type === 'run_end')) {
+      failed = true;
+      throw new Error('database temporarily unavailable');
+    }
+    return store.saveFollowHistory(run, events);
+  }}});
+  assert.equal(await recovered.restore(s), null);
+  await assert.rejects(recovered.flush(s.id), /temporarily unavailable/);
+  assert.equal((await recovered.list(s.id, 1, 0))[0].endedAt, null);
+  await recovered.flush(s.id);
+  const data = await store.getFollowRun(s.id, id);
+  assert.ok(data.run.endedAt);
+  assert.equal(data.events.filter(event => event.type === 'run_end').length, 1);
+  assert.ok(data.events.some(event => event.reason === 'server_restarted'));
+});

@@ -52,6 +52,7 @@ class AutoFollowHistory {
   }
   queue(sessionId, work, {background = false, bytes = 1024} = {}) {
     const entry = this.entry(sessionId);
+    if (background && entry.closingRunId) return Promise.resolve();
     if (background && (entry.queued >= this.maxPending || entry.queuedBytes + entry.pendingBytes + bytes > this.maxPendingBytes)) {
       entry.lost++; entry.error = '歷程待保存資料過多，部分事件未記錄';
       return Promise.resolve();
@@ -63,6 +64,8 @@ class AutoFollowHistory {
         entry.run = previous?.run || null; entry.context = previous?.context || null; entry.loaded = true;
         if (entry.run) this.append(entry, 'interruption', {reason: 'server_restarted',
           message: '服務重新啟動；從上次保存至恢復收音之間的紀錄不完整。'});
+        if (entry.run?.finishRequestedAt != null) this.resumeFinish(sessionId, entry, entry.run);
+        else if (entry.closingRunId && entry.closingRunId !== entry.run?.id) entry.closingRunId = null;
       }
       return work(entry);
     });
@@ -73,6 +76,15 @@ class AutoFollowHistory {
       this.schedule(sessionId, entry, 1000);
     }).finally(() => { entry.queued--; entry.queuedBytes -= bytes; });
     return task;
+  }
+  resumeFinish(sessionId, entry, run) {
+    if (entry.closingRunId === run.id) return;
+    entry.closingRunId = run.id;
+    entry.finishReason = run.finishReason;
+    entry.enabled = false;
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.timer = null;
+    this.schedule(sessionId, entry, 0);
   }
   schedule(sessionId, entry, delay = this.flushMs) {
     if (entry.timer) return;
@@ -141,14 +153,20 @@ class AutoFollowHistory {
     if (fresh || !entry.run || entry.requestedSignature !== context.signature) entry.confirmGate.clear();
     entry.requestedSignature = context.signature;
     return this.queue(sessionId, async entry => {
-      if (entry.run?.endedAt != null) await this.flushEntry(entry);
+      if (entry.run && (entry.closingRunId === entry.run.id || entry.run.endedAt != null))
+        await this.finishEntry(entry, entry.finishReason || entry.run.endReason);
       if (fresh && entry.run) await this.finishEntry(entry, 'new_run');
+      entry.enabled = true;
       if (!entry.run) {
         const at = this.now();
         const opened = await this.store.openFollowRun({id: crypto.randomUUID(), sessionId, name, startedAt: at, updatedAt: at,
           endedAt: null, nextSequence: 1, cursor: null}, {fresh});
         entry.run = opened.run; entry.context = opened.context; entry.transport = null; entry.lastPacket = null;
         entry.trace = new FollowTrace(); entry.acousticSummary = null; entry.captureSummary = null;
+        if (entry.run.finishRequestedAt != null) {
+          this.resumeFinish(sessionId, entry, entry.run);
+          return entry.run.id;
+        }
         if (!opened.created) {
           this.append(entry, 'interruption', {reason: 'concurrent_service', message: '服務交接；沿用已建立的跟戲紀錄。'});
         }
@@ -167,7 +185,7 @@ class AutoFollowHistory {
   restore(session) {
     const context = historyContext(session), index = session.currentIndex;
     return this.queue(session.id, entry => {
-      if (!entry.run) return null;
+      if (!entry.run || entry.closingRunId === entry.run.id) return null;
       entry.enabled = true; entry.requestedSignature = context.signature;
       this.context(entry, context, index);
       if (entry.run.cursor?.index !== index) this.visit(entry, index, 'resume');
@@ -336,7 +354,7 @@ class AutoFollowHistory {
   mark(session, runId, data = {}) {
     const at = this.now(), index = session.currentIndex;
     return this.queue(session.id, entry => {
-      if (!entry.run || entry.run.id !== runId || entry.run.endedAt !== null)
+      if (!entry.run || entry.run.id !== runId || entry.closingRunId === runId || entry.run.endedAt !== null)
         throw Object.assign(new Error('這次紀錄已結束或已切換，請重新整理'), {status: 409});
       this.append(entry, 'problem_mark', {at, index, ...data});
       this.saveTrace(entry, entry.trace.trigger(at, 'problem_mark', {index}));
@@ -366,7 +384,7 @@ class AutoFollowHistory {
         gapStartedAt: previous?.at || null, gapMs: previous ? at - previous.at : null});
     }, {background: true});
   }
-  async flushEntry(entry) {
+  async flushEntry(entry, {bounded = false} = {}) {
     if (entry.timer) clearTimeout(entry.timer);
     entry.timer = null;
     if (!entry.run) return;
@@ -376,52 +394,87 @@ class AutoFollowHistory {
       this.append(entry, 'logging_gap', {count, message: '保存中斷期間有事件未記錄，不能據此判定漏格。'});
     }
     if (!entry.pending.length) return;
-    const batch = entry.pending.slice();
+    let count = entry.pending.length, bytes = entry.pendingBytes;
+    if (bounded) {
+      count = 0; bytes = 0;
+      for (const event of entry.pending) {
+        const size = Buffer.byteLength(JSON.stringify(event));
+        if (count && (count >= 64 || bytes + size > 512 * 1024)) break;
+        count++; bytes += size;
+      }
+    }
+    const batch = entry.pending.slice(0, count);
+    const runId = entry.run.id;
     const saved = await this.store.saveFollowHistory(structuredClone(entry.run), batch);
     if (saved.run?.cursor?.visitId !== entry.run.cursor?.visitId) entry.confirmGate.clear();
     entry.run = saved.run; entry.context = saved.context;
-    entry.pending.splice(0, batch.length); entry.pendingBytes = 0; entry.error = '';
+    entry.pending.splice(0, batch.length); entry.pendingBytes = Math.max(0, entry.pendingBytes - bytes); entry.error = '';
     if (!entry.run || entry.run.endedAt !== null) {
+      if (entry.pending.length && entry.run) {
+        // Another process already closed this run. Preserve late events in bounded batches.
+        return;
+      }
+      if (entry.closingRunId === runId) entry.closingRunId = null;
+      entry.pending = []; entry.pendingBytes = 0;
       entry.run = null; entry.context = null; entry.confirmGate.clear();
       return;
     }
+    if (entry.run.finishRequestedAt != null) this.resumeFinish(entry.run.sessionId, entry, entry.run);
     if (entry.lost) {
       const count = entry.lost; entry.lost = 0;
       this.append(entry, 'logging_gap', {count, message: '保存中斷期間有事件未記錄，不能據此判定漏格。'});
     }
   }
-  flush(sessionId) {
+  flush(sessionId, {finish = true} = {}) {
+    if (!finish && this.entries.get(sessionId)?.closingRunId) return Promise.resolve();
     return this.queue(sessionId, async entry => {
-      do { await this.flushEntry(entry); } while (entry.run && entry.pending.length);
+      do {
+        if (entry.run && (entry.closingRunId === entry.run.id || entry.run.finishRequestedAt != null)) {
+          if (finish) await this.finishEntry(entry, entry.finishReason || entry.run.finishReason);
+          return;
+        }
+        await this.flushEntry(entry);
+      } while (entry.run && entry.pending.length);
     });
   }
-  async finishEntry(entry, reason) {
+  async finishEntry(entry, reason = 'user_finished') {
     if (!entry.run) return;
-    this.flushDiagnostics(entry, true);
-    if (entry.lost || entry.pending.length >= this.maxPending || entry.pendingBytes >= this.maxPendingBytes - 2048) {
-      await this.flushEntry(entry);
-      if (entry.pending.length) await this.flushEntry(entry);
+    if (entry.run.endedAt === null) this.flushDiagnostics(entry, true);
+    while (entry.run && entry.pending.length) {
+      await this.flushEntry(entry, {bounded: true});
+      if (entry.pending.length) await new Promise(resolve => setImmediate(resolve));
     }
     if (!entry.run) return;
+    if (entry.run.endedAt !== null) return;
     this.append(entry, 'run_end', {reason});
     entry.run.endedAt = this.now(); entry.run.endReason = reason;
     await this.flushEntry(entry);
-    entry.run = null; entry.context = null; entry.confirmGate.clear();
   }
   end(sessionId, reason = 'user_finished', runId = null) {
-    const entry = this.entry(sessionId); entry.enabled = false;
     return this.queue(sessionId, entry => {
       if (runId && entry.run?.id !== runId) throw Object.assign(new Error('本次紀錄已結束或已切換，請重新整理'), {status: 409});
+      entry.enabled = false;
       return this.finishEntry(entry, reason);
     });
   }
+  async requestEnd(sessionId, runId) {
+    const run = await this.store.requestFollowRunEnd(sessionId, runId, this.now(), 'user_finished');
+    if (!run) throw Object.assign(new Error('找不到這次跟戲紀錄'), {status: 404});
+    if (run.endedAt === null) {
+      const entry = this.entry(sessionId);
+      if (!entry.run) entry.loaded = false;
+      if (!entry.loaded || entry.run?.id === runId) this.resumeFinish(sessionId, entry, run);
+    }
+    return run;
+  }
   async list(sessionId, limit, offset) {
-    await this.flush(sessionId);
+    await this.flush(sessionId, {finish: false});
     return this.store.listFollowRuns(sessionId, limit, offset);
   }
   async snapshot(sessionId, runId, {exportDiagnostics = false} = {}) {
-    if (exportDiagnostics) await this.queue(sessionId, entry => this.flushDiagnostics(entry, true, false));
-    await this.flush(sessionId);
+    if (exportDiagnostics && !this.entries.get(sessionId)?.closingRunId)
+      await this.queue(sessionId, entry => this.flushDiagnostics(entry, true, false));
+    await this.flush(sessionId, {finish: false});
     return this.store.getFollowRunHeader(sessionId, runId);
   }
   events(run, options) {
@@ -444,7 +497,7 @@ class AutoFollowHistory {
         if (entry.timer) clearTimeout(entry.timer);
         entry.timer = null;
         entry.pending = []; entry.run = null; entry.context = null; entry.enabled = false;
-        entry.pendingBytes = 0;
+        entry.pendingBytes = 0; entry.closingRunId = null;
         entry.trace = new FollowTrace(); entry.acousticSummary = null; entry.captureSummary = null;
       }
       await this.store.deleteFollowHistory(sessionId, runId);
@@ -452,6 +505,10 @@ class AutoFollowHistory {
   }
   async close() {
     await Promise.all([...this.entries.keys()].map(id => this.queue(id, async entry => {
+      if (entry.run && entry.closingRunId === entry.run.id) {
+        await this.finishEntry(entry, entry.finishReason);
+        return;
+      }
       this.flushDiagnostics(entry, true);
       if (entry.run) this.append(entry, 'interruption', {reason: 'server_shutdown', message: '服務停止，等待恢復收音。'});
       await this.flushEntry(entry);

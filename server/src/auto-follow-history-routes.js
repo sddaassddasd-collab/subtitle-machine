@@ -83,8 +83,9 @@ function registerAutoFollowHistoryRoutes(app, {history, requireAuth, ownedSessio
     res.json({accepted});
   }));
   app.post(`${root}/:runId/end`, requireAuth, wrap(async (req, res, session) => {
-    await history.end(session.id, 'user_finished', req.params.runId);
-    broadcast(session.id); res.json({ok: true});
+    const run = await history.requestEnd(session.id, req.params.runId);
+    const ending = run.endedAt === null;
+    res.status(ending ? 202 : 200).json({ok: true, ending, endedAt: run.endedAt});
   }));
   app.post(`${root}/:runId/mark`, requireAuth, wrap(async (req, res, session) => {
     const at = await history.mark(session, req.params.runId, {state: snapshot(session), note: String(req.body?.note || '').slice(0, 300)});
@@ -110,7 +111,7 @@ function registerAutoFollowHistoryRoutes(app, {history, requireAuth, ownedSessio
     const contextId = typeof req.query.contextId === 'string' ? req.query.contextId : 'all';
     if (!format) {
       const tag = '"' + createHash('sha256').update(JSON.stringify(
-        [run.id, run.nextSequence, run.updatedAt, run.endedAt, page, filter, contextId])).digest('hex') + '"';
+        [run.id, run.nextSequence, run.updatedAt, run.endedAt, run.finishRequestedAt, page, filter, contextId])).digest('hex') + '"';
       res.set('ETag', tag);
       if (req.get('If-None-Match') === tag) return res.status(304).end();
     }
@@ -136,8 +137,9 @@ function registerAutoFollowHistoryRoutes(app, {history, requireAuth, ownedSessio
       recentEvents, status: history.status(session.id)});
   }));
   app.delete(`${root}/:runId`, requireAuth, wrap(async (req, res, session) => {
-    if (!await history.snapshot(session.id, req.params.runId))
-      return res.status(404).json({error: '找不到這次跟戲紀錄'});
+    const run = await history.snapshot(session.id, req.params.runId);
+    if (!run) return res.status(404).json({error: '找不到這次跟戲紀錄'});
+    if (run.endedAt === null) return res.status(409).json({error: '請先結束本次紀錄再刪除'});
     await history.remove(session.id, req.params.runId); res.json({ok: true});
   }));
 }
