@@ -13,6 +13,7 @@ import { ControlStatusSummary, ControlStatusDetails } from '../components/Contro
 import AutoFollowHistory from '../components/AutoFollowHistory'
 import ControlOutputPreview from '../components/ControlOutputPreview'
 import RecognitionPreview from '../components/RecognitionPreview'
+import RecognitionBriefSettings from '../components/RecognitionBriefSettings'
 import {APP_BUILD} from '../lib/build-info'
 import {CaptureSession} from '../lib/capture-session'
 import {CaptureHealthOutbox} from '../lib/capture-health'
@@ -5178,7 +5179,7 @@ const ControlPage = () => {
                 id="transcription-context"
                 rows={4}
                 maxLength={600}
-                placeholder="例如：主題、關鍵詞、專有名詞"
+                placeholder="少量主題或關鍵詞可以填在這裡。完整節目介紹可在下方擷取。"
                 value={transcription.transcriptionContext}
                 disabled={transcriptionBusy}
                 onChange={handleTranscriptionContextChange}
@@ -5186,6 +5187,8 @@ const ControlPage = () => {
                   void persistTranscriptionContext()
                 }}
               />
+              {(activePanel === 'follow' || activePanel === 'live') &&
+                <RecognitionBriefSettings key={sessionId} sessionId={sessionId} apiKey={apiKey}/>}
               {activePanel === 'live' && <span className="input-note">
                 座談字幕會使用劇場與文化藝術術語。可在上方補充劇名、人名或作品專有詞。
               </span>}

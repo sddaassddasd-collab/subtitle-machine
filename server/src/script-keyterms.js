@@ -51,10 +51,10 @@ function scriptKeyterms(lines, currentIndex, context = '', vocabulary = [], {nea
   return terms;
 }
 
-function discussionKeyterms(language, context) {
+function discussionKeyterms(language, context, approvedTerms = []) {
   const theatre = normalizeVocabulary(THEATRE_TERMS[language] || '');
   const custom = String(context || '').split(/[\s,，、;；]+/u);
-  return scriptKeyterms([], 0, '', [...custom.slice(0, 4), ...theatre, ...custom.slice(4)], {nearby: false});
+  return scriptKeyterms([], 0, '', [...approvedTerms, ...custom.slice(0, 4), ...theatre, ...custom.slice(4)], {nearby: false});
 }
 
 // Configure is optional and never blocks audio. One update may be in flight;
@@ -67,9 +67,11 @@ function refreshKeyterms(stream, lines, currentIndex, emit, now = Date.now()) {
     if (now - state.pendingAt > 5000) { state.disabled = true; emit('timeout', {terms: state.pending}); }
     return;
   }
-  const terms = stream.discussion ? discussionKeyterms(stream.language, stream.userTranscriptionContext)
+  const approvedTerms = stream.recognitionBrief?.terms || [];
+  const terms = stream.discussion ? discussionKeyterms(stream.language, stream.userTranscriptionContext, approvedTerms)
     : scriptKeyterms(lines, currentIndex, stream.transcriptionContext,
-    stream.scriptVocabularyActive === false ? [] : stream.scriptVocabulary, {nearby: stream.scriptContextUncertain !== true});
+    [...approvedTerms, ...(stream.scriptVocabularyActive === false ? [] : stream.scriptVocabulary || [])],
+    {nearby: stream.scriptContextUncertain !== true});
   if (JSON.stringify(terms) === JSON.stringify(state.terms)) return;
   try {
     stream.socket.send(JSON.stringify({type: 'Configure', keyterms: terms}));
