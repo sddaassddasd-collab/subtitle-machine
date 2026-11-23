@@ -2,6 +2,8 @@ import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket, o
 import {signalMetrics} from './audio-signal.js'
 import {AUDIO_WIRE} from './capture-wire.mjs'
 
+const automaticStopReasons = new Set(['silence_timeout', 'script_end'])
+
 export const PIPELINE_SETTINGS = Object.freeze({version: 5, sampleRate: 24000, maximumAgeMs: 10000,
   maximumQueuedMs: 8000, overflowRetainMs: 1000,
   liveLagMs: 3000, liveLagHoldMs: 2000, liveRetainMs: 240, liveResetCooldownMs: 30000,
@@ -74,8 +76,8 @@ export class CapturePipeline {
       })
       socket.on('control:capture-health', data => {
         if (data?.captureId !== this.captureId) return
-        if (data.reason === 'silence_timeout') {
-          this.finishForSilence(data.message)
+        if (automaticStopReasons.has(data.reason)) {
+          this.finishAutomaticCapture(data.message)
           return
         }
         if (data.recoverable && data.reason !== 'capture_stalled')
@@ -111,8 +113,8 @@ export class CapturePipeline {
             this.state('running', '音訊傳輸已恢復，辨識持續進行。')
         },
         onAck: ack => {
-          if (ack.reason === 'silence_timeout') {
-            this.finishForSilence(ack.message)
+          if (automaticStopReasons.has(ack.reason)) {
+            this.finishAutomaticCapture(ack.message)
             return
           }
           if (ack.ok && Number.isFinite(ack.networkAgeMs)) {
@@ -155,8 +157,8 @@ export class CapturePipeline {
           captureTransport: {...T, ...this.transport.details()}},
       }, (error, response) => error ? reject(new Error('辨識服務連線逾時')) : resolve(response)))
       if (!this.desired || epoch !== this.epoch) return
-      if (result?.reason === 'silence_timeout') {
-        this.finishForSilence(result.message)
+      if (automaticStopReasons.has(result?.reason)) {
+        this.finishAutomaticCapture(result.message)
         return
       }
       if (result?.ok !== true) {
@@ -378,8 +380,8 @@ export class CapturePipeline {
       }
     })
   }
-  finishForSilence(message) {
-    this.notify?.({type: 'silence-timeout', message: message || '無聲逾時，已切回手動並停止收音。'})
+  finishAutomaticCapture(message) {
+    this.notify?.({type: 'automatic-capture-stop', message: message || '已切回手動並停止收音。'})
     this.stop({preserveText: false})
   }
   stop({preserveText = true} = {}) {

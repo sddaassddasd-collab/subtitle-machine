@@ -1,5 +1,7 @@
 const {SILENCE_TIMEOUT_REASON, normalizeSilenceTimeout, reachedSilenceTimeout} = require('./silence-timeout');
 const express = require('express');
+const SCRIPT_END_REASON = 'script_end';
+const SCRIPT_END_GRACE_MS = 3000;
 const {ShadowFollow} = require('./shadow-follow');
 const { resolveProjectorLanguages } = require('./projector-languages');
 const cors = require('cors');
@@ -3966,6 +3968,8 @@ function ensureSessionStructure(session) {
   session.roleColorEnabled = session.roleColorEnabled !== false;
   session.stageDirectionsAsDialogue = session.stageDirectionsAsDialogue === true;
   session.silenceTimeout = normalizeSilenceTimeout(session.silenceTimeout);
+  session.stopAtScriptEnd = session.stopAtScriptEnd === true;
+  session.scriptEndPhrase = String(session.scriptEndPhrase || '').trim().slice(0, 80);
   session.musicEffectEnabled = session.musicEffectEnabled !== false;
   session.transcriptionLanguage = normalizeTranscriptionSourceLanguage(
     session.transcriptionLanguage,
@@ -4150,6 +4154,8 @@ function serializeSessionForStorage(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
     silenceTimeout: normalized.silenceTimeout,
+    stopAtScriptEnd: normalized.stopAtScriptEnd,
+    scriptEndPhrase: normalized.scriptEndPhrase,
     musicEffectEnabled: normalized.musicEffectEnabled,
     transcriptionLanguage: normalized.transcriptionLanguage,
     followingLanguageIds: normalized.followingLanguageIds,
@@ -7332,7 +7338,7 @@ function getPublicTranscriptionState(session) {
     followingScript: describeFollowingScript(session),
     status: state.status || 'idle',
     captureId: stream?.captureId || state.captureId || '',
-    silenceTimeoutMessage: state.status === 'idle' ? state.silenceTimeoutMessage || '' : '',
+    autoCaptureStopMessage: state.status === 'idle' ? state.autoCaptureStopMessage || '' : '',
     recoverable: state.recoverable === true,
     recoveryReason: state.recoverable === true ? state.recoveryReason || '' : '',
     text: session.automaticLive || holdingCaption(session) ? getOutputTranscriptionText(session, stream) : typeof state.text === 'string' ? state.text : '',
@@ -7422,10 +7428,11 @@ function stopTranscriptionStream(sessionId, options = {}) {
   }
   const stream = transcriptionStreams.get(sessionId);
   if (stream?.healthTimer) clearInterval(stream.healthTimer);
+  if (stream?.scriptEndTimer) clearTimeout(stream.scriptEndTimer);
   stream?.providerQueue?.close();
   updateTranscriptionState(sessionId, {
     ...(stream ? {captureId: stream.captureId || ''} : {}),
-    silenceTimeoutMessage: options.silenceTimeoutMessage || '',
+    autoCaptureStopMessage: options.autoCaptureStopMessage || '',
   });
   if (!stream) {
     const session = getSession(sessionId);
@@ -8192,6 +8199,8 @@ function getControlPayload(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
     silenceTimeout: normalized.silenceTimeout,
+    stopAtScriptEnd: normalized.stopAtScriptEnd,
+    scriptEndPhrase: normalized.scriptEndPhrase,
     musicEffectEnabled: normalized.musicEffectEnabled,
     viewerDefaultLanguageId: normalized.viewerDefaultLanguageId,
     projectorDefaultLanguageId: normalized.projectorDefaultLanguageId,
@@ -9192,6 +9201,11 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
     return false;
   }
 
+  const stream = transcriptionStreams.get(session.id);
+  if (stream?.scriptEndTimer) {
+    clearTimeout(stream.scriptEndTimer);
+    stream.scriptEndTimer = null;
+  }
   const decision = autoFollowStates.get(session.id)?.lastDecision;
   autoFollowHistory.enter(session, nextIndex, {
     ...followHistoryClock(session.id),
@@ -9367,6 +9381,11 @@ function getAutoFollowState(sessionId) {
 }
 
 function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} = {}) {
+  const stream = transcriptionStreams.get(sessionId);
+  if (stream?.scriptEndTimer) {
+    clearTimeout(stream.scriptEndTimer);
+    stream.scriptEndTimer = null;
+  }
   const previousState = autoFollowStates.get(sessionId);
   previousState?.shadow?.dispose();
   recordOnsetReviewEvents(sessionId, autoFollowStates.get(sessionId)?.onsetReview.close('tracker_reset') || []);
@@ -9683,21 +9702,47 @@ function handleReferenceAudioResult(sessionId, result) {
     audioMs: result.audioEndMs, recordingId: recording.id, recordingRevision: recording.revision});
 }
 
-function stopAutoFollowForSilence(session, stream) {
-  const message = `已連續 ${session.silenceTimeout.minutes} 分鐘無聲，已切回手動並停止收音。`;
-  session.silenceStoppedCapture = {sourceId: stream.captureTimeline?.sourceId, ownerId: stream.captureOwnerId, message};
+function stopAutomaticCapture(session, stream, reason, message) {
+  session.automaticallyStoppedCapture = {sourceId: stream.captureTimeline?.sourceId, ownerId: stream.captureOwnerId, reason, message};
   session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
   session.automaticLive = false;
   session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.SCRIPT;
   session.projectorRevision = normalizeProjectorRevision(session.projectorRevision + 1);
-  autoFollowHistory.event(session.id, 'control_mode', {mode: SUBTITLE_CONTROL_MODES.MANUAL, reason: SILENCE_TIMEOUT_REASON, message});
-  stopTranscriptionStream(session.id, {reason: SILENCE_TIMEOUT_REASON, silenceTimeoutMessage: message});
+  autoFollowHistory.event(session.id, 'control_mode', {mode: SUBTITLE_CONTROL_MODES.MANUAL, reason, message});
+  stopTranscriptionStream(session.id, {reason, autoCaptureStopMessage: message});
   resetAutoFollowState(session.id, {message});
   persistSession(session);
   io.to(stream.socketId).emit('control:capture-health', {captureId: stream.captureId,
-    reason: SILENCE_TIMEOUT_REASON, message});
+    reason, message});
   broadcastControlState(session.id);
-  return message;
+}
+
+function scheduleScriptEndStop(session, stream, state, lines, result, transcript, options) {
+  if (!stream?.ready || stream.closing || stream.scriptEndTimer || !options.isFinal || state.performance.group) return;
+  const script = state.tracker.script;
+  const index = session.currentIndex;
+  const finalIndex = script?.entries.findLastIndex(entry => entry.text && !entry.source.music);
+  if (index !== finalIndex) return;
+
+  const phrase = normalizeText(session.scriptEndPhrase);
+  const usePhrase = phrase.length >= 4 && script.entries[index].text.includes(phrase);
+  const reachedEnd = usePhrase ? normalizeText(transcript).includes(phrase)
+    : result.index === index && result.completed === true && !result.shortOpening;
+  if (!reachedEnd) return;
+
+  const cellId = session.selectedCellId;
+  const configuredPhrase = session.scriptEndPhrase;
+  stream.scriptEndTimer = setTimeout(() => {
+    stream.scriptEndTimer = null;
+    const current = getSessionRecord(session.id);
+    if (!current?.stopAtScriptEnd || getCaptionMode(current) !== 'script' ||
+      current.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO || current.selectedCellId !== cellId ||
+      current.currentIndex !== index || current.scriptEndPhrase !== configuredPhrase ||
+      getFollowingLines(current) !== lines || autoFollowStates.get(current.id) !== state ||
+      transcriptionStreams.get(current.id) !== stream || !stream.ready || stream.closing || state.performance.group) return;
+    stopAutomaticCapture(current, stream, SCRIPT_END_REASON, '已確認劇本結尾，已切回手動並停止收音。');
+  }, SCRIPT_END_GRACE_MS);
+  stream.scriptEndTimer.unref?.();
 }
 
 function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
@@ -9937,6 +9982,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     result.status === 'corrected' ? 'correction' : 'transcript',
     {...evidence, completed: result.completed === true});
   else autoFollowHistory.diagnostic(sessionId, 'text', result.status || 'searching', evidence);
+  if (session.stopAtScriptEnd) scheduleScriptEndStop(session, stream, state, followingLines, result, transcript, options);
   handleSemanticFollow(session, stream, followingLines, state, transcript, options, result, receivedAt);
   if (holdingCaption(session)) {
     broadcastTranscriptionState(sessionId); broadcastLiveTranscriptionState(sessionId, stream);
@@ -13787,9 +13833,9 @@ io.on('connection', (socket) => {
       }
 
       const metadata = clientMetadata(clientInfo);
-      const stopped = session.silenceStoppedCapture;
+      const stopped = session.automaticallyStoppedCapture;
       if (stopped?.sourceId && stopped.sourceId === metadata.sourceId && stopped.ownerId === metadata.captureOwnerId) {
-        acknowledge({ok: false, reason: SILENCE_TIMEOUT_REASON, message: stopped.message});
+        acknowledge({ok: false, reason: stopped.reason, message: stopped.message});
         return;
       }
       const active = transcriptionStreams.get(sessionId);
@@ -13841,7 +13887,7 @@ io.on('connection', (socket) => {
       updateTranscriptionState(sessionId, {
         active: false,
         status: 'connecting',
-        silenceTimeoutMessage: '',
+        autoCaptureStopMessage: '',
         recoverable: false,
         ...(preserveTextOnRestart === true
           ? {}
@@ -14142,7 +14188,8 @@ io.on('connection', (socket) => {
         quiet: normalizedLevel <= TRANSCRIPTION_SILENCE_LEVEL_THRESHOLD,
         durationMs: normalizedDurationMs, at: Date.now(), gap, sequence,
       })) {
-        const message = stopAutoFollowForSilence(session, stream);
+        const message = `已連續 ${session.silenceTimeout.minutes} 分鐘無聲，已切回手動並停止收音。`;
+        stopAutomaticCapture(session, stream, SILENCE_TIMEOUT_REASON, message);
         acknowledge({ok: true, dropped: true, reason: SILENCE_TIMEOUT_REASON, message});
         return;
       }
@@ -14520,6 +14567,28 @@ io.on('connection', (socket) => {
     persistSession(session);
     broadcastControlState(sessionId);
     broadcastViewerState(sessionId);
+  });
+
+  socket.on('setScriptEndStop', ({sessionId, enabled, phrase}, ack) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session) return;
+    if (typeof phrase === 'string') {
+      const value = phrase.trim().slice(0, 80);
+      if (value && normalizeText(value).length < 4) {
+        if (typeof ack === 'function') ack({ok: false, reason: '結尾口白至少需要 4 個文字字元。'});
+        return;
+      }
+      session.scriptEndPhrase = value;
+    }
+    if (typeof enabled === 'boolean') session.stopAtScriptEnd = enabled;
+    const stream = transcriptionStreams.get(sessionId);
+    if (stream?.scriptEndTimer) {
+      clearTimeout(stream.scriptEndTimer);
+      stream.scriptEndTimer = null;
+    }
+    persistSession(session);
+    broadcastControlState(sessionId);
+    if (typeof ack === 'function') ack({ok: true});
   });
 
   socket.on('setSilenceTimeout', ({ sessionId, enabled, minutes }) => {

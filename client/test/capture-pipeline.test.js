@@ -320,5 +320,5 @@ test('a silence timeout closes the active capture without scheduling another pro
   assert.equal(f.pipeline.desired, false)
   assert.equal(f.stats.starts, 1)
   assert.equal(f.stats.stops, 1)
-  assert.equal(f.events.find(event => event.type === 'silence-timeout').message, '已切回手動')
+  assert.equal(f.events.find(event => event.type === 'automatic-capture-stop').message, '已切回手動')
 })

@@ -928,6 +928,7 @@ const ControlPage = () => {
   linesRef.current = lines
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
+  const [scriptEndStop, setScriptEndStop] = useState({enabled: false, phrase: ''})
   const [silenceTimeout, setSilenceTimeout] = useState({enabled: false, minutes: 5})
   const [stageDirectionsAsDialogue, setStageDirectionsAsDialogue] = useState(false)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
@@ -1395,11 +1396,11 @@ const ControlPage = () => {
   const applyTranscriptionPayload = useCallback((rawTranscription) => {
     const captureId = captureStateRef.current.captureId
     if (captureId && rawTranscription?.captureId && rawTranscription.captureId !== captureId) return
-    if (rawTranscription?.silenceTimeoutMessage && captureId && rawTranscription.captureId === captureId && captureRecovery.desired) {
+    if (rawTranscription?.autoCaptureStopMessage && captureId && rawTranscription.captureId === captureId && captureRecovery.desired) {
       captureRecovery.stop({preserveText: false})
       autoStartedTranscriptionRef.current = false
       setMicDiagnostics(prev => ({...prev, active: false}))
-      setStatus({kind: 'info', message: rawTranscription.silenceTimeoutMessage})
+      setStatus({kind: 'info', message: rawTranscription.autoCaptureStopMessage})
     }
     const nextTranscription = normalizeTranscriptionState(rawTranscription)
     if (nextTranscription.status === 'error') {
@@ -1499,6 +1500,7 @@ const ControlPage = () => {
       )
       setRoleColorEnabled(payload?.roleColorEnabled !== false)
       setStageDirectionsAsDialogue(payload?.stageDirectionsAsDialogue === true)
+      setScriptEndStop({enabled: payload?.stopAtScriptEnd === true, phrase: payload?.scriptEndPhrase || ''})
       setSilenceTimeout(payload?.silenceTimeout || {enabled: false, minutes: 5})
       applyProjectorSettingsPayload(payload?.projector)
       applyTranscriptionPayload(payload?.transcription)
@@ -2394,7 +2396,7 @@ const ControlPage = () => {
       if (data.type === 'level') {
         setMicDiagnostics(prev => ({...prev, active: true, lastLevel: data.level,
           lastSentAt: data.at, lastHeardAt: data.level > 0.003 ? data.at : prev.lastHeardAt}))
-      } else if (data.type === 'silence-timeout') {
+      } else if (data.type === 'automatic-capture-stop') {
         autoStartedTranscriptionRef.current = false
         setMicDiagnostics(prev => ({...prev, active: false}))
         setTranscription(prev => ({...prev, active: false, status: 'idle', error: ''}))
@@ -5002,6 +5004,27 @@ const ControlPage = () => {
               <label>即時語音辨識（雲端）</label>
               {activePanel === 'follow' && (
                 <>
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={scriptEndStop.enabled}
+                      onChange={event => socketRef.current?.emit('setScriptEndStop', {sessionId, enabled: event.target.checked})} />
+                    劇本結尾確認後停止收音
+                  </label>
+                  {scriptEndStop.enabled && <label>結尾口白（選填，至少 4 字）
+                    <input type="text" maxLength={80} key={`${sessionId}:${scriptEndStop.phrase}`}
+                      defaultValue={scriptEndStop.phrase}
+                      onBlur={event => {
+                        const input = event.currentTarget
+                        const phrase = input.value.trim()
+                        if (phrase === scriptEndStop.phrase) return
+                        socketRef.current?.emit('setScriptEndStop', {sessionId, phrase}, result => {
+                          if (result?.ok) return
+                          input.value = scriptEndStop.phrase
+                          setStatus({kind: 'error', message: result?.reason || '結尾口白儲存失敗'})
+                        })
+                      }}
+                      onKeyDown={event => {if (event.key === 'Enter') event.currentTarget.blur()}} />
+                    <span className="input-note">留空時核對最後一格的完整句尾。如果最後一格含有舞台指示，請填入該格最後實際念出的詞句。</span>
+                  </label>}
                   <label className="checkbox-row">
                     <input type="checkbox" checked={silenceTimeout.enabled}
                       onChange={event => socketRef.current?.emit('setSilenceTimeout', {sessionId, enabled: event.target.checked})} />

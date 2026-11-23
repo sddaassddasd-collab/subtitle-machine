@@ -92,7 +92,7 @@ export class CaptureSession {
         this.starting = false
         if (data.status === 'fatal') {this.stop(); this.onEvent?.(data); return}
       }
-      if (data.type === 'silence-timeout') this.stop({preserveText: false})
+      if (data.type === 'automatic-capture-stop') this.stop({preserveText: false})
       if (data.type === 'source-stalled') void this.resume()
       this.onEvent?.(data)
     }

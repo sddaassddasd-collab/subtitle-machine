@@ -43,7 +43,55 @@ test('the real audio handler persists manual mode and closes the provider withou
   assert.equal(f.session.currentIndex, 1);
   assert.equal(f.currentStream(), undefined);
   assert.equal(f.stream.closing, true);
-  assert.match(f.control().transcription.silenceTimeoutMessage, /1 分鐘/);
+  assert.match(f.control().transcription.autoCaptureStopMessage, /1 分鐘/);
   assert.match(f.state().message, /切回手動/);
   assert.equal(f.sent.filter(Buffer.isBuffer).length, 0);
+});
+
+test('a confirmed final dialogue stops capture after three seconds, with a trailing stage direction', t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const f = createFixture({allowCueChanges: true, texts: ['我們準備開始演出', '感謝各位今晚的蒞臨',
+    {text: '（熄燈）', type: 'direction'}]});
+  t.after(() => f.dispose());
+  f.allowSettings();
+  assert.equal(f.control().stopAtScriptEnd, false);
+  assert.deepEqual(f.event('setScriptEndStop', {enabled: true}), {ok: true});
+  assert.equal(f.storage().stopAtScriptEnd, true);
+  const say = (text, itemId, startMs, isFinal) => f.transcript(text, {itemId, startMs,
+    endMs: startMs + 800, streamId: 'script-end', isFinal});
+  say('我們準備開始演出', 'start', 0, true);
+  assert.equal(f.stream.scriptEndTimer, undefined);
+  say('感謝', 'end', 1000, false);
+  assert.equal(f.session.currentIndex, 1);
+  assert.equal(f.stream.scriptEndTimer, undefined);
+  say('感謝各位今晚的蒞臨', 'end', 1000, true);
+  assert.ok(f.stream.scriptEndTimer);
+  t.mock.timers.tick(2999);
+  assert.equal(f.currentStream(), f.stream);
+  t.mock.timers.tick(1);
+  assert.equal(f.session.currentIndex, 1);
+  assert.equal(f.storage().subtitleControlMode, 'manual');
+  assert.equal(f.currentStream(), undefined);
+  assert.match(f.state().message, /劇本結尾/);
+});
+
+test('an explicit closing phrase can finish a mixed final cue and cue movement cancels a pending stop', t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const f = createFixture({allowCueChanges: true, texts: ['我們準備開始演出',
+    '最後那顆蛋破殼而出。燈光收。劇終。']});
+  t.after(() => f.dispose());
+  f.allowSettings();
+  assert.equal(f.event('setScriptEndStop', {phrase: '好'}).ok, false);
+  f.event('setScriptEndStop', {enabled: true, phrase: '破殼而出'});
+  assert.equal(f.storage().scriptEndPhrase, '破殼而出');
+  const say = (text, itemId, startMs) => f.transcript(text, {itemId, startMs,
+    endMs: startMs + 800, streamId: 'script-end-phrase', isFinal: true});
+  say('我們準備開始演出', 'start', 0);
+  say('最後那顆蛋破殼而出', 'end', 1000);
+  assert.equal(f.session.currentIndex, 1);
+  assert.ok(f.stream.scriptEndTimer);
+  f.event('setCurrentIndex', {index: 0});
+  t.mock.timers.tick(3000);
+  assert.equal(f.currentStream(), f.stream);
+  assert.equal(f.session.subtitleControlMode, 'auto');
 });
