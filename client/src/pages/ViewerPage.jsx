@@ -511,6 +511,9 @@ const ViewerPage = () => {
             ? selectedLanguageId : viewerDefaultLanguageId,
         ))
     : '\u00a0'
+  const scriptDisplayText = lineSource === 'script' && displayEnabled && !isStageDirection && line?.role && displayText
+    ? `${line.role}：${displayText}`
+    : displayText
 
   const textClass = `viewer-text${
     displayEnabled ? '' : ' viewer-muted'
@@ -723,7 +726,7 @@ const ViewerPage = () => {
       ) : (
         <CaptionSurface scope={`${resolvedViewerToken}:${mode}:${selectedLanguageId}`} enabled={hasLoadedState && displayEnabled}
           source={isStageDirection && lineSource !== 'transcription' ? 'direction' : lineSource}
-          scriptRows={[{id: selectedLanguageId, text: displayText}]} entryId={lineSource === 'transcription' ? liveEntries.at(-1)?.id || '' : line?.id || ''}
+          scriptRows={[{id: selectedLanguageId, text: scriptDisplayText}]} entryId={lineSource === 'transcription' ? liveEntries.at(-1)?.id || '' : line?.id || ''}
           liveRows={latestCaptionRows(liveEntries.length ? liveEntries : liveLines.map(text => ({text})),
             [{id: selectedLanguageId, source: effectiveLiveLanguage === 'source', code: effectiveLiveLanguage}])}
           color={lineSource === 'transcription' ? '' : roleColor} animation={captionPresentation.performance && captionPresentation.animation}
