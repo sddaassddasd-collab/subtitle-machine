@@ -97,6 +97,7 @@ const DEFAULT_TRANSCRIPTION_STATE = {
   model: DEFAULT_TRANSCRIPTION_MODEL,
   provider: DEFAULT_TRANSCRIPTION_PROVIDER,
   transcriptionContext: '',
+  backgroundFollow: false,
   semanticSegmentationEnabled: true,
   dualChannelEnabled: true,
   speakerRecognitionEnabled: false,
@@ -219,6 +220,7 @@ const normalizeTranscriptionState = (raw) => {
     ...DEFAULT_TRANSCRIPTION_STATE,
     ...raw,
     active: Boolean(raw.active),
+    backgroundFollow: raw.backgroundFollow === true,
     text: typeof raw.text === 'string' ? raw.text : '',
     isFinal: raw.isFinal !== false,
     error: typeof raw.error === 'string' ? raw.error : '',
@@ -929,6 +931,7 @@ const ControlPage = () => {
   const [currentIndex, setCurrentIndex] = useState(0)
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [scriptEndStop, setScriptEndStop] = useState({enabled: false, phrase: ''})
+  const [keepBackgroundFollow, setKeepBackgroundFollow] = useState(false)
   const [silenceTimeout, setSilenceTimeout] = useState({enabled: false, minutes: 5})
   const [stageDirectionsAsDialogue, setStageDirectionsAsDialogue] = useState(false)
   const [roleColorEnabled, setRoleColorEnabled] = useState(true)
@@ -1501,6 +1504,7 @@ const ControlPage = () => {
       setRoleColorEnabled(payload?.roleColorEnabled !== false)
       setStageDirectionsAsDialogue(payload?.stageDirectionsAsDialogue === true)
       setScriptEndStop({enabled: payload?.stopAtScriptEnd === true, phrase: payload?.scriptEndPhrase || ''})
+      setKeepBackgroundFollow(payload?.keepBackgroundFollow === true)
       setSilenceTimeout(payload?.silenceTimeout || {enabled: false, minutes: 5})
       applyProjectorSettingsPayload(payload?.projector)
       applyTranscriptionPayload(payload?.transcription)
@@ -2093,9 +2097,11 @@ const ControlPage = () => {
       (nextMode !== SUBTITLE_CONTROL_MODES.AUTO || transcriptionBusy)) return
 
     if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) {
-      const started = await handleStartLiveTranscription({ autoFollow: true })
-      if (!started) return
-    } else if (autoStartedTranscriptionRef.current || (captureRecovery.desired && captureRecovery.options?.autoFollow)) {
+      if (!transcription.backgroundFollow || !transcriptionBusy) {
+        const started = await handleStartLiveTranscription({ autoFollow: true })
+        if (!started) return
+      }
+    } else if (!keepBackgroundFollow && (autoStartedTranscriptionRef.current || (captureRecovery.desired && captureRecovery.options?.autoFollow))) {
       handleStopLiveTranscription({ autoFollow: true })
     }
 
@@ -2116,7 +2122,7 @@ const ControlPage = () => {
       message:
         nextMode === SUBTITLE_CONTROL_MODES.AUTO
           ? '已切換為自動模式；投影仍使用固定劇本字幕'
-          : '已切換為手動模式',
+          : keepBackgroundFollow && transcriptionBusy ? '已切回手動，背景辨識持續運作' : '已切換為手動模式',
     })
   }
 
@@ -2399,7 +2405,7 @@ const ControlPage = () => {
       } else if (data.type === 'automatic-capture-stop') {
         autoStartedTranscriptionRef.current = false
         setMicDiagnostics(prev => ({...prev, active: false}))
-        setTranscription(prev => ({...prev, active: false, status: 'idle', error: ''}))
+        setTranscription(prev => ({...prev, active: false, status: 'idle', backgroundFollow: false, error: ''}))
         setStatus({kind: 'info', message: data.message})
       } else if (data.type === 'receipt') {
         setMicDiagnostics(prev => ({...prev, lastAckAt: Date.now(), lastAckLevel: data.level,
@@ -2516,6 +2522,10 @@ const ControlPage = () => {
 
   const handleStopLiveTranscription = (options = {}) => {
     if (!sessionId) return
+    if (transcription.backgroundFollow) {
+      socketRef.current?.emit('transcription:stop-background', {sessionId})
+      return
+    }
     captureRecovery.stop({preserveText: false})
     setMicDiagnostics(prev => ({...prev, active: false}))
     if (options.autoFollow !== true) {
@@ -5005,6 +5015,12 @@ const ControlPage = () => {
               {activePanel === 'follow' && (
                 <>
                   <label className="checkbox-row">
+                    <input type="checkbox" checked={keepBackgroundFollow}
+                      onChange={event => socketRef.current?.emit('setKeepBackgroundFollow', {sessionId, enabled: event.target.checked})} />
+                    手動接管後繼續背景辨識
+                  </label>
+                  <span className="input-note">接管後由你換格，背景辨識仍會記錄定位結果並產生辨識費用。</span>
+                  <label className="checkbox-row">
                     <input type="checkbox" checked={scriptEndStop.enabled}
                       onChange={event => socketRef.current?.emit('setScriptEndStop', {sessionId, enabled: event.target.checked})} />
                     劇本結尾確認後停止收音
@@ -5072,7 +5088,7 @@ const ControlPage = () => {
               <select
                 id="transcription-source-language"
                 value={activePanel === 'live' && !isLiveOutput ? liveLanguage || sessionMeta?.discussionLanguage || transcription.language || 'zh-TW' : transcription.language || 'zh-TW'}
-                disabled={transcription.status === 'connecting'}
+                disabled={transcription.backgroundFollow || transcription.status === 'connecting'}
                 onChange={event => {
                   if (activePanel === 'live') setLiveLanguage(event.target.value)
                   if (activePanel !== 'live' || isLiveOutput) void handleTranscriptionLanguageChange(event)
@@ -5970,6 +5986,10 @@ const ControlPage = () => {
                 自動跟戲
               </button>
             </div>
+            {transcription.backgroundFollow && transcriptionBusy && <>
+              <span role="status">手動播放 · 背景辨識中</span>
+              <button type="button" className="subtle-button" onClick={() => handleStopLiveTranscription({autoFollow: true})}>停止收音</button>
+            </>}
             <button
               type="button"
               className="subtle-button audio-diagnostics-toggle"

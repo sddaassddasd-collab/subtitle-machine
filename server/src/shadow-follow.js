@@ -86,7 +86,11 @@ class ShadowFollow {
     if (job.display.source === 'live') relationship = 'live_output';
     else if (job.display.hidden) relationship = 'display_hidden';
     else if (job.display.holding) relationship = 'caption_handoff';
+    const manualCueAt = job.display.manualCueAt;
+    const delayFromManualMs = job.display.manualBackground && accepted && this.index === job.display.index &&
+      Number.isFinite(manualCueAt) && job.event.receivedAt >= manualCueAt ? job.event.receivedAt - manualCueAt : null;
     this.last = this.base(job, {relationship, resetReason, droppedRevisions: dropped,
+      ...(job.display.manualBackground ? {delayFromManualMs} : {}),
       requiresReview: reliable && job.event.isFinal === true && Math.abs(this.index - job.display.index) > 1 &&
         job.display.source === 'script' && !job.display.hidden && !job.display.holding,
       locator: {index: this.index, confirmedIndex: this.confirmedIndex, confirmedEndMs: this.confirmedEndMs,

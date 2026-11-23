@@ -9,7 +9,7 @@ const statuses = {confirmed: '已確認', pending: '已進入、未確認', manu
 const eventNames = {run_start: '開始紀錄', run_end: '結束紀錄', interruption: '紀錄中斷', logging_gap: '紀錄不完整',
   cue_enter: '進入字幕格', cue_confirm: '字幕確認', display_ack: '顯示回報', diagnostic: '定位診斷',
   performance_follow: '演出輔助決策', performance_operator: '演出輔助人工操作', performance_settings: '演出輔助設定', caption_correction: '即時字幕劇本校正', caption_handoff: '字幕換句接回',
-  cue_heard: '文字涵蓋字幕', audio_reset: '重設聲音累積', audio_position: '更新聲音搜尋位置',
+  tracking_comparison: '背景定位比較', cue_heard: '文字涵蓋字幕', audio_reset: '重設聲音累積', audio_position: '更新聲音搜尋位置',
   decision_trace: '決策前後紀錄', transcript_revision: '辨識修訂', acoustic_summary: '聲音比對摘要',
   capture_summary: '收音品質摘要', stream_configuration: '辨識與程式設定', problem_mark: '問題標記',
   capture_status: '收音狀態', capture_audio: '收到現場音訊', control_mode: '跟戲模式切換',
@@ -207,6 +207,15 @@ export default function AutoFollowHistory({open, sessionId, historyStatus}) {
           {event.mode && ` · ${event.mode === 'auto' ? '自動跟戲' : '手動跟戲'}`}
           {event.message && ` · ${event.message}`}{event.text && ` · ${event.text}`}
           {event.reason && ` · ${event.reason}`}{event.note && ` · ${event.note}`}
+          {event.manualComparison && <>
+            {' · '}手動第 {event.manualComparison.displayIndex + 1} 格
+            {Number.isInteger(event.manualComparison.locatedIndex)
+              ? ` · 背景定位第 ${event.manualComparison.locatedIndex + 1} 格${event.manualComparison.reliable ? '' : '（待核對）'}`
+              : Number.isInteger(event.manualComparison.candidateIndex)
+                ? ` · 候選第 ${event.manualComparison.candidateIndex + 1} 格，尚未定位` : ' · 尚未定位'}
+            {Number.isFinite(event.manualComparison.delayMs) && ` · 手動切格後 ${event.manualComparison.delayMs} ms 收到辨識`}
+            {event.manualComparison.text && ` · ${event.manualComparison.text}`}
+          </>}
           {event.type === 'decision_trace' && ` · ${event.sampleCount ?? event.samples?.length ?? 0} 筆分析結果`}
           {event.acoustic && ` · 聲音門檻 ${Math.round(event.acoustic.minimumConfidence * 100)}% · 連續命中 ${event.acoustic.supportCount}／${event.acoustic.requiredSupport}`}
           {event.workerTiming && ` · 比對排隊 ${Math.round(event.workerTiming.queueMs)} ms／處理 ${Math.round(event.workerTiming.processingMs)} ms`}

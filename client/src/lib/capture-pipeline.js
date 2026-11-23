@@ -2,7 +2,7 @@ import {CaptureTransport, CAPTURE_TRANSPORT_LIMITS as T, connectCaptureSocket, o
 import {signalMetrics} from './audio-signal.js'
 import {AUDIO_WIRE} from './capture-wire.mjs'
 
-const automaticStopReasons = new Set(['silence_timeout', 'script_end'])
+const automaticStopReasons = new Set(['silence_timeout', 'script_end', 'manual_follow_stopped', 'background_follow_stopped'])
 
 export const PIPELINE_SETTINGS = Object.freeze({version: 5, sampleRate: 24000, maximumAgeMs: 10000,
   maximumQueuedMs: 8000, overflowRetainMs: 1000,

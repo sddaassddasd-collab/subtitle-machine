@@ -15,7 +15,13 @@ function matchesRow(row, contextId, filter) {
 function previewEvent(event) {
   const {id, at, type, index, source, status, mode, message, text, reason, note, acoustic, workerTiming, samples} = event;
   return {id, at, type, index, source, status, mode, message, text, reason, note, acoustic, workerTiming,
-    sampleCount: samples?.length ?? event.sampleCount};
+    sampleCount: samples?.length ?? event.sampleCount,
+    ...(type === 'tracking_comparison' && event.display?.manualBackground ? {manualComparison: {
+      displayIndex: event.display.index, candidateIndex: event.locator?.candidate?.index,
+      locatedIndex: event.locator?.accepted ? event.locator.index : null,
+      reliable: event.locator?.reliable === true, delayMs: event.delayFromManualMs,
+      text: event.locator?.evidence?.text, reason: event.locator?.reason,
+    }} : {})};
 }
 
 async function writeChunk(res, chunk) {

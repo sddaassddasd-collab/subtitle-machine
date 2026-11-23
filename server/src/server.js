@@ -3969,6 +3969,9 @@ function ensureSessionStructure(session) {
   session.roleColorEnabled = session.roleColorEnabled !== false;
   session.stageDirectionsAsDialogue = session.stageDirectionsAsDialogue === true;
   session.silenceTimeout = normalizeSilenceTimeout(session.silenceTimeout);
+  session.keepBackgroundFollow = session.keepBackgroundFollow === true;
+  session.manualBackgroundSourceId = typeof session.manualBackgroundSourceId === 'string' ? session.manualBackgroundSourceId.slice(0, 100) : '';
+  session.manualBackgroundCueAt = session.manualBackgroundSourceId && Number.isFinite(session.manualBackgroundCueAt) ? session.manualBackgroundCueAt : null;
   session.stopAtScriptEnd = session.stopAtScriptEnd === true;
   session.scriptEndPhrase = String(session.scriptEndPhrase || '').trim().slice(0, 80);
   session.musicEffectEnabled = session.musicEffectEnabled !== false;
@@ -4155,6 +4158,9 @@ function serializeSessionForStorage(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
     silenceTimeout: normalized.silenceTimeout,
+    keepBackgroundFollow: normalized.keepBackgroundFollow,
+    manualBackgroundSourceId: normalized.manualBackgroundSourceId,
+    manualBackgroundCueAt: normalized.manualBackgroundCueAt,
     stopAtScriptEnd: normalized.stopAtScriptEnd,
     scriptEndPhrase: normalized.scriptEndPhrase,
     musicEffectEnabled: normalized.musicEffectEnabled,
@@ -7338,6 +7344,7 @@ function getPublicTranscriptionState(session) {
   const stream = transcriptionStreams.get(session.id);
   return {
     active: Boolean(state.active),
+    backgroundFollow: Boolean(stream?.manualBackgroundFollow && session.subtitleControlMode === SUBTITLE_CONTROL_MODES.MANUAL),
     liveEntries: (getCaptionMode(session) === 'live' || holdingCaption(session)) && stream ? getOutputTranscriptionEntries(session, stream)
       .map(entry => ({id: entry.id, text: entry.text, speakerId: entry.speakerId, isFinal: entry.isFinal !== false})) : [],
     followingScript: describeFollowingScript(session),
@@ -8000,10 +8007,10 @@ function sendTranscriptionAudioChunk(stream, audio, durationMs = 0, level = 0) {
   stream.autoFollowAudioMs = (stream.autoFollowAudioMs || 0) + durationMs;
   if (stream?.provider === 'deepgram') {
     const session = getSessionRecord(stream.sessionId);
-    stream.scriptVocabularyActive = session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
+    stream.scriptVocabularyActive = session?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || stream.manualBackgroundFollow === true;
     stream.scriptContextUncertain = session?.automaticLive === true && !getPerformanceFollower(session).hasRecentScriptContext();
     if (session)
-      refreshKeyterms(stream, session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO ? getFollowingLines(session) : [],
+      refreshKeyterms(stream, stream.scriptVocabularyActive ? getFollowingLines(session) : [],
         session.automaticLive ? getPerformanceFollower(session).searchWindow().origin : session.currentIndex,
         (status, data) => autoFollowHistory.event(session.id, 'keyterms_update', {status, ...data, ...followHistoryClock(session.id)}));
     sendDeepgramAudioChunk(stream, audio, durationMs, level);
@@ -8204,6 +8211,7 @@ function getControlPayload(session) {
     roleColorEnabled: normalized.roleColorEnabled,
     stageDirectionsAsDialogue: normalized.stageDirectionsAsDialogue,
     silenceTimeout: normalized.silenceTimeout,
+    keepBackgroundFollow: normalized.keepBackgroundFollow,
     stopAtScriptEnd: normalized.stopAtScriptEnd,
     scriptEndPhrase: normalized.scriptEndPhrase,
     musicEffectEnabled: normalized.musicEffectEnabled,
@@ -9211,6 +9219,7 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
     clearTimeout(stream.scriptEndTimer);
     stream.scriptEndTimer = null;
   }
+  if (manualOverride && stream?.manualBackgroundFollow) session.manualBackgroundCueAt = Date.now();
   const decision = autoFollowStates.get(session.id)?.lastDecision;
   autoFollowHistory.enter(session, nextIndex, {
     ...followHistoryClock(session.id),
@@ -9392,7 +9401,7 @@ function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} 
     stream.scriptEndTimer = null;
   }
   const previousState = autoFollowStates.get(sessionId);
-  previousState?.shadow?.dispose();
+  if (previousState?.shadow !== patch.shadow) previousState?.shadow?.dispose();
   recordOnsetReviewEvents(sessionId, autoFollowStates.get(sessionId)?.onsetReview.close('tracker_reset') || []);
   const nextState = {
     ...createAutoFollowState(sessionId),
@@ -9608,7 +9617,10 @@ function locateLiveScript(state, lines, transcript, options) {
 
 function switchCaptionMode(session, mode, language, {stopStream = true} = {}) {
   session.automaticLive = false;
-  if (stopStream) stopTranscriptionStream(session.id, {keepText: false, reason: 'caption source changed'});
+  if (stopStream) {
+    session.manualBackgroundSourceId = '';
+    stopTranscriptionStream(session.id, {keepText: false, reason: 'caption source changed'});
+  }
   referenceRuntime.invalidate(session.id);
   if (mode === 'live') enterLiveCaptions(session, language);
   else resumeScriptCaptions(session);
@@ -9708,6 +9720,8 @@ function handleReferenceAudioResult(sessionId, result) {
 }
 
 function stopAutomaticCapture(session, stream, reason, message) {
+  session.manualBackgroundSourceId = '';
+  session.manualBackgroundCueAt = null;
   session.automaticallyStoppedCapture = {sourceId: stream.captureTimeline?.sourceId, ownerId: stream.captureOwnerId, reason, message};
   session.subtitleControlMode = SUBTITLE_CONTROL_MODES.MANUAL;
   session.automaticLive = false;
@@ -9811,12 +9825,14 @@ function recordFallbackDecision(sessionId, performance, now = Date.now()) {
 
 function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   const session = getSessionRecord(sessionId);
-  if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
+  if (!session) return;
   const stream = transcriptionStreams.get(sessionId);
+  const background = session.subtitleControlMode === SUBTITLE_CONTROL_MODES.MANUAL &&
+    stream?.manualBackgroundFollow === true && getCaptionMode(session) === 'script';
+  if (!background && session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   if (stream && Number.isFinite(options.endMs)) stream.recognizedAudioMs = Math.max(stream.recognizedAudioMs || 0, options.endMs);
   const followingLines = getFollowingLines(session);
   const state = getAutoFollowState(sessionId);
-  const performance = getPerformanceFollower(session);
   const before = trackerSnapshot(state.tracker, session.currentIndex);
   const receivedAt = Number.isFinite(options.receivedAt) ? options.receivedAt : Date.now();
   options = {...options, receivedAt, revisionId: crypto.randomUUID()};
@@ -9838,6 +9854,17 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       reason: options.language && normalizePerformanceLanguage(options.language) !== session.transcriptionLanguage ? 'language_mismatch' : 'provider_stream_changed'});
     return;
   }
+  if (background) {
+    autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before, backgroundOnly: true,
+      reason: 'manual_background_follow'});
+    state.shadow.enqueue({lines: followingLines, event: {...options, text: transcript},
+      seedIndex: stream.manualBackgroundCellId === session.selectedCellId ? stream.manualBackgroundSeedIndex : session.currentIndex,
+      streamId: stream.historyStreamId || null, gapFenceMs: stream.captureGapFenceMs ?? -1,
+      display: {index: session.currentIndex, source: 'script', hidden: session.displayEnabled === false,
+        manualBackground: true, manualCueAt: session.manualBackgroundCueAt ?? null}});
+    return;
+  }
+  const performance = getPerformanceFollower(session);
   const audioMs = transcriptionStreams.get(sessionId)?.autoFollowAudioMs;
   updateAutoFollowState(sessionId, {
     lastTranscriptReceivedAt: receivedAt,
@@ -12682,6 +12709,7 @@ function startDeepgramTranscription({
   speakerRecognitionEnabled,
   transcriptionContext,
   discussion = false,
+  manualBackgroundFollow = false,
   startAcknowledge,
   clientInfo,
   reconnectAttempt = 0,
@@ -12715,7 +12743,7 @@ function startDeepgramTranscription({
   }
   const followSession = getSessionRecord(sessionId);
   const initialKeyterms = discussion ? discussionKeyterms(selectedLanguage, selectedContext)
-    : followSession?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
+    : (manualBackgroundFollow || followSession?.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO)
     ? scriptKeyterms(getFollowingLines(followSession), followSession.currentIndex, selectedContext,
       ensureTranscriptionState(followSession).scriptVocabulary) : [];
   for (const term of initialKeyterms) query.append('keyterm', term);
@@ -12749,6 +12777,7 @@ function startDeepgramTranscription({
     scriptKeyterms: {terms: initialKeyterms, pending: null, checkedAt: 0, disabled: false},
     scriptVocabulary: normalizeVocabulary(followSession?.transcription?.scriptVocabulary),
     discussion,
+    manualBackgroundFollow,
     userTranscriptionContext: selectedContext,
     transcriptionContext: discussionContext(selectedContext, discussion),
     semanticSegmentationEnabled: true,
@@ -12968,7 +12997,7 @@ function startDeepgramTranscription({
           );
           if (correctionClient && getSessionRecord(sessionId)?.automaticLive) {
             queueScriptCaptionCorrection(getSessionRecord(sessionId), stream, correctionClient, fragment.itemId, isCurrent);
-          } else if (correctionClient) {
+          } else if (correctionClient && !stream.manualBackgroundFollow) {
             queueTranscriptionCorrection({
               stream,
               isCurrent,
@@ -13076,6 +13105,7 @@ function startDeepgramTranscription({
             speakerRecognitionEnabled: selectedSpeakerRecognitionEnabled,
             transcriptionContext: stream.userTranscriptionContext,
             discussion,
+            manualBackgroundFollow: stream.manualBackgroundFollow,
             startAcknowledge: pendingStartAcknowledge,
             clientInfo,
             reconnectAttempt: nextAttempt,
@@ -13457,7 +13487,7 @@ function startRealtimeTranscription({
       getAutoFollowTranscriptOptions(stream, event.item_id, true));
     if (getSessionRecord(sessionId)?.automaticLive && TRANSCRIPTION_CORRECTION_ENABLED) {
       queueScriptCaptionCorrection(getSessionRecord(sessionId), stream, client, event.item_id, isCurrent);
-    } else queueTranscriptionCorrection({
+    } else if (!stream.manualBackgroundFollow) queueTranscriptionCorrection({
       stream,
       isCurrent,
       client,
@@ -13473,7 +13503,7 @@ function startRealtimeTranscription({
     );
 
     const mergedLine = stream.finalizedLineByItemId.get(event.item_id) || null;
-    if (mergedLine?.itemIds?.length > 1 && !getSessionRecord(sessionId)?.automaticLive) {
+    if (mergedLine?.itemIds?.length > 1 && !stream.manualBackgroundFollow && !getSessionRecord(sessionId)?.automaticLive) {
       queueMergedLineCorrection({
         stream,
         isCurrent,
@@ -13864,8 +13894,11 @@ io.on('connection', (socket) => {
       }
 
       const metadata = clientMetadata(clientInfo);
+      const backgroundReconnect = autoFollow === true && preserveTextOnRestart === true &&
+        session.subtitleControlMode === SUBTITLE_CONTROL_MODES.MANUAL && session.keepBackgroundFollow &&
+        metadata.sourceId && metadata.sourceId === session.manualBackgroundSourceId;
       const stopped = session.automaticallyStoppedCapture;
-      if (stopped?.sourceId && stopped.sourceId === metadata.sourceId && stopped.ownerId === metadata.captureOwnerId) {
+      if (stopped?.sourceId && stopped.sourceId === metadata.sourceId && (!stopped.ownerId || stopped.ownerId === metadata.captureOwnerId)) {
         acknowledge({ok: false, reason: stopped.reason, message: stopped.message});
         return;
       }
@@ -13901,7 +13934,8 @@ io.on('connection', (socket) => {
         });
       }
 
-      if (autoFollow === true) {
+      if (!backgroundReconnect) session.manualBackgroundSourceId = '';
+      if (autoFollow === true && !backgroundReconnect) {
         void autoFollowHistory.start(session);
         if (getCaptionMode(session) === 'live' && !session.automaticLive) switchCaptionMode(session, 'script', null, {stopStream: false});
         session.captionMode = 'script';
@@ -13911,7 +13945,7 @@ io.on('connection', (socket) => {
           status: AUTO_FOLLOW_STATUS.LISTENING,
           message: '正在啟動收音並定位劇本。',
         }, {preservePosition: preserveTextOnRestart === true});
-      } else if (getCaptionMode(session) !== 'live') {
+      } else if (!backgroundReconnect && getCaptionMode(session) !== 'live') {
         switchCaptionMode(session, 'live', language, {stopStream: false});
       }
 
@@ -13976,11 +14010,12 @@ io.on('connection', (socket) => {
           dualChannelEnabled,
           speakerRecognitionEnabled,
           transcriptionContext,
+          manualBackgroundFollow: Boolean(backgroundReconnect),
           discussion: autoFollow !== true && !session.automaticLive && getCaptionMode(session) === 'live',
           startAcknowledge: acknowledge,
           clientInfo: metadata,
         });
-        if (started) Object.assign(started, {captureOwnerId: metadata.captureOwnerId,
+        if (started) Object.assign(started, {manualBackgroundFollow: Boolean(backgroundReconnect), captureOwnerId: metadata.captureOwnerId,
           captureGeneration: metadata.captureGeneration, controlSocketId: metadata.controlSocketId});
       } catch (error) {
         const message =
@@ -14214,7 +14249,7 @@ io.on('connection', (socket) => {
             ...mapping, resetTracking, retainedIndex: session.currentIndex, captureId, sequence});
         }
       }
-      if (stale === true || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) {
+      if (stale === true || (session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO && !stream.manualBackgroundFollow)) {
         stream.silenceWindow = null;
       } else if (reachedSilenceTimeout(stream, session.silenceTimeout, {
         quiet: normalizedLevel <= TRANSCRIPTION_SILENCE_LEVEL_THRESHOLD,
@@ -14291,6 +14326,10 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (stream.manualBackgroundFollow) {
+      stopAutomaticCapture(session, stream, 'background_follow_stopped', '已停止背景辨識。');
+      return;
+    }
     stopTranscriptionStream(sessionId, {
       keepText: preserveText === true && getCaptionMode(session) === 'live',
       reason: 'client requested stop',
@@ -14550,18 +14589,39 @@ io.on('connection', (socket) => {
     const nextMode = normalizeSubtitleControlMode(mode);
     const sourceChanged = getCaptionMode(session) === 'live';
     const stream = transcriptionStreams.get(sessionId);
-    if (sourceChanged && stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id) return;
+    const auto = session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO;
+    const keepBackground = nextMode === SUBTITLE_CONTROL_MODES.MANUAL && auto &&
+      session.keepBackgroundFollow && stream && (!sourceChanged || session.automaticLive);
+    if (sourceChanged && !keepBackground && stream && stream.socketId !== socket.id && stream.controlSocketId !== socket.id) return;
     if (sourceChanged && session.automaticLive) {
       applyPerformanceAction(session, getPerformanceFollower(session).command('lock-script', session.currentIndex, stream?.autoFollowAudioMs || 0));
     } else if (sourceChanged) switchCaptionMode(session, 'script');
     if (session.subtitleControlMode === nextMode && !sourceChanged) return;
 
+    if (auto && stream && nextMode === SUBTITLE_CONTROL_MODES.MANUAL && !keepBackground &&
+      transcriptionStreams.get(sessionId) === stream) {
+      stopAutomaticCapture(session, stream, 'manual_follow_stopped', '已切回手動並停止收音。');
+      return;
+    }
+    const shadow = keepBackground ? getAutoFollowState(sessionId).shadow : null;
     session.subtitleControlMode = nextMode;
+    session.manualBackgroundSourceId = keepBackground ? stream.captureTimeline?.sourceId || '' : '';
+    session.manualBackgroundCueAt = keepBackground ? Date.now() : null;
+    if (stream) {
+      stream.manualBackgroundFollow = Boolean(keepBackground);
+      if (keepBackground) {
+        stream.manualBackgroundCellId = session.selectedCellId;
+        stream.manualBackgroundSeedIndex = session.currentIndex;
+      }
+    }
     if (stream) stream.silenceWindow = null;
     if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) void autoFollowHistory.start(session);
     autoFollowHistory.event(session.id, 'control_mode', {mode: nextMode,
-      message: nextMode === SUBTITLE_CONTROL_MODES.MANUAL ? '切為手動跟戲，歷程仍會保存人工操作' : '自動跟戲已啟用'});
+      ...followHistoryClock(sessionId), index: session.currentIndex, backgroundFollow: Boolean(keepBackground),
+      message: keepBackground ? '手動播放，背景辨識與定位持續記錄' :
+        nextMode === SUBTITLE_CONTROL_MODES.MANUAL ? '切為手動跟戲，歷程仍會保存人工操作' : '自動跟戲已啟用'});
     resetAutoFollowState(sessionId, {
+      ...(shadow ? {shadow} : {}),
       status:
         nextMode === SUBTITLE_CONTROL_MODES.AUTO
           ? AUTO_FOLLOW_STATUS.LISTENING
@@ -14570,13 +14630,14 @@ io.on('connection', (socket) => {
       message:
         nextMode === SUBTITLE_CONTROL_MODES.AUTO
           ? '自動模式已啟用；正在定位劇本，核對句尾後準備下一格。'
-          : '',
+          : keepBackground ? '手動播放 · 背景辨識中' : '',
     });
     if (nextMode === SUBTITLE_CONTROL_MODES.AUTO) {
       session.projectorDisplayMode = PROJECTOR_DISPLAY_MODES.SCRIPT;
     }
     persistSession(session);
     broadcastControlState(sessionId);
+    broadcastTranscriptionState(sessionId);
     broadcastViewerState(sessionId);
   });
 
@@ -14622,6 +14683,38 @@ io.on('connection', (socket) => {
     persistSession(session);
     broadcastControlState(sessionId);
     if (typeof ack === 'function') ack({ok: true});
+  });
+
+  function stopBackgroundFollow(session) {
+    const stream = transcriptionStreams.get(session.id);
+    const reason = 'background_follow_stopped';
+    const message = '已停止背景辨識。';
+    if (stream?.manualBackgroundFollow) {
+      stopAutomaticCapture(session, stream, reason, message);
+      return true;
+    }
+    if (!session.manualBackgroundSourceId) return false;
+    session.automaticallyStoppedCapture = {sourceId: session.manualBackgroundSourceId, reason, message};
+    session.manualBackgroundSourceId = '';
+    session.manualBackgroundCueAt = null;
+    return false;
+  }
+
+  socket.on('setKeepBackgroundFollow', ({sessionId, enabled}) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session || typeof enabled !== 'boolean') return;
+    session.keepBackgroundFollow = enabled;
+    if (!enabled && stopBackgroundFollow(session)) return;
+    persistSession(session);
+    broadcastControlState(sessionId);
+  });
+
+  socket.on('transcription:stop-background', ({sessionId}) => {
+    const session = getOwnedSocketSession(sessionId);
+    if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.MANUAL) return;
+    if (stopBackgroundFollow(session)) return;
+    persistSession(session);
+    broadcastControlState(sessionId);
   });
 
   socket.on('setSilenceTimeout', ({ sessionId, enabled, minutes }) => {
