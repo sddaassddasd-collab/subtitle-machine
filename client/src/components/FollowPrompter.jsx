@@ -217,11 +217,12 @@ function Timeline({line, currentIndex, cueWindow, viewerToken, languageId, roleC
     </div>
     {browse && <div className="follow-prompter-live-control">
       {loadError && <span role="status">{loadError}</span>}
-      <button type="button" className="follow-prompter-live-button" aria-label="回到直播位置" onClick={followLive}>
+      <button type="button" className="follow-prompter-live-button" aria-label="返回目前字幕位置" onClick={followLive}>
         <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
           <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
           <path d="M8.5 8.5a5 5 0 0 0 0 7m7-7a5 5 0 0 1 0 7M5.5 5.5a9 9 0 0 0 0 13m13-13a9 9 0 0 1 0 13" />
         </svg>
+        <span>返回</span>
       </button>
     </div>}
   </>
