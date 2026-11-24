@@ -1,5 +1,7 @@
 const {THEATRE_TERMS} = require('./discussion-context');
 const segmenter = new Intl.Segmenter('zh', {granularity: 'word'});
+const MAX_TERM_LENGTH = 24;
+const CUE_HINT_COUNT = 4;
 const STOP = new Set(['我們', '你們', '他們', '這個', '那個', '什麼', '就是', '可以', '沒有', '一個', '因為', '所以',
   '都是', '他的', '你的', '我的', '這裡', '那裡', '到了', '都能', '每個人', '自己', '現在', '這樣', '那樣']);
 const scriptCache = new WeakMap();
@@ -7,7 +9,7 @@ const scriptCache = new WeakMap();
 function normalizeVocabulary(value) {
   const entries = Array.isArray(value) ? value : String(value || '').split(/[\n,，、;；]+/u);
   return [...new Set(entries.filter(v => typeof v === 'string').map(v => v.trim())
-    .filter(v => v.length >= 2 && v.length <= 24))].slice(0, 200);
+    .filter(v => v.length >= 2 && v.length <= MAX_TERM_LENGTH))].slice(0, 200);
 }
 
 function vocabularyIndex(lines) {
@@ -24,6 +26,31 @@ function vocabularyIndex(lines) {
   scriptCache.set(lines, result); return result;
 }
 
+function cuePhrases(line, frequencies) {
+  if (line.type === 'direction' || line.music) return [];
+  const text = String(line.text || '').replace(/\s+/gu, ' ').trim();
+  if (text.length <= MAX_TERM_LENGTH) return [text];
+
+  const candidates = [];
+  for (const clause of text.split(/[，。！？、；：,.!?;:]/u)) {
+    let phrase = '', score = 0;
+    for (const {segment, isWordLike} of segmenter.segment(clause)) {
+      if (phrase.length + segment.length > MAX_TERM_LENGTH) {
+        if (score > 0) candidates.push({text: phrase.trim(), score});
+        phrase = '';
+        score = 0;
+      }
+      if (segment.length > MAX_TERM_LENGTH || (!phrase && !isWordLike)) continue;
+      phrase += segment;
+      if (isWordLike && segment.length >= 2 && !STOP.has(segment)) {
+        score += Math.max(1, segment.length * 2 - Math.log2(frequencies.get(segment) || 1));
+      }
+    }
+    if (score > 0) candidates.push({text: phrase.trim(), score});
+  }
+  return [...new Set(candidates.sort((a, b) => b.score - a.score).map(candidate => candidate.text))].slice(0, 2);
+}
+
 function scriptKeyterms(lines, currentIndex, context = '', vocabulary = [], {nearby = true} = {}) {
   const terms = [], seen = new Set();
   let bytes = 0;
@@ -32,15 +59,23 @@ function scriptKeyterms(lines, currentIndex, context = '', vocabulary = [], {nea
     const size = Buffer.byteLength(term);
     // A conservative byte budget stays within the provider's token budget,
     // without requiring a model-specific tokenizer or sending the whole play.
-    if (term.length < 2 || term.length > 24 || STOP.has(term) || seen.has(term) || terms.length >= 32 || bytes + size > 400) return;
+    if (term.length < 2 || term.length > MAX_TERM_LENGTH || STOP.has(term) || seen.has(term) || terms.length >= 32 || bytes + size > 400) return;
     seen.add(term); bytes += size; terms.push(term);
   };
   normalizeVocabulary(vocabulary).forEach(add);
   String(context).split(/[\s,，、;；\n]+/u).forEach(add);
   const localLines = lines.slice(Math.max(0, currentIndex - 1), currentIndex + 9).filter(l => l.type !== 'direction' && !l.music);
-  localLines.forEach(line => add(line.role));
-  if (!nearby) return terms;
+  if (!nearby) {
+    localLines.forEach(line => add(line.role));
+    return terms;
+  }
   const index = vocabularyIndex(lines), ranked = new Map();
+  const start = Math.max(0, currentIndex);
+  const phrases = lines.slice(start, start + CUE_HINT_COUNT).map(line => cuePhrases(line, index.frequencies));
+  // Give every cue a chance before spending the remaining budget on second phrases.
+  phrases.forEach(([first]) => add(first));
+  localLines.forEach(line => add(line.role));
+  phrases.forEach(([, second]) => add(second));
   for (let i = Math.max(0, currentIndex - 1); i < Math.min(lines.length, currentIndex + 9); i++) {
     for (const word of index.entries[i]) {
       const score = word.length * 2 - Math.log2(index.frequencies.get(word) || 1) - Math.abs(i - currentIndex) * .15;

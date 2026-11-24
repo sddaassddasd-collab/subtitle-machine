@@ -13,6 +13,27 @@ test('nearby vocabulary is bounded, deduplicated and excludes music/directions',
   assert.ok(!terms.some(t => t.includes('舞台') || t.includes('歌詞')));
 });
 
+test('the current cue and three following cues contribute whole short phrases', () => {
+  const lines = [{text: '你怎麼現在才來'}, {text: '路上出了點事情'}, {text: '我要去荔枝碗船廠'},
+    {text: 'I saw you at the dock.'}, {text: '我們進去慢慢說吧'}];
+  assert.deepEqual(scriptKeyterms(lines, 0, '', ['陳巧蓉']).slice(0, 5),
+    ['陳巧蓉', ...lines.slice(0, 4).map(line => line.text)]);
+  assert.deepEqual(scriptKeyterms(lines, 1).slice(0, 4), lines.slice(1).map(line => line.text));
+  assert.ok(!scriptKeyterms(lines, 0).includes(lines[4].text));
+});
+
+test('long cues contribute at most two ranked phrases without dropping nearby short cues', () => {
+  const longCue = '荔枝碗船廠保留了澳門傳統木船工藝，梁友福正在修復一艘傳統木船，今天不能回去';
+  const lines = [{text: longCue}, {text: '那我們一起去看看'}, {text: '城裡傳來一陣鼓聲', type: 'direction'},
+    {text: '演員低頭唱起歌來', music: true}];
+  const terms = scriptKeyterms(lines, 0);
+  assert.deepEqual(terms.slice(0, 3),
+    ['荔枝碗船廠保留了澳門傳統木船工藝', lines[1].text, '梁友福正在修復一艘傳統木船']);
+  assert.ok(!terms.includes(longCue) && !terms.includes('今天不能回去'));
+  assert.ok(terms.every(term => term.length <= 24));
+  assert.ok(!terms.some(term => /鼓聲|唱起/.test(term)));
+});
+
 test('dynamic vocabulary updates never queue more than one request or block audio', () => {
   const sent = [], events = [];
   const stream = {ready: true, socket: {send: x => sent.push(JSON.parse(x))},
@@ -54,5 +75,5 @@ test('manual programme phrases retain whole words and are prioritized over gener
 test('uncertain background location keeps programme terms and roles without repeatedly biasing old dialogue', () => {
   const terms = scriptKeyterms([{role: '國王', text: '搔癢治療有很大的進展'}], 0, '快樂王國', ['隔離所'], {nearby: false});
   assert.ok(terms.includes('國王') && terms.includes('隔離所') && terms.includes('快樂王國'));
-  assert.ok(!terms.includes('治療') && !terms.includes('進展'));
+  assert.ok(!terms.includes('搔癢治療有很大的進展') && !terms.includes('治療') && !terms.includes('進展'));
 });

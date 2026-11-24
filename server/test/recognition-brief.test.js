@@ -35,7 +35,8 @@ test('a confirmed spelling can repair a homophone without a nearby script cue', 
 });
 
 test('saved program hints reach both capture modes and the ordinary correction prompt', async t => {
-  const f = fixture({fakeDeepgram: true, lineCount: 3});
+  const cues = ['你怎麼現在才來', '路上出了點事情', '我在修復傳統木船', '我們去荔枝碗船廠'];
+  const f = fixture({fakeDeepgram: true, texts: cues});
   f.allowSettings();
   f.history.start = async () => {};
   f.server.listen(0, '127.0.0.1');
@@ -70,6 +71,7 @@ test('saved program hints reach both capture modes and the ordinary correction p
     stream.socket.emit('open');
     const terms = new URL(stream.socket.url).searchParams.getAll('keyterm');
     assert.deepEqual(terms.slice(0, 2), brief.terms);
+    assert.deepEqual(terms.filter(term => cues.includes(term)), autoFollow ? cues : []);
     assert.deepEqual(stream.recognitionBrief, {summary: brief.summary, terms: brief.terms});
   }
 

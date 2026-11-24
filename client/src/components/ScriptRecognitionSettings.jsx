@@ -34,7 +34,7 @@ export default function ScriptRecognitionSettings({sessionId, socketRef, vocabul
     <textarea id="script-vocabulary" rows={4} value={draft ?? vocabulary.join('\n')}
       placeholder="角色名稱、特殊用語、完整詞組；每行一個。換節目會使用各自的詞彙表。"
       onChange={event => { revision.current++; setDraft(event.target.value) }}/>
-    <small>每詞 2～24 字，最多保存 200 詞。實際提示有總量限制，會優先選用自訂詞與附近劇本重要詞。</small>
+    <small>每詞 2～24 字，最多保存 200 詞。Deepgram 自動跟戲會優先保留自訂詞，再用剩餘名額提示目前這格和後三格。短句整句送出，長句選重點片語。</small>
     <label className="checkbox-row"><input type="checkbox" checked={enabled ?? diagnostics}
       onChange={event => { revision.current++; setEnabled(event.target.checked) }}/>
       啟用錄音頻譜診斷（預設關閉，不參與換格）
