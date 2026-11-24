@@ -1041,6 +1041,7 @@ const ControlPage = () => {
   const lineDraftsRef = useRef({})
   const musicCueTextDraftsRef = useRef({})
   const composingLineDraftsRef = useRef(new Set())
+  const scriptListRef = useRef(null)
   const rowRefs = useRef([])
   const serverDraftInputsRef = useRef({})
   const pendingLineClickTimeoutRef = useRef(null)
@@ -1489,7 +1490,6 @@ const ControlPage = () => {
       syncLanguageSourceDrafts(nextSelectedCellId, payload?.languageSources)
       const nextLiveLineId = nextLines[effectiveLiveIndex]?.id || null
       const liveLineChanged =
-        Boolean(liveLineIdRef.current) &&
         Boolean(nextLiveLineId) &&
         liveLineIdRef.current !== nextLiveLineId
       if (
@@ -1813,20 +1813,23 @@ const ControlPage = () => {
     transcriptionContextRevisionRef.current += 1
   }, [clearTranscriptionContextSaveTimer, sessionId])
 
-  useEffect(() => {
-    if (!cueScrollRequest) return
+  useLayoutEffect(() => {
+    if (!cueScrollRequest || editingModeEnabledRef.current) return
     const targetIndex = linesRef.current.findIndex(
       (line) => line?.id === cueScrollRequest.lineId,
     )
     if (targetIndex < 0) return
     const node = rowRefs.current[targetIndex]
-    if (!node) return
+    const list = scriptListRef.current
+    if (!node || !list?.clientHeight) return
 
-    node.scrollIntoView({
-      block: 'center',
-      inline: 'nearest',
-      behavior: 'smooth',
-    })
+    const cue = node.getBoundingClientRect()
+    const listTop = list.getBoundingClientRect().top + list.clientTop
+    const previousCue = rowRefs.current[targetIndex - 1]?.getBoundingClientRect()
+    // Keep at most one cue of context above the active cue and give the rest to upcoming lines.
+    const lead = Math.max(0, Math.min(list.clientHeight / 3,
+      previousCue ? cue.top - previousCue.top : 0, list.clientHeight - cue.height))
+    list.scrollTop += cue.top - listTop - lead
   }, [cueScrollRequest])
 
   useEffect(() => {
@@ -4437,6 +4440,8 @@ const ControlPage = () => {
     ? `已手動定位至第 ${liveCurrentIndex + 1} 格`
     : ''
   const isLiveOutput = sessionMeta?.captionMode === 'live'
+  const followStatusError = Boolean(autoFollow.history?.error) ||
+    ((isLiveOutput || subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) && Boolean(transcription.error))
   const showRecognitionPreview = sessionMeta?.automaticLive ||
     (!isLiveOutput && (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO || transcription.backgroundFollow))
   const previewOutput = output?.sessionId === sessionId ? output : null
@@ -5649,7 +5654,7 @@ const ControlPage = () => {
         <div className="script-column-heading" hidden={isLiveOutput && !editingModeEnabled}>
           <span>字幕格</span><div>{visibleLanguages.map(language => <span key={language.id}>{language.name}</span>)}</div>
         </div>
-        <div className="script-list" hidden={isLiveOutput && !editingModeEnabled}>
+        <div ref={scriptListRef} className="script-list" hidden={isLiveOutput && !editingModeEnabled}>
           {lines.length === 0 && (
             <div className="empty-state">
               <p className="empty-hint">
@@ -5970,8 +5975,8 @@ const ControlPage = () => {
             )
           })}
         </div>
-<div className="script-live-controls">
-          <div className="control-actions">
+        <div className="script-live-controls">
+          <div className="control-actions" role="group" aria-label="字幕操作">
             {isLiveOutput && <>
               <button type="button" disabled={captionSwitching || transcriptionBusy} onClick={handleEnterLiveCaptions}>{transcriptionBusy ? '收音中' : transcription.text?.trim() ? '繼續收音' : '開始收音'}</button>
               <button type="button" className="subtle-button" disabled={!transcriptionBusy} onClick={handlePauseLiveCaptions}>暫停收音</button>
@@ -6009,18 +6014,6 @@ const ControlPage = () => {
                 自動跟戲
               </button>
             </div>
-            {transcription.backgroundFollow && transcriptionBusy && <>
-              <span role="status">手動播放 · 背景辨識中</span>
-              <button type="button" className="subtle-button" onClick={() => handleStopLiveTranscription({autoFollow: true})}>停止收音</button>
-            </>}
-            <button
-              type="button"
-              className="subtle-button audio-diagnostics-toggle"
-              aria-haspopup="dialog"
-              onClick={() => setAudioDiagnosticsOpen(true)}
-            >
-              狀態詳情
-            </button>
             <button
               type="button"
               className={`toggle-button ${displayEnabled ? 'active' : ''}`}
@@ -6044,27 +6037,18 @@ const ControlPage = () => {
             >
               下一句
             </button>
-
+            <button
+              type="button"
+              className={`subtle-button audio-diagnostics-toggle${followStatusError ? ' control-status-error' : ''}`}
+              aria-haspopup="dialog"
+              onClick={() => setAudioDiagnosticsOpen(true)}
+            >
+              {followStatusError ? '狀態異常' : '狀態詳情'}
+            </button>
+            {transcription.backgroundFollow && transcriptionBusy && (
+              <button type="button" className="subtle-button" onClick={() => handleStopLiveTranscription({autoFollow: true})}>停止收音</button>
+            )}
           </div>
-          <ControlStatusSummary live={isLiveOutput}
-            automatic={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO}
-            status={isLiveOutput ? transcriptionStatusLabel : `${autoFollowStatusLabel} · ${transcriptionStatusLabel}`}
-            audio={audioBriefLabel}
-            progress={manualPositionLabel || (autoFollow.located && Number.isInteger(autoFollow.progressIndex)
-              ? `第 ${autoFollow.progressIndex + 1} 格 · ${Math.round(autoFollow.progress * 100)}%`
-              : '')}
-            confidence={autoFollowConfidenceLabel}
-            hint={autoFollow.history?.error || (subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO
-              ? transcription.error || (
-                Number.isInteger(autoFollow.predictedIndex)
-                  ? `${autoFollow.predictionSource === 'opening' ? '已依短開頭顯示' : '已預推'}第 ${autoFollow.predictedIndex + 1} 格，${autoFollow.predictionReview?.index === autoFollow.predictedIndex && autoFollow.predictionReview.status === 'overdue' ? '尚未核對成功，維持目前位置' : '等待核對'}`
-                  : Number.isInteger(autoFollow.preparedIndex)
-                    ? `準備第 ${autoFollow.preparedIndex + 1} 格：${autoFollow.openingHint || ''}`
-                    : autoFollow.message
-              )
-              : autoFollow.message)}
-            error={Boolean(autoFollow.history?.error) || ((isLiveOutput || subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) && Boolean(transcription.error))}
-          />
           <div
             className={`status-bar ${
               status.kind === 'success'
@@ -6077,9 +6061,21 @@ const ControlPage = () => {
             <span title={status.message}>{status.message}</span>
           </div>
           <ControlStatusDetails open={audioDiagnosticsOpen} onClose={() => setAudioDiagnosticsOpen(false)}>
+            <ControlStatusSummary live={isLiveOutput}
+              automatic={subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO}
+              status={isLiveOutput ? transcriptionStatusLabel : `${autoFollowStatusLabel} · ${transcriptionStatusLabel}`}
+              audio={audioBriefLabel}
+              progress={manualPositionLabel || (autoFollow.located && Number.isInteger(autoFollow.progressIndex)
+                ? `第 ${autoFollow.progressIndex + 1} 格 · ${Math.round(autoFollow.progress * 100)}%`
+                : '')}
+              confidence={autoFollowConfidenceLabel}
+              hint={autoFollow.history?.error || transcription.error || autoFollow.message}
+              error={followStatusError}
+            />
             <AutoFollowHistory key={sessionId} open={audioDiagnosticsOpen} sessionId={sessionId} historyStatus={autoFollow.history}/>
             <div className="control-status-messages">
               <p className={status.kind === 'error' ? 'control-status-error' : ''}>{status.message || '尚無操作訊息'}</p>
+              {transcription.backgroundFollow && transcriptionBusy && <p>手動播放 · 背景辨識中</p>}
               {transcription.error && <p className="control-status-error">{transcription.error}</p>}
               {subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO && (
                 <>

@@ -2861,6 +2861,7 @@ textarea.script-line-text.editing {
 .script-column-heading > div { display: flex; gap: .8rem; }
 .script-column-heading > div > span { flex: 1; min-width: 0; }
 .cue-workspace .script-list { min-height: 0; padding: .2rem; }
+.cue-workspace:not(.editing-layout) .script-list { overflow-anchor: none; }
 .cue-number { color: #cbd5e1; font-variant-numeric: tabular-nums; font-size: .85rem; }
 .cue-workspace:not(.editing-layout) .script-line { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: .6rem; padding: .6rem; margin: 0; border-radius: 4px; }
 .cue-workspace:not(.editing-layout) .script-line-header { margin: 0; align-items: flex-start; }
@@ -2877,11 +2878,20 @@ textarea.script-line-text.editing {
 .cue-workspace.editing-layout .script-line:not(.active) .script-line-actions,
 .cue-workspace.editing-layout .script-line:not(.active) .script-line-column-label,
 .cue-workspace.editing-layout .script-line:not(.active) .music-cue-text-editor { display: none; }
-.cue-workspace .script-live-controls { gap: .3rem; padding: .45rem; }
-.cue-workspace .control-actions { gap: .4rem; }
-.cue-workspace .control-actions > button { padding: .45rem .65rem; }
+.cue-workspace .script-live-controls { flex-direction: row; align-items: center; gap: .4rem; padding: .25rem .35rem; }
+.cue-workspace .script-live-controls .control-actions {
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: .25rem;
+  padding: 2px;
+  overflow-x: auto;
+}
+.cue-workspace .script-live-controls .control-actions > * { flex: 0 0 auto; }
+.cue-workspace .script-live-controls .control-actions button { padding: .3rem .45rem; white-space: nowrap; }
+.cue-workspace .script-live-controls .audio-diagnostics-toggle { min-height: 0; }
+.cue-workspace .audio-diagnostics-toggle.control-status-error { color: #fca5a5; border-color: #f87171; }
 .cue-workspace .auto-follow-status { padding: .25rem .4rem; min-height: 0; font-size: .75rem; }
-.cue-workspace .status-bar { padding: .2rem .4rem; min-height: 0; font-size: .74rem; }
+.cue-workspace .script-live-controls > .status-bar { flex: 1 1 0; padding: 0; font-size: .74rem; }
 .cue-workspace .status-bar:has(span:empty) { display: none; }
 .cue-workspace .preview-sidebar { padding: .8rem; gap: .45rem; }
 .cue-workspace .preview-sidebar-scroll { gap: .6rem; }
@@ -2914,6 +2924,10 @@ textarea.script-line-text.editing {
   .cue-workspace:not(.editing-layout) .script-line { grid-template-columns: 70px minmax(0, 1fr); }
   .script-column-heading { grid-template-columns: 75px minmax(0, 1fr); }
   .workspace-live-heading { flex-wrap: wrap; }
+}
+@media (max-width: 520px) {
+  .cue-workspace .script-live-controls .control-actions button { font-size: .75rem; }
+  .cue-workspace .script-live-controls .subtitle-mode-button { min-width: 0; }
 }
 
 .recording-transcript { display: grid; gap: .6rem; min-width: 0; border-top: 1px solid #334155; padding-top: .7rem; }
