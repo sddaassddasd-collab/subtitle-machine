@@ -8,9 +8,12 @@ function prepareOpening(script, index, event, direction = false) {
   if (!current || current.source.music || !entry?.text || entry.source.music ||
     (!direction && current.source.type === 'direction')) return null;
   if (script.entries.slice(index, next + 1).some(e => e.source.music)) return null;
-  return {fromIndex: index, index: next, direction, completed: direction || event.completed === true, observed: {
+  const observed = {
     itemId: event.itemId ?? null, text: normalizeText(event.text), endMs: event.endMs,
-  }};
+  };
+  const ending = !direction && event.completed === true
+    ? {...observed, endMs: event.completionEndMs ?? event.endMs} : null;
+  return {fromIndex: index, index: next, direction, completed: direction || Boolean(ending), observed, ending};
 }
 
 function newOpeningSpeech(plan, event) {

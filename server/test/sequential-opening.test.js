@@ -130,11 +130,13 @@ test('old finalization, manual audio fences, script edits and provider changes c
   assert.equal(direction.say('', {}).ignored, true);
 });
 
-test('a quiet pause does not disarm a confirmed position and sound alone cannot advance it', () => {
+test('a quiet pause keeps the confirmed ending ready for the next acoustic onset', () => {
   const s = show(['目前這句要慢慢說清楚', '可是我答應過你']); s.say('目前這句要慢慢說清楚');
-  for (let ms = 1020; ms <= 1200; ms += 20) followAudio(s.tracker, s.lines, 0, {level: 0, durationMs: 20, endMs: ms});
-  assert.equal(followAudio(s.tracker, s.lines, 0, {level: .1, durationMs: 40, endMs: 1240}).index, undefined);
-  assert.equal(s.say('可', {itemId: 'b', startMs: 60000, endMs: 60100}).index, 1);
+  for (let ms = 1020; ms <= 12000; ms += 20) {
+    assert.equal(followAudio(s.tracker, s.lines, 0, {level: 0, durationMs: 20, endMs: ms}).index, undefined);
+  }
+  assert.equal(followAudio(s.tracker, s.lines, 0, {level: .1, durationMs: 40, endMs: 12040}).index, 1);
+  assert.equal(s.tracker.prediction.source, 'onset');
 });
 
 test('semantic recovery prepares the next short opening while music remains an explicit boundary', () => {

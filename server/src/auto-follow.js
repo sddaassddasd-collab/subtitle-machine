@@ -73,6 +73,7 @@ function createTracker({ ignoreBeforeMs = -1, manualPositionIndex = null } = {})
     manualPositionIndex, progressIndex: null, progress: 0, armedIndex: null, armedAtMs: null,
     sequence: null, correction: createCorrection(), quietMs: 0, loudMs: 0, released: false,
     noiseFloor: 0.004, lastOnsetMs: -1,
+    audioEndMs: null, pendingOnsets: [],
     script: null, located: false, candidates: [], preparedIndex: null,
     anchor: null, openingHint: '', prediction: null, directionWait: null,
     directionSpeechStartedMs: null,
@@ -560,8 +561,13 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     } : {};
     const captureRecovery = tracker.streamId === null ? tracker.captureRecovery : null;
     const manualPositionIndex = tracker.streamId === null ? tracker.manualPositionIndex : null;
+    // Audio may already have detected the next opening before the first ASR result.
+    const audioState = tracker.streamId === null ? {
+      audioEndMs: tracker.audioEndMs, pendingOnsets: tracker.pendingOnsets, lastOnsetMs: tracker.lastOnsetMs,
+      quietMs: tracker.quietMs, loudMs: tracker.loudMs, released: tracker.released, noiseFloor: tracker.noiseFloor,
+    } : {};
     Object.assign(tracker, createTracker({ ignoreBeforeMs, manualPositionIndex }), {
-      ...referenceState, streamId: event.streamId, script: tracker.script,
+      ...audioState, ...referenceState, streamId: event.streamId, script: tracker.script,
       captureRecovery,
     });
   }
@@ -575,6 +581,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     clearPreparation(tracker);
     tracker.items.clear();
     tracker.manualPositionIndex = null;
+    tracker.pendingOnsets = [];
     tracker.located = false;
     tracker.progressIndex = null;
     tracker.progress = 0;
@@ -1036,7 +1043,8 @@ function followTranscript(tracker, lines, currentIndex, event) {
     }
     tracker.selectedStartIndex = null;
     tracker.openingPlan = (result.candidate?.phraseAnchored || result.candidate?.provisionalLocation || result.candidate?.backwardSupported || result.reason === 'independent_cue_recovery') ? null
-      : prepareOpening(script, result.index, {...event, completed: result.completed});
+      : prepareOpening(script, result.index, {...event, completed: result.completed,
+        completionEndMs: result.evidence?.endMs});
   } else {
     tracker.openingPlan = plan;
     if (plan) observeOpening(plan, event);
@@ -1045,10 +1053,16 @@ function followTranscript(tracker, lines, currentIndex, event) {
   return result;
 }
 
-function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs }) {
+function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs, gap = false }) {
   const duration = Math.max(0, Math.min(O.maxPacketMs, durationMs || 0));
   const threshold = Math.max(O.minimumThreshold, Math.min(O.maximumThreshold, tracker.noiseFloor * O.noiseMultiplier));
   const releaseThreshold = threshold * O.releaseRatio;
+  if (Number.isFinite(endMs)) {
+    if (gap || (tracker.audioEndMs !== null && endMs - tracker.audioEndMs > duration + O.maximumGapMs)) {
+      tracker.quietMs = 0; tracker.loudMs = 0; tracker.released = false; tracker.pendingOnsets = [];
+    }
+    tracker.audioEndMs = endMs;
+  }
   if (level < releaseThreshold) {
     tracker.noiseFloor = tracker.noiseFloor * O.noiseSmoothing + level * (1 - O.noiseSmoothing);
     tracker.quietMs += duration;
@@ -1108,36 +1122,50 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
   const onsetMs = endMs - tracker.loudMs;
   tracker.lastOnsetMs = onsetMs;
   result.onsetMs = onsetMs;
-  if (tracker.shortOpenings) return result;
-  if (tracker.prediction || !tracker.located || tracker.progressIndex !== currentIndex ||
-    tracker.progress !== 1 || tracker.armedIndex !== currentIndex + 1 ||
-    !tracker.anchor?.completed || onsetMs < tracker.armedAtMs ||
-    onsetMs - tracker.armedAtMs > SEQUENCE_TTL_MS) return result;
+  tracker.pendingOnsets = tracker.pendingOnsets.filter(entry => endMs - entry.detectedMs <= SEQUENCE_TTL_MS);
+  tracker.pendingOnsets.push({startMs: onsetMs, detectedMs: endMs});
+  return {...result, ...advancePreparedOnset(tracker, lines, currentIndex)};
+}
+
+function advancePreparedOnset(tracker, lines, currentIndex) {
+  const plan = tracker.openingPlan;
+  const next = tracker.shortOpenings ? plan?.index : tracker.armedIndex;
+  const ending = tracker.shortOpenings ? (plan?.fromIndex === currentIndex ? plan.ending : null) : tracker.anchor;
+  if (tracker.prediction || next !== currentIndex + 1 || !ending ||
+    (!tracker.shortOpenings && (!tracker.located || tracker.progressIndex !== currentIndex || tracker.progress !== 1 || !ending.completed))) return null;
+  const onset = tracker.pendingOnsets.find(entry =>
+    entry.startMs >= Math.max(ending.endMs, tracker.ignoreBeforeMs) &&
+    (tracker.shortOpenings || entry.startMs - ending.endMs <= SEQUENCE_TTL_MS) &&
+    tracker.audioEndMs - entry.detectedMs <= SEQUENCE_TTL_MS);
+  if (!onset) return null;
   // Only inspect the two relevant raw records at an onset. No full-script scan,
   // Unicode normalization or rebuilding is permitted on the 50 Hz audio path.
-  for (const index of [currentIndex, tracker.armedIndex]) {
+  for (const index of [currentIndex, next]) {
     const line = lines[index], source = tracker.script?.entries[index]?.source;
     if (!line || !source || line.music || line.type === 'direction' ||
       line.text !== source.text || line.type !== source.type ||
       line.music !== source.music || line.role !== source.role) {
       clearPreparation(tracker);
-      return result;
+      tracker.openingPlan = null;
+      return null;
     }
   }
-  result.index = tracker.armedIndex;
+  const onsetMs = onset.startMs;
   tracker.prediction = {
-    index: result.index, fromIndex: currentIndex, onsetMs, decidedAudioMs: endMs,
-    anchor: tracker.anchor,
+    index: next, fromIndex: currentIndex, source: 'onset', onsetMs, decidedAudioMs: tracker.audioEndMs,
+    anchor: ending,
     priorItems: new Set([...tracker.items.values()].filter(item => item.endMs <= onsetMs)
       .map(item => item.itemId)),
   };
-  tracker.sequence = { index: result.index, atMs: onsetMs,
-    observed: { itemId: tracker.anchor.itemId, text: tracker.anchor.text, endMs: tracker.anchor.endMs } };
+  tracker.sequence = { index: next, atMs: onsetMs,
+    observed: { itemId: ending.itemId, text: ending.text, endMs: ending.endMs } };
   clearPreparation(tracker);
-  tracker.progressIndex = result.index;
+  tracker.openingPlan = null;
+  tracker.pendingOnsets = [];
+  tracker.progressIndex = next;
   tracker.progress = 0;
   tracker.candidates = [];
-  return result;
+  return {index: next, source: 'onset', onsetMs, onsetDetectionMs: onset.detectedMs - onsetMs};
 }
 
 function applyReferencePosition(tracker, lines, index, evidence) {
@@ -1251,4 +1279,5 @@ function applySemanticLocation(tracker, lines, index, event, {prepare = true} = 
   return true;
 }
 
-module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, locateTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates };
+module.exports = { createTracker, prepareScript, normalizeText, align, followTranscript, locateTranscript, followAudio,
+  advancePreparedOnset, applyReferencePosition, applySemanticLocation, localSupportCandidates };

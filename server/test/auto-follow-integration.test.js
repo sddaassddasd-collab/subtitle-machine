@@ -8,7 +8,8 @@ afterEach(() => {
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates } = require('../src/auto-follow');
+const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, advancePreparedOnset,
+  localSupportCandidates } = require('../src/auto-follow');
 const {freshSpeech} = require('../src/word-evidence');
 const {reviewForwardCue} = require('../src/forward-cue-evidence');
 const {trackerSnapshot} = require('../src/follow-trace');
@@ -36,7 +37,8 @@ function fixture(mode = 'auto') {
   };
   const emissions = [];
   const context = vm.createContext({
-    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio, localSupportCandidates, freshSpeech, reviewForwardCue, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
+    Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio,
+    advancePreparedOnset, localSupportCandidates, freshSpeech, reviewForwardCue, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
     ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview, ShadowFollow,
     TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },
@@ -106,18 +108,15 @@ test('noisy interim catches up nearby and publishes edited script to displays', 
   }
 });
 
-test('an overdue short opening remains unconfirmed until normal text verification arrives', () => {
+test('an overdue acoustic onset remains unconfirmed until normal text verification arrives', () => {
   const {session, context} = fixture(), reviews = [];
-  context.autoFollowHistory.event = (id, type, data) => {if (type === 'opening_review') reviews.push(data)};
+  context.autoFollowHistory.event = (id, type, data) => {if (type === 'onset_review') reviews.push(data)};
   const stream = {ready: true, autoFollowAudioMs: 1000}; context.transcriptionStreams.set('test', stream);
   context.handleAutoFollowTranscript('test', session.lines[0].text,
     {streamId: 's', itemId: 'a', startMs: 0, endMs: 1000, isFinal: true});
   const packet = (level, ms) => {stream.autoFollowAudioMs = ms; context.handleAutoFollowAudioLevel('test', level, 20, ms)};
   for (let ms = 1020; ms <= 1120; ms += 20) packet(0, ms);
   packet(.1, 1140); packet(.1, 1160);
-  assert.equal(session.currentIndex, 0, 'sound alone does not advance');
-  stream.autoFollowAudioMs = 1260;
-  context.handleAutoFollowTranscript('test', '可', {streamId: 's', itemId: 'opening', startMs: 1200, endMs: 1260});
   assert.equal(session.currentIndex, 1);
   packet(0, 6260); packet(.1, 6280); packet(.1, 6300);
   assert.equal(context.getPublicAutoFollowState(session).predictionReview.status, 'overdue');

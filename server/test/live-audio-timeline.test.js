@@ -96,6 +96,47 @@ test('actual Deepgram Results spanning a large source gap still update captions 
   assert.equal(stream.closing, false);
 });
 
+for (const delayedEnding of [false, true]) {
+  test('a fresh acoustic onset advances one cue before next-line recognition' +
+    (delayedEnding ? ' when the previous ending arrives late' : ''), t => {
+    const texts = ['你怎麼現在才來這裡', '路上出了點事情', '我們先回家再說'];
+    const f = createFixture({texts, allowCueChanges: true, fakeDeepgram: true});
+    t.after(() => f.dispose());
+    const stream = f.startProvider({captureId: 'current', sourceId: 'mic', captureClock: 'audio-thread-v2'});
+    let sequence = 0;
+    const packet = level => {
+      const sourceStartMs = sequence * 40;
+      assert.equal(f.send({sessionId: f.session.id, captureId: 'current', sourceId: 'mic', sequence: ++sequence,
+        sourceStartMs, sourceEndMs: sourceStartMs + 40, audio: Buffer.alloc(1920), durationMs: 40, level}).ok, true);
+    };
+    const recognize = (transcript, start, end, isFinal) => stream.socket.emit('message', JSON.stringify({
+      type: 'Results', start, duration: end - start, is_final: isFinal,
+      channel: {alternatives: [{transcript, words: [{word: transcript, start, end}]}]},
+    }));
+    for (let i = 0; i < 20; i++) packet(.08);
+    if (!delayedEnding) recognize(texts[0], 0, .8, false);
+    for (let i = 0; i < 3; i++) packet(.001);
+    assert.equal(f.session.currentIndex, 0);
+    packet(.08);
+    if (delayedEnding) {
+      assert.equal(f.session.currentIndex, 0);
+      recognize(texts[0], 0, .8, false);
+    }
+    assert.equal(f.viewer().text, texts[1]);
+    assert.equal(f.state().lastDecision.source, 'onset');
+    assert.equal(f.state().lastDecision.onsetAudioMs, 920);
+    for (let i = 0; i < 8; i++) packet(.08);
+    recognize('演員講了別的內容', .92, 1.28, true);
+    for (let i = 0; i < 3; i++) packet(.001);
+    packet(.08);
+    assert.equal(f.session.currentIndex, 1);
+    for (let i = 0; i < 14; i++) packet(.08);
+    recognize(texts[2], 1.4, 2, true);
+    assert.equal(f.viewer().text, texts[2]);
+    assert.equal(f.state().lastDecision.source, 'correction');
+  });
+}
+
 test('the associated control connection can operate the follower while an independent worker owns audio', t => {
   const f = createFixture({lineCount: 3}); t.after(() => f.dispose());
   f.stream.controlSocketId = 'controller';

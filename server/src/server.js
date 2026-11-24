@@ -15,7 +15,8 @@ const { OpenAI } = require('openai');
 const { OpenAIRealtimeWS } = require('openai/realtime/ws');
 const { toFile } = require('openai/uploads');
 const OpenCC = require('opencc-js');
-const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, applyReferencePosition, applySemanticLocation, localSupportCandidates } = require('./auto-follow');
+const { createTracker, prepareScript, normalizeText, followTranscript, followAudio, advancePreparedOnset,
+  applyReferencePosition, applySemanticLocation, localSupportCandidates } = require('./auto-follow');
 const {liveTextModelOptions} = require('./live-text-model');
 const {SemanticFollower, requestSemanticCandidate} = require('./semantic-follow');
 const {recoveryCandidateEnd} = require('./semantic-candidates');
@@ -9813,7 +9814,22 @@ function scheduleScriptEndStop(session, stream, state, lines, result, transcript
   stream.scriptEndTimer.unref?.();
 }
 
-function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
+function publishAudioCue(session, lines, result, timing = {}) {
+  const silentDirection = result.source === 'silence';
+  recordAutoFollowDecision(session.id, result.index, silentDirection ? 'silence' : 'onset', silentDirection ? timing : {
+    onsetAudioMs: result.onsetMs, onsetDetectionMs: result.onsetDetectionMs, ...timing,
+  });
+  updateAutoFollowState(session.id, {
+    started: true, status: AUTO_FOLLOW_STATUS.ADVANCED, lastAdvancedAt: Date.now(),
+    lastCandidateIndex: result.index, lastCandidateText: lines[result.index]?.text || '',
+    confidence: null, message: silentDirection
+      ? '句尾已確認，靜默 3 秒後進入舞台指示；外部台詞已清空，等待下一句。'
+      : '已依起音預推一格，等待文字核對；核對前不再預推。',
+  });
+  applyCurrentIndexChange(session, result.index);
+}
+
+function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs, gap) {
   const session = getSessionRecord(sessionId);
   if (!session || session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.AUTO) return;
   const state = getAutoFollowState(sessionId);
@@ -9830,28 +9846,15 @@ function handleAutoFollowAudioLevel(sessionId, level, durationMs, endMs) {
   }
   const followingLines = getFollowingLines(session);
   const result = followAudio(state.tracker, followingLines, session.currentIndex, {
-    level, durationMs, endMs,
+    level, durationMs, endMs, gap,
   });
   updateAutoFollowState(sessionId, {
     listening: true, lastAudioLevel: level, lastAudioAt: now,
     triggerThreshold: result.threshold, releaseThreshold: result.releaseThreshold,
   });
   if (Number.isFinite(result.onsetMs)) updateAutoFollowState(sessionId, { lastOnsetAt: now });
-  if (Number.isInteger(result.index)) {
-    const silentDirection = result.source === 'silence';
-    recordAutoFollowDecision(sessionId, result.index, silentDirection ? 'silence' : 'onset',
-      silentDirection ? { silenceAudioMs: endMs } : {
-        onsetAudioMs: result.onsetMs, onsetDetectionMs: Math.max(0, endMs - result.onsetMs),
-      });
-    updateAutoFollowState(sessionId, {
-      started: true, status: AUTO_FOLLOW_STATUS.ADVANCED, lastAdvancedAt: now,
-      lastCandidateIndex: result.index, lastCandidateText: followingLines[result.index]?.text || '',
-      confidence: null, message: silentDirection
-        ? '句尾已確認，靜默 3 秒後進入舞台指示；外部台詞已清空，等待下一句。'
-        : '已依起音預推一格，等待文字核對；核對前不再預推。',
-    });
-    applyCurrentIndexChange(session, result.index);
-  }
+  if (Number.isInteger(result.index)) publishAudioCue(session, followingLines, result,
+    result.source === 'silence' ? {silenceAudioMs: endMs} : {});
   maybeBroadcastAutoFollowDiagnostics(sessionId, now);
 }
 
@@ -10073,6 +10076,15 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     result.status === 'corrected' ? 'correction' : 'transcript',
     {...evidence, completed: result.completed === true});
   else autoFollowHistory.diagnostic(sessionId, 'text', result.status || 'searching', evidence);
+  if (result.completed && result.index === session.currentIndex && !performance.group) {
+    const onset = advancePreparedOnset(state.tracker, followingLines, session.currentIndex);
+    if (onset) {
+      publishAudioCue(session, followingLines, onset, {
+        transcriptReceivedAt: receivedAt, transcriptAudioEndMs: result.evidence?.endMs ?? options.endMs,
+      });
+      return;
+    }
+  }
   if (session.stopAtScriptEnd) scheduleScriptEndStop(session, stream, state, followingLines, result, transcript, options);
   handleSemanticFollow(session, stream, followingLines, state, transcript, options, result, receivedAt);
   if (holdingCaption(session)) {
@@ -14378,7 +14390,7 @@ io.on('connection', (socket) => {
       }
       if (stale !== true) {
         handleAutoFollowAudioLevel(session.id, normalizedLevel, normalizedDurationMs,
-          (stream.autoFollowAudioMs || 0) + normalizedDurationMs);
+          (stream.autoFollowAudioMs || 0) + normalizedDurationMs, gap);
       }
       sendTranscriptionAudioChunk(
         stream,
