@@ -187,6 +187,21 @@ test('manual reposition preserves automatic mode and fences old recognition', ()
   assert.equal(session.currentIndex, 1);
 });
 
+test('manual positioning can use a distinctive next opening without counting the selected cue as spoken', () => {
+  const lines = ['現在大家準備進場', '遠方傳來一陣雷聲', '請記得幫我留門'].map(text => ({text}));
+  const sound = {itemId: 'new', streamId: 's', startMs: 2100, endMs: 2900, isFinal: false};
+  const locate = (script, text, manualPositionIndex) => followTranscript(
+    createTracker({ignoreBeforeMs: 2000, manualPositionIndex}), script, 0, {...sound, text});
+  assert.equal(locate(lines, '遠方傳來啊', null).index, undefined);
+  const next = locate(lines, '遠方傳來啊', 0);
+  assert.equal(next.index, 1);
+  assert.equal(next.completed, false);
+  assert.equal(next.spans.length, 0);
+  assert.equal(locate(lines, '遠方傳來我剛才', 0).index, undefined);
+  const shared = [...lines.slice(0, 2), {text: '我也聽到遠方傳來的聲音'}];
+  assert.equal(locate(shared, '遠方傳來啊', 0).index, undefined);
+});
+
 test('interim verification emits a small diagnostic update, not a full script', () => {
   const { context, session, emissions } = fixture();
   context.handleAutoFollowTranscript('test', session.lines[0].text, {

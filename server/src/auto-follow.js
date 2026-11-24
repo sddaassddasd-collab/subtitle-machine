@@ -7,7 +7,7 @@ const {pinyin} = require('pinyin-pro');
 const {supportedRecovery, expireSupportedRecovery} = require('./supported-recovery');
 const {phraseRecovery} = require('./phrase-recovery');
 const {backwardRecovery, expireBackwardRecovery} = require('./backward-recovery');
-const {forwardRejection, pauseRecovery, provisionalLocation} = require('./location-safety');
+const {sharedFragment, forwardRejection, pauseRecovery, provisionalLocation} = require('./location-safety');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
 const {reviewForwardCue} = require('./forward-cue-evidence');
@@ -67,10 +67,10 @@ function prepareScript(lines, previous) {
 }
 
 
-function createTracker({ ignoreBeforeMs = -1 } = {}) {
+function createTracker({ ignoreBeforeMs = -1, manualPositionIndex = null } = {}) {
   return {
     streamId: null, ignoreBeforeMs, latestStartMs: -1, latestOrder: -1, items: new Map(),
-    progressIndex: null, progress: 0, armedIndex: null, armedAtMs: null,
+    manualPositionIndex, progressIndex: null, progress: 0, armedIndex: null, armedAtMs: null,
     sequence: null, correction: createCorrection(), quietMs: 0, loudMs: 0, released: false,
     noiseFloor: 0.004, lastOnsetMs: -1,
     script: null, located: false, candidates: [], preparedIndex: null,
@@ -559,7 +559,8 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
       lastLocated: tracker.lastLocated,
     } : {};
     const captureRecovery = tracker.streamId === null ? tracker.captureRecovery : null;
-    Object.assign(tracker, createTracker({ ignoreBeforeMs }), {
+    const manualPositionIndex = tracker.streamId === null ? tracker.manualPositionIndex : null;
+    Object.assign(tracker, createTracker({ ignoreBeforeMs, manualPositionIndex }), {
       ...referenceState, streamId: event.streamId, script: tracker.script,
       captureRecovery,
     });
@@ -573,6 +574,7 @@ function locateTranscript(tracker, lines, currentIndex, event, preparedScript) {
     // Edits invalidate old alignment history but preserve the audio ordering fence.
     clearPreparation(tracker);
     tracker.items.clear();
+    tracker.manualPositionIndex = null;
     tracker.located = false;
     tracker.progressIndex = null;
     tracker.progress = 0;
@@ -928,7 +930,7 @@ function locateDisplayCue(tracker, lines, currentIndex, event, script) {
   const oldItem = items.get(event.itemId);
   const item = trial.items.get(event.itemId);
   if (trial.script !== previousScript || trial.streamId !== tracker.streamId) {
-    Object.assign(tracker, createTracker({ignoreBeforeMs: trial.ignoreBeforeMs}),
+    Object.assign(tracker, createTracker({ignoreBeforeMs: trial.ignoreBeforeMs, manualPositionIndex: trial.manualPositionIndex}),
       {script: trial.script, streamId: trial.streamId});
   }
   tracker.latestStartMs = trial.latestStartMs;
@@ -977,6 +979,19 @@ function followTranscript(tracker, lines, currentIndex, event) {
     restoreOpeningPreparation(tracker);
     return result;
   }
+  let manualOpening = false;
+  if (!trigger && !Number.isInteger(result.index) && tracker.manualPositionIndex === currentIndex) {
+    const manualPlan = prepareOpening(script, currentIndex, {text: '', endMs: tracker.ignoreBeforeMs});
+    const opening = matchOpening(manualPlan, script, event, T.shortAnchorEvidence);
+    const heard = normalizeText(event.text);
+    if (opening && (script.entries[opening.index].text.startsWith(heard) ||
+      (heard === opening.text + heard.at(-1) && T.tailParticles.includes(heard.at(-1)))) &&
+      !sharedFragment(script, currentIndex, opening.index, opening.text)) {
+      plan = manualPlan;
+      trigger = opening;
+      manualOpening = true;
+    }
+  }
   if (!trigger && (!Number.isInteger(result.index) || result.index === currentIndex)) {
     const batch = completedBatchOpening(script, currentIndex, event);
     if (batch) {plan = batch.plan; trigger = batch.trigger;}
@@ -1005,10 +1020,12 @@ function followTranscript(tracker, lines, currentIndex, event) {
       evidence: {startMs: trigger.startMs, endMs: trigger.endMs},
       candidate: {index: trigger.index, offset: trigger.characters, length: script.entries[trigger.index].length,
         confidence: 1, evidence: trigger.characters, heard: trigger.text, locationOnly: true, shortOpening: true},
-      message: plan.completed ? '目前格已說完，已依新增語音先顯示下一格，持續核對內容。'
+      message: manualOpening ? '從人工定位接上下一格開頭，持續核對內容。'
+        : plan.completed ? '目前格已說完，已依新增語音先顯示下一格，持續核對內容。'
         : '已依下一格短開頭顯示字幕，等待現有配對標準核對後再準備下一格。'};
   }
   if (accepted) {
+    tracker.manualPositionIndex = null;
     const span = result.spans?.find(s => s.index === result.index);
     const fullText = script.entries[result.index].text;
     const heard = result.completed && normalizeText(event.text).endsWith(fullText) ? fullText : span?.heard || result.candidate?.heard;
@@ -1125,7 +1142,7 @@ function followAudio(tracker, lines, currentIndex, { level, durationMs, endMs })
 
 function applyReferencePosition(tracker, lines, index, evidence) {
   const script = prepareScript(lines, tracker.script), entry = script.entries[index];
-  if (!entry?.text) return false;
+  if (!entry?.text || (Number.isInteger(tracker.manualPositionIndex) && evidence.audioEndMs <= tracker.ignoreBeforeMs)) return false;
   const sameLine = tracker.progressIndex === index;
   if (!sameLine) {
     clearPreparation(tracker); tracker.prediction = null; tracker.sequence = null;
@@ -1135,6 +1152,7 @@ function applyReferencePosition(tracker, lines, index, evidence) {
       priorItems: new Set(tracker.items.keys())};
   }
   if (tracker.provisionalLocation?.index !== index) tracker.provisionalLocation = null;
+  tracker.manualPositionIndex = null;
   tracker.script = script; tracker.located = true; tracker.progressIndex = index;
   tracker.prediction = null;
   tracker.progress = Math.max(sameLine ? tracker.progress : 0, evidence.completed ? 1 : evidence.progress);
@@ -1214,6 +1232,7 @@ function applySemanticLocation(tracker, lines, index, event, {prepare = true} = 
   if (!script.entries[index]?.text || script.entries[index].source.music ||
     event.endMs <= tracker.ignoreBeforeMs) return false;
   clearPreparation(tracker);
+  tracker.manualPositionIndex = null;
   if (tracker.provisionalLocation?.index !== index) tracker.provisionalLocation = null;
   tracker.script = script; tracker.located = true; tracker.progressIndex = index; tracker.progress = 0;
   tracker.prediction = null; tracker.referenceFence = null; tracker.referenceProgress = null;

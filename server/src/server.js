@@ -9225,13 +9225,10 @@ function applyCurrentIndexChange(session, nextIndex, options = {}) {
   const manualOverride = options.manualOverride === true;
   if (
     manualOverride &&
-    session.subtitleControlMode !== SUBTITLE_CONTROL_MODES.MANUAL
+    session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO &&
+    Number.isInteger(nextIndex) && session.lines[nextIndex]
   ) {
-    const manualCue = Number.isInteger(nextIndex) && nextIndex >= 0 && nextIndex < session.lines.length
-      ? {index: nextIndex, at: Date.now()} : null;
-    resetAutoFollowPosition(session, '已手動定位，繼續自動跟戲。', manualCue);
-  }
-  if (manualOverride && session.subtitleControlMode === SUBTITLE_CONTROL_MODES.AUTO) {
+    resetAutoFollowPosition(session, '已手動定位，繼續自動跟戲。', {index: nextIndex, at: Date.now()});
     const performance = getPerformanceFollower(session);
     performance.command('lock-script', nextIndex, transcriptionStreams.get(session.id)?.autoFollowAudioMs || 0);
     autoFollowHistory.event(session.id, 'performance_follow', {action: 'manual_position', reason: 'operator_script_lock', index: nextIndex,
@@ -9456,7 +9453,7 @@ function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} 
     nextState.cellId = session.selectedCellId;
     const following = resolveFollowingLanguage(session);
     nextState.followingKey = `${following.language}:${following.languageId}`;
-    nextState.performance.originIndex = session.currentIndex;
+    nextState.performance.originIndex = nextState.tracker.manualPositionIndex ?? session.currentIndex;
     const lines = getFollowingLines(session);
     const sameScript = previousState?.cellId === nextState.cellId && previousState.followingKey === nextState.followingKey &&
       previousState.tracker.script && prepareScript(lines, previousState.tracker.script) === previousState.tracker.script;
@@ -9466,6 +9463,9 @@ function resetAutoFollowState(sessionId, patch = {}, {preservePosition = false} 
       nextState.performance.rates = [...previousState.performance.rates];
       nextState.performance.usedGroups = new Set(previousState.performance.usedGroups);
       nextState.captionDisplay.reconnect(previousState.captionDisplay, session.currentIndex, session.selectedCellId);
+      if (previousState.tracker.manualPositionIndex === session.currentIndex) {
+        nextState.tracker.manualPositionIndex = session.currentIndex;
+      }
       if (!session.automaticLive && (previousState.started || previousState.performance.lastReliable || previousState.tracker.captureRecovery))
         nextState.tracker.captureRecovery = {index: session.currentIndex};
     }
@@ -9506,6 +9506,8 @@ function getPublicAutoFollowState(session) {
     releaseThreshold: state.releaseThreshold || AUTO_FOLLOW_AUDIO_RELEASE_THRESHOLD,
     progress: state.tracker.progress,
     progressIndex: state.tracker.progressIndex,
+    manualPositionIndex: autoEnabled && state.tracker.manualPositionIndex === session.currentIndex
+      ? session.currentIndex : null,
     located: state.tracker.located,
     preparedIndex: state.tracker.preparedIndex,
     openingHint: state.tracker.openingHint,
@@ -9569,7 +9571,7 @@ function resetAutoFollowPosition(session, message = '', manualCue = null) {
     ...(previous ? {shadow: previous.shadow, manualCue: {...manualCue,
       originIndex: previous.manualCue?.originIndex ?? session.currentIndex,
       priorFenceMs: previous.manualCue?.priorFenceMs ?? previous.tracker.ignoreBeforeMs}} : {}),
-    tracker: createTracker({ ignoreBeforeMs: stream?.autoFollowAudioMs ?? -1 }),
+    tracker: createTracker({ ignoreBeforeMs: stream?.autoFollowAudioMs ?? -1, manualPositionIndex: manualCue?.index }),
     listening: Boolean(stream?.ready),
     status: AUTO_FOLLOW_STATUS.LISTENING,
     message,
@@ -9913,6 +9915,16 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   }
   const performance = getPerformanceFollower(session);
   const audioMs = transcriptionStreams.get(sessionId)?.autoFollowAudioMs;
+  const shadowSpeech = {...options, text: transcript};
+  const manualFence = state.tracker.ignoreBeforeMs;
+  if (state.tracker.manualPositionIndex === session.currentIndex && options.startMs < manualFence) {
+    const fresh = freshSpeech(shadowSpeech, manualFence);
+    if (fresh) {
+      const {text, ...timing} = fresh;
+      transcript = normalizeTranscriptionOutputText(text, session.transcriptionLanguage);
+      options = timing;
+    }
+  }
   updateAutoFollowState(sessionId, {
     lastTranscriptReceivedAt: receivedAt,
     lastTranscriptAudioLagMs: Number.isFinite(audioMs) && Number.isFinite(options.endMs)
@@ -10072,7 +10084,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       const manualCue = state.manualCue;
       const comparingManualCue = manualCue?.index === session.currentIndex && !session.automaticLive;
       if (manualCue && !comparingManualCue) state.manualCue = null;
-      state.shadow.enqueue({lines: followingLines, event: {...options, text: transcript},
+      state.shadow.enqueue({lines: followingLines, event: shadowSpeech,
         seedIndex: manualCue?.originIndex ?? shadowOriginIndex, streamId: stream?.historyStreamId || null,
         gapFenceMs: stream?.captureGapFenceMs ?? -1, ignoreBeforeMs: manualCue?.priorFenceMs ?? state.tracker.ignoreBeforeMs,
         display: {index: session.currentIndex, source: session.automaticLive ? 'live' : 'script',

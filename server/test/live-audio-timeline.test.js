@@ -104,6 +104,44 @@ test('the associated control connection can operate the follower while an indepe
   assert.equal(f.connect(undefined, 'another-controller').event('performance:action', {action: 'lock-script'}).ok, false);
 });
 
+test('an operator-selected cue is an immediate anchor and accepts only fresh words to follow the next cue', t => {
+  const texts = ['舊的位置請先停一下', '現在大家準備進場', '遠方傳來一陣雷聲'];
+  const f = createFixture({texts, allowCueChanges: true, fakeDeepgram: true});
+  t.after(() => f.dispose());
+  f.allowSettings();
+  const stream = f.startProvider();
+  stream.autoFollowAudioMs = 2000;
+  const controls = f.connect(undefined, 'separate-controller');
+  controls.event('setCurrentIndex', {index: 1});
+  assert.equal(f.session.currentIndex, 1);
+  assert.equal(f.session.subtitleControlMode, 'auto');
+  assert.equal(f.state().manualPositionIndex, 1);
+  assert.equal(f.state().progressIndex, null);
+  assert.equal(f.state().lastVerifiedAt, null);
+  assert.equal(f.viewer().text, texts[1]);
+
+  const say = (itemId, startMs, endMs, text, words) => f.transcript(text, {
+    itemId, streamId: stream.liveTranslationStreamId, startMs, endMs, isFinal: true, words,
+  });
+  say('old', 500, 2000, texts[0]);
+  say('ambience', 2010, 2400, '麥克風測試');
+  assert.equal(f.state().manualPositionIndex, 1);
+  assert.equal(f.session.currentIndex, 1);
+
+  stream.autoFollowAudioMs = 2500;
+  controls.event('setCurrentIndex', {index: 1});
+  assert.equal(f.state().manualPositionIndex, 1);
+  assert.equal(f.currentStream(), stream);
+  say('overlap', 2200, 3500, texts[0] + texts[2], [
+    {word: texts[0], startMs: 2200, endMs: 2500},
+    {word: texts[2], startMs: 2500, endMs: 3500},
+  ]);
+  assert.equal(f.session.currentIndex, 2);
+  assert.equal(f.state().manualPositionIndex, null);
+  assert.equal(f.state().progressIndex, 2);
+  assert.equal(f.viewer().text, texts[2]);
+});
+
 test('the control preview shows interim and final speech even when it does not match a cue', t => {
   const f = createFixture({texts: ['請大家從舞台左側進場', '燈光落下後慢慢轉身'],
     allowCueChanges: true, fakeDeepgram: true});

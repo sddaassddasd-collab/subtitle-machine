@@ -26,7 +26,7 @@ function newOpeningSpeech(plan, event) {
   return event.startMs >= previous.endMs ? {...event, estimated: true} : null;
 }
 
-function matchOpening(plan, script, event) {
+function matchOpening(plan, script, event, minimumCharacters = 1) {
   if (!plan) return null;
   let speech = newOpeningSpeech(plan, event);
   const entry = script.entries[plan.index];
@@ -42,11 +42,11 @@ function matchOpening(plan, script, event) {
     else if (!words.length && particle(speech.text) && !entry.text.startsWith(normalizeText(speech.text))) speech = null;
   }
   const heard = Array.from(normalizeText(speech?.text));
-  const count = Math.min(T.triggerOpeningCharacters, heard.length, entry.length);
+  const count = Math.min(Math.max(T.triggerOpeningCharacters, minimumCharacters), heard.length, entry.length);
   // A completed cue owns the boundary: new speech triggers the expected next
   // display before its content is verified. Partial cues still need a matching
   // next opening, so ordinary continuation cannot spend this preparation.
-  if (!count || (!plan.completed &&
+  if (count < minimumCharacters || (!plan.completed &&
     heard.slice(0, count).join('') !== Array.from(entry.text).slice(0, count).join(''))) return null;
   // Use the actual containing word range. Never invent a clock inside a
   // provider word just because only its first one or two characters trigger.
