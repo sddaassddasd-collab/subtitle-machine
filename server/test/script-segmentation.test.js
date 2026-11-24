@@ -47,19 +47,21 @@ function fixture({ reviewer = blocks => blocks.map(block => ({
     module.exports = {
       parseScriptWithOpenAI, chunkDialogueText, measureSubtitleTextWidth, normalizeScriptLines,
       prepareImportedScriptLines, resolveScriptSegmentationProfile, joinAnnotatedUnitText,
-      async route(languageCode, scriptText, secondary) {
+      ensureSessionStructure,
+      async route(languageCode, { scriptText, lines, secondary } = {}) {
         const owner = { id: 'script-review-owner', role: USER_ROLES.OPERATOR };
         users.set(owner.id, owner);
         const session = createSessionRecord(owner.id);
         session.languages[0].code = languageCode;
         if (secondary) session.languages.push({ id: 'english', code: languageCode, name: 'English' });
         sessions.set(session.id, session);
-        const routePath = secondary
+        const routePath = lines ? '/api/session/:sessionId/lines' : secondary
           ? '/api/session/:sessionId/cells/:cellId/languages/:languageId/parse'
           : '/api/session/:sessionId/script/parse';
-        const route = app.router.stack.find(layer => layer.route?.path === routePath).route;
+        const method = lines ? 'put' : 'post';
+        const route = app.router.stack.find(layer => layer.route?.path === routePath && layer.route.methods[method]).route;
         const req = { authUser: owner, params: { sessionId: session.id, cellId: session.selectedCellId, languageId: 'english' },
-          body: { apiKey: 'test-placeholder', cellId: session.selectedCellId, scriptText, scriptParseModel: 'gpt-4o-mini' } };
+          body: { apiKey: 'test-placeholder', cellId: session.selectedCellId, scriptText, scriptParseModel: 'gpt-4o-mini', lines } };
         const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
         for (const layer of route.stack) {
           let proceed = false;
@@ -230,7 +232,7 @@ test('a bad block does not discard a valid review of another actor', async () =>
 
 test('quoted source survives review, normalization and route persistence; directions remain hidden to viewers', async () => {
   const f = fixture();
-  const result = await f.route('zh-TW', '甲：我說：「你怎麼還沒睡？」\n（燈光漸暗）\n（演員退場）');
+  const result = await f.route('zh-TW', { scriptText: '甲：我說：「你怎麼還沒睡？」\n（燈光漸暗）\n（演員退場）' });
   assert.equal(result.status, 200);
   assert.equal(result.body.parsedLineCount, 2);
   assert.equal(result.body.lines[0].text, '我說：「你怎麼還沒睡？」');
@@ -245,11 +247,41 @@ test('quoted source survives review, normalization and route persistence; direct
 
 test('primary imports expose segmentation review warnings and merge consecutive directions', async () => {
   const f = fixture({ reviewer: () => { throw new Error('simulated outage'); } });
-  const result = await f.route('en', 'Alice: I am home.\n(The lights dim.)\n(The actors leave.)', false);
+  const result = await f.route('en', { scriptText: 'Alice: I am home.\n(The lights dim.)\n(The actors leave.)' });
   assert.equal(result.status, 200);
   assert.match(result.body.warning, /保留程式切點/);
   assert.equal(result.body.parsedLineCount, 2);
   assert.equal(result.body.lines[1].translations.primary, '(The lights dim.)\n(The actors leave.)');
+});
+
+test('JSON import preserves supplied cue boundaries and types through storage and display', async () => {
+  const f = fixture();
+  const lines = [
+    { id: 'narration', text: '【旁白】死了。', type: 'dialogue', role: '△ 甲' },
+    { id: 'stage', text: '（燈光漸暗）', type: 'direction' },
+    { id: 'spoken-marker', text: '【旁白】', type: 'dialogue' },
+    '【旁白】那隻麻雀。',
+    '（演員退場）',
+  ];
+  const expected = [
+    ['【旁白】死了。', 'dialogue', '△ 甲'],
+    ['（燈光漸暗）', 'direction', null],
+    ['【旁白】', 'dialogue', null],
+    ['【旁白】那隻麻雀。', 'dialogue', null],
+    ['（演員退場）', 'direction', null],
+  ];
+  const result = await f.route('zh-TW', { lines });
+  const cueFields = entries => entries.map(({ text, type, role }) => [text, type, role || null]);
+  assert.equal(result.status, 200);
+  assert.deepEqual(cueFields(result.body.lines), expected);
+  assert.deepEqual(result.body.lines.slice(0, 3).map(line => line.id), ['narration', 'stage', 'spoken-marker']);
+  assert.deepEqual(cueFields(result.stored.sharedLines), expected);
+  const reloaded = f.ensureSessionStructure(JSON.parse(JSON.stringify(result.stored)));
+  assert.deepEqual(cueFields(reloaded.lines), expected);
+  assert.equal(result.viewer().text, '【旁白】死了。');
+  result.session.currentIndex = 1;
+  assert.equal(result.viewer().text, '');
+  assert.deepEqual(f.requests, []);
 });
 
 test('large scripts retain the entire ordered source across review batches and bounded stage context', async () => {

@@ -2739,7 +2739,9 @@ function normalizeScriptLines(entries, options = {}) {
       return;
     }
 
-    const expanded = expandStageDirectionSegments(base);
+    const expanded = options.preserveCueBoundaries
+      ? [base]
+      : expandStageDirectionSegments(base);
     expanded.forEach((item) => {
       const text = sanitizeSubtitleText(item.text);
       if (!text) {
@@ -3027,6 +3029,7 @@ function ensureSessionLines(session) {
   const primaryLanguageId = getPrimaryLanguageId(session);
   const normalized = normalizeScriptLines(session.lines || [], {
     keepEmpty: true,
+    preserveCueBoundaries: true,
     primaryLanguageId,
   });
   session.lines = normalized;
@@ -3695,6 +3698,7 @@ function createCellDefinition(
     displayEnabled: rawCell.displayEnabled !== false,
     lines: normalizeScriptLines(rawLines, {
       keepEmpty: true,
+      preserveCueBoundaries: true,
       primaryLanguageId,
     }),
     languageSources: normalizeCellLanguageSources(
@@ -12692,6 +12696,7 @@ app.put('/api/session/:sessionId/lines', requireAuth, (req, res) => {
   pushSessionHistory(session);
   cell.lines = normalizeScriptLines(lines, {
     keepEmpty: true,
+    preserveCueBoundaries: true,
     primaryLanguageId: 'primary',
   });
   session.selectedCellId = cell.id;
