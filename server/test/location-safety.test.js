@@ -36,10 +36,13 @@ test('recorded short suffix does not pull grid 5 back to grid 2', () => {
   assert.equal(r.get(396).index, 4);
   assert.equal(r.get(396).result.reason, 'backward_support_required');
 });
-for (const [name, sequence, index] of [['pause-city', 9539, 173], ['pause-body', 14969, 258]]) {
-  test(`recorded ${name} reacquires from a final literal cue after the anchor expired`, () => {
-    const r = replay(name).get(sequence);
-    assert.equal(r.index, index); assert.equal(r.result.reason, 'pause_reacquired');
+for (const [name, interim, final, index] of [['pause-city', 9533, 9539, 173], ['pause-body', 14964, 14969, 258]]) {
+  test(`recorded ${name} reacquires a distinctive cue after the anchor expired`, () => {
+    const history = replay(name);
+    assert.equal(history.get(interim).result.index, index);
+    assert.equal(history.get(interim).result.reason, 'fresh_forward_cue');
+    assert.equal(history.get(final).index, index);
+    assert.equal(history.get(final).result.status, 'verified');
   });
 }
 for (const mode of ['valid', 'interim', 'untimed', 'ambiguous', 'music', 'incomplete', 'no-anchor', 'recent']) {

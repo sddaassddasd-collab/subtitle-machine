@@ -10,7 +10,7 @@ const {backwardRecovery, expireBackwardRecovery} = require('./backward-recovery'
 const {sharedFragment, forwardRejection, pauseRecovery, provisionalLocation} = require('./location-safety');
 const {observeScriptPath, observeWeakScriptPath, observeWordPath, isCurrentSuffix} = require('./script-path');
 const {prepareOpening, matchOpening, observeOpening, completedBatchOpening} = require('./sequential-opening');
-const {reviewForwardCue} = require('./forward-cue-evidence');
+const {findFreshForwardCue, reviewForwardCue} = require('./forward-cue-evidence');
 const MAX_HEARD = T.maxHeard;
 const SEQUENCE_TTL_MS = T.sequenceTtlMs;
 const DIRECTION_SILENCE_MS = O.directionSilenceMs;
@@ -917,45 +917,27 @@ function restoreOpeningPreparation(tracker) {
 // Display timing is separate from the full-evidence locator. A short opening
 // spends one preparation; only a normal accepted match prepares another cue.
 function locateDisplayCue(tracker, lines, currentIndex, event, script) {
-  if (!event.words?.length) return locateTranscript(tracker, lines, currentIndex, event, script);
-
-  // The locator mutates its hypotheses and same-item fences. Publish those
-  // changes together with the chosen cue, or keep the prior display position.
-  const {script: previousScript, items, ...position} = tracker;
-  const trial = {...structuredClone(position), script: previousScript, items: new Map(items)};
-  const result = locateTranscript(trial, lines, currentIndex, event, script);
-  const review = reviewForwardCue(script, currentIndex, result.index, event, result.candidate, event.audioMs);
-  if (!review || review.action === 'advance') {
-    Object.assign(tracker, trial);
-    if (!review) return result;
-    const spans = new Map((result.spans || []).map(span => [span.index, span]));
-    for (const span of review.matches) spans.set(span.index, span);
-    return {...result, spans: [...spans.values()], forwardCue: review};
+  let result = locateTranscript(tracker, lines, currentIndex, event, script);
+  if (result.ignored || !event.words?.length) return result;
+  const recoveringCapture = tracker.captureRecovery?.index === currentIndex && event.endMs <= T.captureRecoveryMs;
+  if (!recoveringCapture && !Number.isInteger(result.index) &&
+    !['ambiguous_text', 'backward_support_required'].includes(result.reason)) {
+    const candidate = findFreshForwardCue(script, currentIndex, event, result.candidate);
+    if (candidate && applySemanticLocation(tracker, lines, candidate.index, candidate.speech, {prepare: false})) {
+      const provisional = provisionalLocation(tracker, script, currentIndex, candidate, candidate.speech, []);
+      tracker.progress = candidate.offset / candidate.length;
+      result = {index: candidate.index, status: 'corrected', reason: 'fresh_forward_cue',
+        candidate: {...candidate, locationOnly: true, provisionalLocation: provisional},
+        progress: tracker.progress, completed: false, spans: [],
+        evidence: {startMs: candidate.speech.startMs, endMs: candidate.speech.endMs},
+        message: '已依最新辨識文字接到目前字幕。'};
+    }
   }
-
-  // Consume the revision without setting a fence at the rejected destination.
-  const oldItem = items.get(event.itemId);
-  const item = trial.items.get(event.itemId);
-  if (trial.script !== previousScript || trial.streamId !== tracker.streamId) {
-    Object.assign(tracker, createTracker({ignoreBeforeMs: trial.ignoreBeforeMs, manualPositionIndex: trial.manualPositionIndex}),
-      {script: trial.script, streamId: trial.streamId});
-  }
-  tracker.latestStartMs = trial.latestStartMs;
-  tracker.latestOrder = trial.latestOrder;
-  if (item) tracker.items.set(event.itemId, {...item, maxIndex: oldItem?.maxIndex ?? null});
-  while (tracker.items.size > T.retainedItems) tracker.items.delete(tracker.items.keys().next().value);
-  if (review.action === 'hold') return {status: 'searching', reason: 'forward_cue_waiting',
-    spans: review.matches, forwardCue: review, message: '正在核對中間台詞與後續語音，暫時維持目前字幕。'};
-
-  const cue = review.cue;
-  const speech = {...event, text: cue.heard, startMs: cue.startMs, endMs: cue.endMs};
-  applySemanticLocation(tracker, lines, cue.index, speech, {prepare: false});
-  return {index: cue.index, status: 'advanced', reason: 'forward_intermediate_cue',
-    progress: cue.offset / cue.length, completed: cue.completed, spans: review.matches, forwardCue: review,
-    candidate: {index: cue.index, heard: cue.heard, length: cue.length, offset: cue.offset,
-      evidence: cue.heard.length, confidence: 1, speech, locationOnly: !cue.completed},
-    evidence: {startMs: cue.startMs, endMs: cue.endMs},
-    message: '已依語音時間先顯示中間台詞，繼續核對下一格。'};
+  const review = reviewForwardCue(script, currentIndex, result.index, event);
+  if (!review) return result;
+  const spans = new Map((result.spans || []).map(span => [span.index, span]));
+  for (const span of review.matches) spans.set(span.index, span);
+  return {...result, spans: [...spans.values()], forwardCue: review};
 }
 
 function followTranscript(tracker, lines, currentIndex, event) {
@@ -977,11 +959,6 @@ function followTranscript(tracker, lines, currentIndex, event) {
   tracker.shortOpenings = true;
   tracker.selectedStartIndex = selectedStartIndex;
   if (result.ignored) {
-    tracker.openingPlan = plan;
-    restoreOpeningPreparation(tracker);
-    return result;
-  }
-  if (result.reason === 'forward_cue_waiting') {
     tracker.openingPlan = plan;
     restoreOpeningPreparation(tracker);
     return result;

@@ -2,31 +2,56 @@ const {TEXT_SETTINGS: T} = require('./follow-settings');
 const {normalizeText} = require('./follow-text');
 const {wordWindows} = require('./word-evidence');
 
-// Use whole provider words. An ASR revision can contain the end of one cue
-// and the beginning of another, so its envelope is not a cue timestamp.
-function reviewForwardCue(script, from, to, event, candidate, audioMs = event.endMs) {
+function timedPhrases(event) {
+  return wordWindows(event, {maximumWords: 24, minimumCharacters: 3}).map(speech =>
+    ({speech, text: normalizeText(speech.text)}));
+}
+
+// A distinctive phrase at the end of the current revision can establish the
+// visible cue by itself. Older phrases in the same revision are not candidates.
+function findFreshForwardCue(script, from, event, hint) {
+  if (script.entries[from]?.source.music) return null;
+  const phrases = timedPhrases(event);
+  const latestEnd = phrases.at(-1)?.speech.endMs;
+  if (!Number.isFinite(latestEnd) ||
+    Math.max(event.endMs, event.audioMs ?? event.endMs) - latestEnd > T.forwardCueFreshMs) return null;
+  const minimumIndex = Math.max(0, from - T.nearbyBehind);
+  const nearby = script.entries.slice(minimumIndex, from + T.nearbyAhead + 1);
+  const barrier = nearby.findIndex((entry, offset) => offset + minimumIndex > from && entry.source.music);
+  const phrasesAtEnd = phrases.filter(({speech}) => speech.endMs === latestEnd)
+    .sort((a, b) => b.text.length - a.text.length);
+  for (const {text, speech} of phrasesAtEnd) {
+    const matches = nearby.flatMap((entry, offset) => entry.text.includes(text) ? [offset] : []);
+    if (matches.length !== 1) continue;
+    const [offset] = matches, index = minimumIndex + offset;
+    if (index <= from || (barrier >= 0 && offset >= barrier)) continue;
+    const entry = nearby[offset];
+    const close = index - from <= T.catchUpAhead;
+    const confirmedHint = event.isFinal && hint?.index === index && hint.confidence >= T.strongConfidence;
+    const minimum = close ? T.shortAnchorEvidence : confirmedHint ? T.relocationEvidence : T.forwardMinimumMatches;
+    if (text.length < minimum && (!close || text !== entry.text)) continue;
+    return {index, speech, heard: text, length: entry.length, offset: entry.text.indexOf(text) + text.length,
+      confidence: 1, evidence: text.length};
+  }
+  return null;
+}
+
+// Keep timed coverage of earlier cues for diagnostics. It never decides
+// whether those cues should be displayed or whether the target may advance.
+function reviewForwardCue(script, from, to, event) {
   if (!Number.isInteger(to) || to <= from + 1) return null;
-  const intermediate = [];
+  const phrases = timedPhrases(event);
+  const target = phrases.filter(({text}) => script.entries[to].text.includes(text))
+    .sort((a, b) => b.speech.endMs - a.speech.endMs || b.text.length - a.text.length)[0];
+  if (!target) return null;
+
+  const matches = [];
+  const crossed = script.entries.slice(from, to + 1);
   for (let index = from + 1; index < to; index++) {
     const entry = script.entries[index];
-    if (entry.text && !entry.source.music) intermediate.push(index);
-  }
-  if (!intermediate.length) return null;
-
-  const targetText = script.entries[to].text;
-  const windows = wordWindows(event, {minimumCharacters: 1}).map(speech =>
-    ({speech, text: normalizeText(speech.text)}));
-  if (!windows.length) return null;
-  const fromNearby = Math.max(0, from - T.nearbyBehind);
-  const nearby = script.entries.slice(fromNearby, Math.min(script.entries.length, Math.max(to, from) + T.nearbyAhead + 1));
-  const unique = (text, index) => !nearby.some((entry, offset) => fromNearby + offset !== index && entry.text.includes(text));
-  const strongTarget = windows.filter(({text}) => targetText.includes(text) && unique(text, to) &&
-    (text.length >= T.forwardMinimumMatches || (text === targetText && text.length >= 3)));
-  const matches = [];
-  for (const index of intermediate) {
-    const entry = script.entries[index];
-    const match = windows
-      .filter(({text}) => entry.text.includes(text) && unique(text, index) && (text.length >= 3 || text === entry.text))
+    if (!entry.text || entry.source.music) continue;
+    const match = phrases.filter(({text, speech}) => speech.endMs <= target.speech.startMs &&
+      entry.text.includes(text) && !crossed.some((other, offset) => offset + from !== index && other.text.includes(text)))
       .sort((a, b) => b.speech.endMs - a.speech.endMs || b.text.length - a.text.length)[0];
     if (!match) continue;
     const {speech, text} = match;
@@ -34,26 +59,7 @@ function reviewForwardCue(script, from, to, event, candidate, audioMs = event.en
       lastWordId: speech.lastWordId, heard: text, offset: entry.text.indexOf(text) + text.length,
       length: entry.length, coverage: text.length / entry.length, completed: text === entry.text});
   }
-  const latest = matches.reduce((a, b) => !a || b.endMs > a.endMs ? b : a, null);
-  const longJump = intermediate.length >= T.catchUpAhead;
-  const ordered = latest && windows.find(({speech, text}) => speech.startMs >= latest.endMs &&
-    targetText.startsWith(text) && text.length >= 3 && unique(text, to) && latest.index === intermediate.at(-1));
-  const target = strongTarget.filter(({speech, text}) => (!latest || speech.startMs >= latest.endMs) &&
-    (!longJump || text.length >= T.forwardMinimumMatches))
-    .sort((a, b) => b.speech.endMs - a.speech.endMs || b.text.length - a.text.length)[0] || ordered;
-  if (target) return {action: 'advance', targetIndex: to, matches, target: target.speech};
-
-  // A weak later opening is not enough to skip fresh intermediate speech.
-  // Avoid replaying that cue if its evidence is already old at decision time.
-  if (latest && Math.max(event.endMs, audioMs) - latest.endMs <= T.forwardCueFreshMs &&
-    (!longJump || latest.index === intermediate[0] || latest.completed && latest.heard.length >= T.forwardMinimumMatches)) {
-    return {action: 'intermediate', targetIndex: to, matches, cue: latest};
-  }
-  if (latest || longJump && !(candidate?.supportingIndex > from && candidate.supportingIndex < to &&
-    candidate.pathConfirmed && candidate.speech?.words?.length)) {
-    return {action: 'hold', targetIndex: to, matches};
-  }
-  return null;
+  return {action: 'advance', targetIndex: to, matches, target: target.speech};
 }
 
-module.exports = {reviewForwardCue};
+module.exports = {findFreshForwardCue, reviewForwardCue};

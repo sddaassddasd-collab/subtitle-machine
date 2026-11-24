@@ -317,7 +317,7 @@ test('weak nearby cue accepts a unique partial timed successor without waiting f
   assert.deepEqual(result.evidence, {startMs: 4500, endMs: 5500});
 });
 
-test('a timed cross-cue revision shows the intermediate cue before a weak later opening', () => {
+test('a timed cross-cue revision shows the latest accepted cue without displaying earlier speech', () => {
   const s = show(['前來應聘助理的人肯定會大排長龍的', '錄這個短視頻真的有用嗎',
     '當然現在年輕美麗又有才華的人都在看']);
   s.say('前來應聘助理的人可能會');
@@ -326,10 +326,9 @@ test('a timed cross-cue revision shows the intermediate cue before a weak later 
     words: [{word: '白露這個管影片真的', start: 1.1, end: 1.5},
       {word: '有用', start: 1.5, end: 1.75}, {word: '嗎', start: 1.75, end: 1.85},
       {word: '當然', start: 1.85, end: 2.1}]});
-  assert.equal(result.index, 1);
-  assert.equal(result.reason, 'forward_intermediate_cue');
-  assert.equal(result.evidence.endMs, 1850);
-  assert.equal(s.tracker.items.get('mixed').maxIndex, 1);
+  assert.equal(result.index, 2);
+  assert.equal(result.evidence.endMs, 2100);
+  assert.equal(s.tracker.items.get('mixed').maxIndex, 2);
   assert.equal(s.say('年輕美麗又有才華', {itemId: 'next', startMs: 2200, endMs: 3000}).index, 2);
 });
 
@@ -346,30 +345,22 @@ test('a timed batch already at the later cue preserves skipped speech without re
   assert.equal(result.spans.find(span => span.index === 1).endMs, 1400);
 });
 
-test('a stale intermediate match does not rewind the audience to expired speech', () => {
-  const s = show(['前來應聘助理的人肯定會大排長龍的', '錄這個短視頻真的有用嗎',
-    '當然現在年輕美麗又有才華的人都在看']);
-  s.say('前來應聘助理的人可能會');
-  const result = s.say('白露這個管影片真的有用嗎當然', {itemId: 'late',
-    startMs: 1100, endMs: 2100, audioMs: 3300, isFinal: true,
-    words: [{word: '白露這個管影片真的', start: 1.1, end: 1.5},
-      {word: '有用嗎', start: 1.5, end: 1.85}, {word: '當然', start: 1.85, end: 2.1}]});
-  assert.equal(result.reason, 'forward_cue_waiting');
-  assert.equal(s.index(), 0);
-  assert.equal(s.tracker.items.get('late').maxIndex, null);
-});
-
-test('a distant timed jump needs distinctive text or an ordered preceding cue', () => {
+test('forward recovery considers only a distinctive fresh target without preceding cue requirements', () => {
   const {prepareScript} = require('../src/auto-follow');
-  const {reviewForwardCue} = require('../src/forward-cue-evidence');
-  const script = prepareScript(['目前正在說的台詞', '第一個路口往左轉', '巷口有一家麵店',
-    '走過紅色的磚牆', '我在郵局等你', '我們到了可以看海的地方'].map(text => ({text})));
-  const review = (...words) => reviewForwardCue(script, 0, 5, {
+  const {findFreshForwardCue} = require('../src/forward-cue-evidence');
+  const lines = ['目前正在說的台詞', '第一個路口往左轉', '巷口有一家麵店',
+    '走過紅色的磚牆', '我在郵局等你', '我們到了可以看海的地方'].map(text => ({text}));
+  const script = prepareScript(lines);
+  const event = (...words) => ({
     text: words.join(''), startMs: 0, endMs: words.length * 250,
     words: words.map((word, i) => ({word, startMs: i * 250, endMs: (i + 1) * 250})),
   });
-  assert.equal(review('我們到了').action, 'hold');
-  assert.equal(review('我們到了可以看海').action, 'advance');
-  assert.equal(review('我在郵局等你', '我們到了').action, 'advance');
-  assert.equal(review('我們到了', '我在郵局等你').action, 'hold');
+  const long = event('我們到了可以看海');
+  assert.equal(findFreshForwardCue(script, 0, event('我們到了')), null);
+  assert.equal(findFreshForwardCue(script, 0, long).index, 5);
+  assert.equal(findFreshForwardCue(script, 0, {...long, audioMs: 4000}), null);
+  assert.equal(findFreshForwardCue(script, 0, event('我們到了可以看海', '我在郵局等你')).index, 4);
+  assert.equal(findFreshForwardCue(script, 0, {...event('我們到了可以'), isFinal: true}, {index: 5, confidence: .95}).index, 5);
+  assert.equal(findFreshForwardCue(prepareScript([...lines, {text: '我們到了可以看海的山坡'}]), 0, long), null);
+  assert.equal(findFreshForwardCue(prepareScript(lines.map((line, index) => ({...line, music: index === 3}))), 0, long), null);
 });

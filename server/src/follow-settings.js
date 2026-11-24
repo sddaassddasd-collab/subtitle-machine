@@ -16,7 +16,7 @@ const TEXT_SETTINGS = Object.freeze({
   contextBonus: 0.04, contextConfidence: 0.85, expectationBonus: 0.025,
   openingMinEvidence: 2, sequenceOpeningMinEvidence: 3, nearOpeningMaxEvidence: 12,
   triggerOpeningCharacters: 2, tailParticles: '嘛啊呀呢喔哦啦吧唷', tailParticleGapMs: 250,
-  forwardMinimumMatches: 8, forwardCueFreshMs: 1000, backwardSuffixEvidence: 8, pauseRecoveryAfterMs: 30000,
+  forwardMinimumMatches: 8, forwardCueFreshMs: 1800, backwardSuffixEvidence: 8, pauseRecoveryAfterMs: 30000,
   pauseRecoveryConfidence: .94, pauseRecoveryMatches: 8, provisionalLocationMs: 120000, provisionalCorrectionCoverage: .7,
   backwardSupportMs: 10000, backwardConfidence: .9, backwardEvidence: 4,
   supportedSuccessorConfidence: .86, supportedSuccessorMatches: 4,
