@@ -19,6 +19,7 @@ const performanceFollow = require('../src/performance-follow');
 const performanceLanguage = require('../src/performance-language');
 const captionMode = require('../src/caption-mode');
 const {CaptionPresentation} = require('../src/caption-presentation');
+const {observeShortCueSequence} = require('../src/short-cue-recovery');
 const {OnsetReview} = require('../src/onset-review');
 const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
 
@@ -38,7 +39,8 @@ function fixture(mode = 'auto') {
   const emissions = [];
   const context = vm.createContext({
     Date, crypto: require('node:crypto'), createTracker, prepareScript, normalizeText, followTranscript, followAudio,
-    advancePreparedOnset, localSupportCandidates, freshSpeech, reviewForwardCue, trackerSnapshot, ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
+    advancePreparedOnset, localSupportCandidates, freshSpeech, reviewForwardCue, trackerSnapshot, observeShortCueSequence,
+    ACOUSTIC_SETTINGS, FOLLOW_SETTINGS, SEMANTIC_SETTINGS,
     ...performanceLanguage, ...captionMode, ...performanceFollow, CaptionPresentation, OnsetReview, ShadowFollow,
     TRANSCRIPTION_SOURCE_LANGUAGES: performanceLanguage.SOURCE_LANGUAGES, console: { error() {} },
     AUTO_FOLLOW_STATUS: { IDLE: 'idle', LISTENING: 'listening', ADVANCED: 'advanced', SEARCHING: 'searching' },

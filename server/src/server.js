@@ -30,6 +30,7 @@ const {SOURCE_LIMIT: RECOGNITION_SOURCE_LIMIT, recognitionGuidance, normalizeRec
   extractRecognitionBrief} = require('./recognition-brief');
 const {THEATRE_DISCUSSION_CONTEXT, discussionContext} = require('./discussion-context');
 const {locateLiveScript: locateBackgroundScript, liveCandidates, textSupportCandidates} = require('./live-script');
+const {observeShortCueSequence} = require('./short-cue-recovery');
 const {correctScriptCaption, CAPTION_CORRECTION_SETTINGS} = require('./script-caption-correction');
 const {CaptionPresentation} = require('./caption-presentation');
 const {OnsetReview} = require('./onset-review');
@@ -9330,6 +9331,7 @@ function followHistoryClock(sessionId) {
 function createAutoFollowState(sessionId) {
   return {
     tracker: createTracker(),
+    shortCueSequence: {},
     shadow: new ShadowFollow({record: data => autoFollowHistory.event(sessionId, 'tracking_comparison', data)}),
     status: AUTO_FOLLOW_STATUS.IDLE,
     listening: false,
@@ -9608,7 +9610,7 @@ function applyPerformanceAction(session, action) {
     fromIndex: session.currentIndex, at: Date.now(), state: performance.publicState()});
   if (action.type === 'source') {
     recordOnsetReviewEvents(session.id, state.onsetReview.close('source_changed'));
-    if (action.source === 'script' && action.reason === 'script_reacquired') {
+    if (action.source === 'script' && action.reason === 'script_reacquired' && !action.returnEvidence?.shortCueSequence) {
       const entries = performanceCaptionEntries(performance.returnBuffer || [], transcriptionStreams.get(session.id));
       const held = state.captionDisplay.reacquired(action.index, entries, action.audioStartMs, action.audioEndMs, session.selectedCellId);
       if (held) autoFollowHistory.event(session.id, 'caption_handoff', {phase: 'waiting_for_next_cue', index: action.index,
@@ -9663,6 +9665,32 @@ function performanceTextMatch(state, lines, result, transcript, options) {
 
 function locateLiveScript(state, lines, transcript, options) {
   return locateBackgroundScript(state.performance, lines, transcript, options, state.tracker.script);
+}
+
+function recoverShortCueSequence(state, session, lines, result, event) {
+  if (result.ignored || state.performance.group) return result;
+  const live = session.automaticLive === true;
+  const currentIndex = session.currentIndex;
+  const search = live || !Number.isInteger(result.index) ||
+    (result.index === currentIndex && !result.completed &&
+      (result.candidate?.locationOnly || result.candidate?.confidence < FOLLOW_SETTINGS.text.strongConfidence));
+  const script = !live && state.tracker.script ? state.tracker.script
+    : prepareScript(lines, state.shortCueSequence.script || state.tracker.script);
+  const recovery = observeShortCueSequence(state.shortCueSequence, script, currentIndex, event, {
+    minimumMs: Math.max(state.tracker.ignoreBeforeMs, live ? state.performance.lastConfirmedEnd : -1),
+    search, mixed: session.mixedRecognition?.enabled === true,
+  });
+  const candidate = recovery.candidate;
+  if (!candidate || candidate.index < currentIndex || (!live && candidate.index === currentIndex) ||
+    (Number.isInteger(result.index) && result.index > currentIndex && result.index >= candidate.index)) {
+    return recovery.ambiguous && !Number.isInteger(result.index) ? {...result, ambiguousShortCues: true} : result;
+  }
+  if (!live && !applySemanticLocation(state.tracker, lines, candidate.index, candidate.speech, {prepare: false})) return result;
+  return {index: candidate.index, status: 'corrected', reason: 'short_cue_sequence',
+    candidate: {...candidate, locationOnly: true}, completed: false, spans: [],
+    searchWindow: result.searchWindow,
+    evidence: {startMs: candidate.speech.startMs, endMs: candidate.speech.endMs},
+    message: '已依連續短句及語音順序接到目前字幕。'};
 }
 
 function switchCaptionMode(session, mode, language, {stopStream = true} = {}) {
@@ -9939,6 +9967,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
   try {
     result = session.automaticLive ? locateLiveScript(state, followingLines, transcript, options)
       : followTranscript(state.tracker, followingLines, session.currentIndex, { ...options, text: transcript, audioMs });
+    result = recoverShortCueSequence(state, session, followingLines, result, {...options, text: transcript, audioMs});
   } catch (error) {
     autoFollowHistory.revision(sessionId, transcript, options, {receivedAt, before,
       after: trackerSnapshot(state.tracker, session.currentIndex), reason: 'alignment_error', error: String(error?.message || '').slice(0, 300)});
@@ -9977,6 +10006,7 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
       wordEvidence: result.candidate.wordEvidence === true, shortRecovery: result.candidate.shortRecovery === true,
       locationOnly: result.candidate.locationOnly === true, wordWitnesses: result.candidate.wordWitnesses,
       shortOpening: result.candidate.shortOpening === true,
+      shortCueSequence: result.candidate.shortCueSequence === true,
       pathSteps: result.candidate.pathSteps || 0} : null});
   if (result.ignored) {
     autoFollowHistory.diagnostic(sessionId, 'text', 'ignored_result', {message: '過期、重複或不適用的文字結果未改變字幕'});
@@ -9987,7 +10017,8 @@ function handleAutoFollowTranscript(sessionId, transcript, options = {}) {
     {index: result.index, candidate: result.candidate});
   const wasLive = session.automaticLive === true;
   if (result.shortOpening) performance.opening(result.index, result.shortOpening.startMs, receivedAt);
-  const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs},
+  const performanceAction = performance.enabled ? performance.observe({...options, text: transcript, audioMs,
+    ambiguousShortCues: result.ambiguousShortCues === true},
     performanceTextMatch(state, followingLines, result, transcript, options), receivedAt) : null;
   recordFallbackDecision(sessionId, performance, receivedAt);
   applyPerformanceAction(session, performanceAction);

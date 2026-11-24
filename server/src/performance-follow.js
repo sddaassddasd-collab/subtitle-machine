@@ -1,6 +1,7 @@
 const {normalizeText} = require('./follow-text');
 const {freshSpeech} = require('./word-evidence');
 const {preservedSpeech, returnMatch} = require('./return-evidence');
+const {SHORT_CUE_SETTINGS} = require('./short-cue-recovery');
 
 const PERFORMANCE_SETTINGS = Object.freeze({version: 10, mismatchMs: 4500, mismatchAudioMs: 3000,
   minimumItems: 2, minimumCharacters: 8, minimumSpeechConfidence: .35,
@@ -146,7 +147,7 @@ class PerformanceFollower {
   observe(event, match, now = Date.now()) {
     const speech = this.speech(event, now);
     if (this.source === 'live') {
-      match = returnMatch(this.stableMatches, event, match, now, PERFORMANCE_SETTINGS);
+      if (!match?.shortCueSequence) match = returnMatch(this.stableMatches, event, match, now, PERFORMANCE_SETTINGS);
       this.returnWitnesses = this.returnWitnesses.filter(w => w.itemId !== event.itemId || preservedSpeech(event, w));
     }
     if (match && Number.isInteger(match.index)) {
@@ -174,7 +175,7 @@ class PerformanceFollower {
       m.semanticReserved = true; m.semanticUntil = this.semanticRequest.until;
     }
     if (speech.endMs <= m.endMs && !m.items.has(speech.itemId)) return null;
-    m.items.set(speech.itemId, speech);
+    m.items.set(speech.itemId, {...speech, ambiguousShortCues: event.ambiguousShortCues === true});
     // Revisions replace evidence, never count as an additional utterance.
     while (m.items.size > 12) m.items.delete(m.items.keys().next().value);
     m.startMs = Math.min(...[...m.items.values()].map(x => x.startMs));
@@ -195,7 +196,8 @@ class PerformanceFollower {
     const elapsedMs = now - m.at, speechMs = m.endMs - m.startMs;
     const longItem = items === 1 && characters >= PERFORMANCE_SETTINGS.longItemCharacters &&
       speechMs >= PERFORMANCE_SETTINGS.longItemMs && elapsedMs >= PERFORMANCE_SETTINGS.longItemMs;
-    const reason = items < PERFORMANCE_SETTINGS.minimumItems && !longItem ? 'needs_distinct_speech'
+    const timedShortCues = parts.at(-1)?.ambiguousShortCues;
+    const reason = items < PERFORMANCE_SETTINGS.minimumItems && !longItem && !timedShortCues ? 'needs_distinct_speech'
       : characters < PERFORMANCE_SETTINGS.minimumCharacters ? 'needs_more_characters'
         : elapsedMs < PERFORMANCE_SETTINGS.mismatchMs ? 'mismatch_hold'
           : speechMs < PERFORMANCE_SETTINGS.mismatchAudioMs ? 'needs_more_audio'
@@ -221,13 +223,15 @@ class PerformanceFollower {
     }
     if (this.source === 'live') {
       const window = this.searchWindow(now), origin = window.origin;
-      const reject = index < window.from || index > window.to ? 'outside_search_window'
+      const to = match.shortCueSequence
+        ? Math.max(window.to, (this.originIndex ?? window.origin) + SHORT_CUE_SETTINGS.ahead) : window.to;
+      const reject = index < window.from || index > to ? 'outside_search_window'
         : endMs <= this.lastConfirmedEnd ? 'already_confirmed_audio'
           : index < (this.backgroundConfirmed?.index ?? origin) ? 'behind_background_position'
             : this.lines.slice(Math.min(origin, index), Math.max(origin, index) + 1).some(l => l.music) ? 'music_barrier' : null;
       if (reject) { this.returnDecision = {reason: reject, index, startMs, endMs}; return null; }
       this.backgroundIndex = index;
-      const strong = match.semantic === true || (!match.phonetic && match.confidence >= PERFORMANCE_SETTINGS.returnConfidence &&
+      const strong = match.shortCueSequence === true || match.semantic === true || (!match.phonetic && match.confidence >= PERFORMANCE_SETTINGS.returnConfidence &&
         match.evidence >= PERFORMANCE_SETTINGS.returnCharacters && match.margin >= PERFORMANCE_SETTINGS.returnMargin);
       const text = normalizeText(match.speech?.text || event.text), stableAt = match.stableAt ?? now;
       const nearEnding = Number.isFinite(match.offset) && Number.isFinite(match.length) && match.offset >= match.length - 1;
@@ -249,14 +253,15 @@ class PerformanceFollower {
         !this.lines.slice(previous.index, index + 1).some(l => l.music || l.type === 'direction');
       const supported = previous && (nearbySupported || (match.confidence >= .8 && previous.confidence >= .8 && match.evidence >= 4 && match.margin >= .07) ||
         (literal && steps >= PERFORMANCE_SETTINGS.weakReturnSteps));
-      const settled = boundarySettled || Boolean(supported && match.stablePrefix);
+      const settled = match.shortCueSequence === true || boundarySettled || Boolean(supported && match.stablePrefix);
       if (settled && (strong || supported)) this.backgroundConfirmed = {index, startMs, endMs, at: now};
       this.returnDecision = {reason: this.lock === 'live' ? 'operator_live_lock' : !settled ? 'waiting_for_stable_speech'
         : !strong && !supported ? 'needs_independent_support'
           : !strong && now - this.switchedAt < PERFORMANCE_SETTINGS.switchHoldMs ? 'switch_hold' : 'script_reacquired', index, strong, supported: Boolean(supported),
         confidence: match.confidence, evidence: match.evidence, margin: match.margin, startMs, endMs,
         supportingIndex: previous?.index ?? null, pathSteps: steps, retainedPhrase: match.retained === true,
-        stablePrefix: match.stablePrefix === true, nearbySupported: Boolean(nearbySupported)};
+        stablePrefix: match.stablePrefix === true, nearbySupported: Boolean(nearbySupported),
+        ...(match.shortCueSequence ? {shortCueSequence: true, pathSteps: match.pathSteps} : {})};
       if (this.lock !== 'live' && settled && (strong || (supported && now - this.switchedAt >= PERFORMANCE_SETTINGS.switchHoldMs))) {
         const returnEvidence = this.returnDecision;
         const action = this.transition('script', 'script_reacquired', now);
@@ -276,7 +281,7 @@ class PerformanceFollower {
       }
       return null;
     }
-    const reliable = !match.provisionalLocation && (match.semantic || match.scriptVerified || match.phraseAnchored || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
+    const reliable = !match.provisionalLocation && (match.shortCueSequence || match.semantic || match.scriptVerified || match.phraseAnchored || (match.confidence >= .86 && match.evidence >= 4 && match.margin >= .07) ||
       (match.pathConfirmed && match.evidence >= 4));
     if (!reliable || endMs <= this.lastConfirmedEnd) return null;
     this.recognitionReliable = true;
