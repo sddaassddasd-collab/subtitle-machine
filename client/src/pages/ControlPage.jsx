@@ -4553,6 +4553,42 @@ const ControlPage = () => {
   const canMoveToNextLine =
     lines.length > 0 && liveCurrentIndex < lines.length - 1
 
+  const followSettingsButton = (
+    <button type="button" className="subtle-button" onClick={() => setActivePanel(isLiveOutput && !sessionMeta?.automaticLive ? 'live' : 'follow')}>
+      {isLiveOutput && !sessionMeta?.automaticLive ? '即時字幕設定' : '跟戲設定'}
+    </button>
+  )
+  const editHistoryControls = (
+    <div className="script-history-controls" role="group" aria-label="編輯紀錄">
+      <button
+        type="button"
+        className="subtle-button"
+        onClick={handleUndo}
+        disabled={!historyState.canUndo}
+        title="復原：⌘ Z（Mac）／Ctrl Z（Windows）"
+        aria-keyshortcuts="Meta+Z Control+Z"
+      >
+        ↶ 復原
+      </button>
+      <button
+        type="button"
+        className="subtle-button"
+        onClick={handleRedo}
+        disabled={!historyState.canRedo}
+        title="重做：⌘ Shift Z（Mac）／Ctrl Shift Z 或 Ctrl Y（Windows）"
+        aria-keyshortcuts="Meta+Shift+Z Control+Shift+Z Control+Y"
+      >
+        ↷ 重做
+      </button>
+    </div>
+  )
+  const followLanguageDetails = (
+    <>
+      <span>{isLiveOutput ? '座談語言' : '演出語言'}：{transcription.sourceLanguages.find(language => language.code === transcription.language)?.name || '中文'}</span>
+      {!isLiveOutput && <span>跟戲劇本：{transcription.followingScript?.languageName || '尚未指定'}</span>}
+    </>
+  )
+
   if (!authReady) {
     return (
       <div className="page">
@@ -5568,18 +5604,12 @@ const ControlPage = () => {
                   ? `CUE ${liveCurrentIndex + 1} / ${lines.length}`
                   : '尚未載入'}
               </span>
-            </div>
-            <div className="script-header-meta">
-              {editingModeEnabled && editingModeLabel && (
-                <small className="script-edit-mode-note">{editingModeLabel}</small>
+              {editingModeEnabled && (
+                <small className="script-edit-mode-note" title={editingModeLabel || undefined}>編輯中・暫停跟隨</small>
               )}
-              {comparisonLanguagePreviewNote && (
-                <small className="script-compare-note">{comparisonLanguagePreviewNote}</small>
-              )}
-              <small className="script-music-hint">{musicSelectionHint}</small>
             </div>
           </div>
-          <div className="workspace-follow-summary">
+          <div className={`workspace-follow-summary${editingModeEnabled ? ' script-edit-toolbar' : ''}`}>
             <label className="script-compare-select" htmlFor="comparison-language-select" hidden={isLiveOutput && !editingModeEnabled}>
               <span>平行檢視</span>
               <select
@@ -5600,40 +5630,38 @@ const ControlPage = () => {
                 ))}
               </select>
             </label>
-            <span>{isLiveOutput ? '座談語言' : '演出語言'}：{transcription.sourceLanguages.find(language => language.code === transcription.language)?.name || '中文'}</span>
-            {!isLiveOutput && <span>跟戲劇本：{transcription.followingScript?.languageName || '尚未指定'}</span>}
-            <button type="button" className="subtle-button" onClick={() => setActivePanel(isLiveOutput && !sessionMeta?.automaticLive ? 'live' : 'follow')}>{isLiveOutput && !sessionMeta?.automaticLive ? '即時字幕設定' : '跟戲設定'}</button>
-          </div>
-          <div className="script-toolbar" hidden={!editingModeEnabled}>
-
-
-            <div className="script-history-controls" role="group" aria-label="編輯紀錄">
-              <button
-                type="button"
-                className="subtle-button"
-                onClick={handleUndo}
-                disabled={!historyState.canUndo}
-                title="復原：⌘ Z（Mac）／Ctrl Z（Windows）"
-                aria-keyshortcuts="Meta+Z Control+Z"
-              >
-                ↶ 復原
-              </button>
-              <button
-                type="button"
-                className="subtle-button"
-                onClick={handleRedo}
-                disabled={!historyState.canRedo}
-                title="重做：⌘ Shift Z（Mac）／Ctrl Shift Z 或 Ctrl Y（Windows）"
-                aria-keyshortcuts="Meta+Shift+Z Control+Shift+Z Control+Y"
-              >
-                ↷ 重做
-              </button>
-            </div>
-            <small className="script-edit-shortcuts">Shift＋Enter 同格換行 · Enter 拆格</small>
-            <button type="button" className="subtle-button" onClick={handleAddLine}>
-              新增字幕格
-            </button>
-
+            {editingModeEnabled ? (
+              <>
+                <div className="script-edit-primary-actions">
+                  {followSettingsButton}
+                  {editHistoryControls}
+                </div>
+                <details className="script-edit-menu">
+                  <summary className="subtle-button">
+                    <span className="script-edit-shortcuts-label">快捷鍵</span>
+                    <span className="script-edit-more-label">更多</span>
+                  </summary>
+                  <div className="script-edit-menu-panel">
+                    <div className="script-edit-overflow-actions">
+                      {followSettingsButton}
+                      {editHistoryControls}
+                    </div>
+                    <div>Shift＋Enter 同格換行 · Enter 拆格</div>
+                    <div>{musicSelectionHint}</div>
+                    <div className="script-edit-language-details">{followLanguageDetails}</div>
+                    {comparisonLanguagePreviewNote && <div>{comparisonLanguagePreviewNote}</div>}
+                  </div>
+                </details>
+                <button type="button" className="subtle-button" onClick={handleAddLine}>
+                  新增字幕格
+                </button>
+              </>
+            ) : (
+              <>
+                {followLanguageDetails}
+                {followSettingsButton}
+              </>
+            )}
           </div>
         </header>
 
