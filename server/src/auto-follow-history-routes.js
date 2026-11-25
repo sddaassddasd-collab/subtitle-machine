@@ -16,6 +16,8 @@ function previewEvent(event) {
   const {id, at, type, index, source, status, mode, message, text, reason, note, acoustic, workerTiming, samples} = event;
   return {id, at, type, index, source, status, mode, message, text, reason, note, acoustic, workerTiming,
     sampleCount: samples?.length ?? event.sampleCount,
+    ...(type === 'caption_correction' && typeof event.original === 'string' && typeof event.corrected === 'string'
+      ? {original: event.original.slice(0, 300), corrected: event.corrected.slice(0, 300)} : {}),
     ...(type === 'tracking_comparison' && event.display?.manualBackground ? {manualComparison: {
       displayIndex: event.display.index, candidateIndex: event.locator?.candidate?.index,
       locatedIndex: event.locator?.accepted ? event.locator.index : null,

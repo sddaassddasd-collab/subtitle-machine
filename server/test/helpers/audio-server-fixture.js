@@ -7,7 +7,7 @@ const {EventEmitter} = require('node:events');
 // Load the whole application, including its real authorization, normalization,
 // Socket.IO handlers and provider adapters. Only startup is replaced: tests must
 // never load the operator's store, listen on a port or contact an ASR service.
-module.exports = function createAudioServerFixture({ lineCount = 1000, texts, allowCueChanges = false, fakeDeepgram = false } = {}) {
+module.exports = function createAudioServerFixture({ lineCount = 1000, texts, allowCueChanges = false, fakeDeepgram = false, fakeCorrection } = {}) {
   const filename = require.resolve('../../src/server');
   const source = fs.readFileSync(filename, 'utf8');
   assert.match(source, /startServer\(\);\s*$/);
@@ -23,7 +23,7 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
     }
     const requireModule = loaded.require.bind(loaded);
     loaded.require = name => name === 'ws' ? FakeWebSocket
-      : name === 'openai' ? {OpenAI: class {}} : requireModule(name);
+      : name === 'openai' ? {OpenAI: class { responses = {create: fakeCorrection}; }} : requireModule(name);
   }
   loaded._compile(source.replace(/startServer\(\);\s*$/, `
     module.exports = function (lineCount, texts, allowCueChanges) {
@@ -115,10 +115,10 @@ module.exports = function createAudioServerFixture({ lineCount = 1000, texts, al
           return () => {socket.emit = emit; for (const timer of timers) clearTimeout(timer);};
         },
         currentStream: () => transcriptionStreams.get(session.id),
-        startProvider: (clientInfo = {}) => {
+        startProvider: (clientInfo = {}, correctionApiKey) => {
           autoFollowHistory.start = async () => {};
           startDeepgramTranscription({sessionId: session.id, socketId: 'load-socket',
-            apiKey: 'local-test-no-paid-request', language: 'zh-TW', clientInfo});
+            apiKey: 'local-test-no-paid-request', language: 'zh-TW', clientInfo, correctionApiKey});
           const active = transcriptionStreams.get(session.id);
           active.socket.readyState = WebSocket.OPEN;
           active.socket.emit('open');

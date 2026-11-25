@@ -78,11 +78,68 @@ test('saved program hints reach both capture modes and the ordinary correction p
   let prompt;
   const client = {responses: {create: async request => {
     prompt = request.input.at(-1).content;
-    return {output_text: '陳巧蓉'};
+    return {output_text: JSON.stringify({edits: [{from: '陳巧容', to: '陳巧蓉'}]})};
   }}};
-  await f.correctTranscriptionLine({client, text: '陳巧容', language: 'zh-TW',
+  const corrected = await f.correctTranscriptionLine({client, text: '現在請陳巧容上台', language: 'zh-TW',
     recognitionBrief: f.currentStream().recognitionBrief});
+  assert.deepEqual(corrected, {text: '現在請陳巧蓉上台', reason: 'approved_homophone'});
   assert.match(prompt, /陳巧蓉是編劇/);
   assert.match(prompt, /匠木浮城/);
   assert.ok(!prompt.includes(brief.source));
+});
+
+test('ordinary final caption correction preserves the original when the model tries to rewrite it', async t => {
+  const f = fixture({lineCount: 1});
+  t.after(() => f.dispose());
+  const text = '現在請陳巧蓉分享未來三個月的工作';
+  const recognitionBrief = {terms: ['陳巧蓉', '陳巧容', '蔚來', '四個月', '黃致健']};
+  const input = {text, recognitionBrief, language: 'zh-TW'};
+  const cases = [
+    ['今天由其他人宣布全新演出內容', 'invalid_response'],
+    [JSON.stringify({edits: [{from: '陳巧蓉', to: '黃致健'}]}), 'source_already_approved'],
+    [JSON.stringify({edits: [{from: '陳巧蓉', to: '陳巧容'}]}), 'source_already_approved'],
+    [JSON.stringify({edits: [{from: '未來', to: '蔚來'}]}), 'protected_character'],
+    [JSON.stringify({edits: [{from: '三個月', to: '四個月'}]}), 'protected_character'],
+    [JSON.stringify({edits: [{from: '工作', to: '攻作'}]}), 'target_not_approved'],
+  ];
+  for (const [output_text, reason] of cases) {
+    const client = {responses: {create: async () => ({output_text})}};
+    assert.deepEqual(await f.correctTranscriptionLine({...input, client}), {text, reason});
+  }
+  const ambiguous = {responses: {create: async () => ({
+    output_text: JSON.stringify({edits: [{from: '陳巧榕', to: '陳巧蓉'}]}),
+  })}};
+  const ambiguousText = text.replace('陳巧蓉', '陳巧榕');
+  assert.deepEqual(await f.correctTranscriptionLine({...input, text: ambiguousText, client: ambiguous}),
+    {text: ambiguousText, reason: 'ambiguous_approved_term'});
+  const client = {responses: {create: async () => assert.fail('Unsupported languages must skip Mandarin correction')}};
+  assert.deepEqual(await f.correctTranscriptionLine({...input, client, language: 'multi'}), {text, reason: 'skipped'});
+});
+
+test('Deepgram final captions reject rewrites and audit accepted edits without changing recognition preview', async t => {
+  const outcomes = ['這是整句改寫後的文字', JSON.stringify({edits: [{from: '陳巧容', to: '陳巧蓉'}]})];
+  const f = fixture({lineCount: 1, fakeDeepgram: true,
+    fakeCorrection: async () => ({output_text: outcomes.shift()})});
+  t.after(() => f.dispose());
+  f.session.recognitionBrief = {terms: ['陳巧蓉']};
+  const events = [];
+  f.history.event = (_sessionId, type, data) => { if (type === 'caption_correction') events.push(data); };
+  const stream = f.startProvider({}, 'fixture-only');
+  const sendFinal = (start, transcript) => stream.socket.emit('message', JSON.stringify({
+    type: 'Results', start, duration: 1, is_final: true, speech_final: true,
+    channel: {alternatives: [{transcript, words: []}]},
+  }));
+  sendFinal(0, '我們今天一起看戲');
+  await stream.correctionChain;
+  assert.equal(stream.completedFragments[0].text, '我們今天一起看戲');
+
+  sendFinal(2, '接下來請陳巧容上臺');
+  await stream.correctionChain;
+  assert.equal(stream.completedFragments[1].text, '接下來請陳巧蓉上臺');
+  assert.equal(stream.completedFragments[1].rawTranscript, '接下來請陳巧容上臺');
+  assert.equal(stream.recognitionPreview.text, '接下來請陳巧容上臺');
+  assert.deepEqual(events.map(({status, reason, original, corrected}) => [status, reason, original, corrected]), [
+    ['rejected', 'invalid_response', '我們今天一起看戲', '我們今天一起看戲'],
+    ['applied', 'approved_homophone', '接下來請陳巧容上臺', '接下來請陳巧蓉上臺'],
+  ]);
 });

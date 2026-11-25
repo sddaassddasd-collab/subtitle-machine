@@ -55,9 +55,10 @@ test('OpenAI prompt, correction and translation receive theatre context and the 
   const prompts = [];
   const client = {responses: {create: async request => {
     prompts.push(request.input.at(-1).content);
-    return {output_text: '謝幕'};
+    return {output_text: JSON.stringify({edits: []})};
   }}};
-  await f.correctTranscriptionLine({client, text: '謝幕', language: 'zh-TW', transcriptionContext: context});
+  await f.correctTranscriptionLine({client, text: '謝幕', language: 'zh-TW', transcriptionContext: context,
+    recognitionBrief: {terms: ['謝幕']}});
   await f.translateLiveTranscriptionLine({client, text: '謝幕', sourceLanguage: 'zh-TW', targetLanguage: 'en', transcriptionContext: context});
   assert.equal(prompts.length, 2);
   for (const prompt of prompts) {
