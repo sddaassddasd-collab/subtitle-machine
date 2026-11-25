@@ -1064,10 +1064,11 @@ const ControlPage = () => {
     repeatTimer: null,
   })
 
-  const requestCueScroll = useCallback((lineId) => {
+  const requestCueScroll = useCallback((lineId, editing = false) => {
     if (!lineId) return
     setCueScrollRequest((previous) => ({
       lineId,
+      editing,
       revision: (previous?.revision || 0) + 1,
     }))
   }, [])
@@ -1814,7 +1815,7 @@ const ControlPage = () => {
   }, [clearTranscriptionContextSaveTimer, sessionId])
 
   useLayoutEffect(() => {
-    if (!cueScrollRequest || editingModeEnabledRef.current) return
+    if (!cueScrollRequest || cueScrollRequest.editing !== editingModeEnabledRef.current) return
     const targetIndex = linesRef.current.findIndex(
       (line) => line?.id === cueScrollRequest.lineId,
     )
@@ -2665,12 +2666,14 @@ const ControlPage = () => {
   const handleEditingModeChange = (event) => {
     clearPendingLineClick()
     const nextEnabled = event.target.checked
+    const index = liveCurrentIndexRef.current
+    const lineId = linesRef.current[index]?.id
+    editingModeEnabledRef.current = nextEnabled
     setEditingModeEnabled(nextEnabled)
-    if (!nextEnabled) {
-      setEditingCell(null)
-      setCurrentIndex(liveCurrentIndexRef.current)
-      requestCueScroll(linesRef.current[liveCurrentIndexRef.current]?.id)
-    }
+    if (!nextEnabled) setEditingCell(null)
+    if (nextEnabled) lineInsertionAnchorIdRef.current = lineId || null
+    setCurrentIndex(index)
+    requestCueScroll(lineId, nextEnabled)
   }
 
   const handleOpenRoleEditor = (event, index) => {
@@ -2837,13 +2840,17 @@ const ControlPage = () => {
   }
 
   const handleLineTextDoubleClick = (event, index, languageId) => {
-    setEditingModeEnabled(true)
     event.stopPropagation()
     clearPendingLineClick()
     setRoleEditor(null)
     const lineId = lines[index]?.id
     if (!lineId) return
-    if (editingModeEnabledRef.current) setCurrentIndex(index)
+    if (!editingModeEnabledRef.current) {
+      editingModeEnabledRef.current = true
+      setEditingModeEnabled(true)
+      requestCueScroll(lineId, true)
+    }
+    setCurrentIndex(index)
     lineInsertionAnchorIdRef.current = lineId
     setEditingCell({
       index,
